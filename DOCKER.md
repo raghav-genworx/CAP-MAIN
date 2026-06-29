@@ -30,15 +30,15 @@ Open the frontend at http://localhost:5173.
 ## Configuration
 
 The stack runs with local development defaults. Root `.env` values control
-shared infrastructure, published ports, the common internal-service token, and
-frontend API build arguments. Each backend also loads its own `.env` file; Compose
-overrides host-only URLs with Docker network names where required. Core-only
-Groq and Brevo credentials belong in
+shared infrastructure, published ports, and the common internal-service token.
+Each backend also loads its own `.env` file; Compose overrides host-only URLs
+with Docker network names where required. Core-only Groq and Brevo credentials belong in
 `core-assessment-platform-service/.env`. Do not commit populated `.env` files.
 
 Firebase `VITE_*` values belong in `frontend/.env`. Compose supplies that file
 to the Vite build through a BuildKit secret, so it is not copied into an image
-layer.
+layer. Docker builds always use same-origin `/api/core`, `/api/execution`, and
+`/api/evaluation` routes, which Nginx proxies to the backend service network.
 
 The frontend API URLs are baked into the production Vite build, so rebuild the frontend container after changing any `VITE_*` value:
 

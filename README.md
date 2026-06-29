@@ -29,10 +29,10 @@ docker compose up --build
 ```
 
 The repository root contains the only Compose entry point. Root `.env` values
-control shared infrastructure, published ports, shared tokens, and frontend
-API build arguments. Each application keeps its standalone settings in its own
-ignored `.env` file. The frontend build reads Firebase configuration from
-`frontend/.env` through a Docker build secret.
+control shared infrastructure, published ports, and shared tokens. Each
+application keeps its standalone settings in its own ignored `.env` file. The
+frontend build uses same-origin `/api/*` routes and reads Firebase configuration
+from `frontend/.env` through a Docker build secret.
 
 The core and evaluation schemas are upgraded by one-shot migration services
 before either API becomes ready. Both jobs also reject model/schema drift.

@@ -245,10 +245,6 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        VITE_CORE_API_BASE_URL: ${VITE_CORE_API_BASE_URL:-/api/core}
-        VITE_CODE_EXECUTION_API_BASE_URL: ${VITE_CODE_EXECUTION_API_BASE_URL:-/api/execution}
-        VITE_CODE_EVALUATION_API_BASE_URL: ${VITE_CODE_EVALUATION_API_BASE_URL:-/api/evaluation}
       secrets:
         - frontend_env
     restart: unless-stopped
