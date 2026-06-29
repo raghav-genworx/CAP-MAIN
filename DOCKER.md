@@ -38,7 +38,15 @@ with Docker network names where required. Core-only Groq and Brevo credentials b
 Firebase `VITE_*` values belong in `frontend/.env`. Compose supplies that file
 to the Vite build through a BuildKit secret, so it is not copied into an image
 layer. Docker builds always use same-origin `/api/core`, `/api/execution`, and
-`/api/evaluation` routes, which Nginx proxies to the backend service network.
+`/api/evaluation` routes. Nginx sends all three route families to the API
+gateway, which authorizes the caller before forwarding to the internal service
+network.
+
+Recruiter requests require a valid Firebase bearer token with an active
+platform role. Candidate portal requests require a signed candidate session
+token after the public invite verification and start calls. The gateway removes
+browser-supplied internal-service headers and injects the trusted shared token
+only for execution and evaluation services.
 
 The frontend API URLs are baked into the production Vite build, so rebuild the frontend container after changing any `VITE_*` value:
 

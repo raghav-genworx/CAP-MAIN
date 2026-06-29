@@ -25,3 +25,17 @@ class UpstreamServiceUnavailableError(COEApplicationError):
             message=f"Upstream service unavailable: {service_name}",
             status_code=503,
         )
+
+
+class GatewayAuthenticationError(COEApplicationError):
+    """Raised when gateway authentication fails."""
+
+    def __init__(self, message: str = "Authentication required") -> None:
+        super().__init__(message=message, status_code=401)
+
+
+class GatewayAuthorizationError(COEApplicationError):
+    """Raised when a verified identity cannot access a gateway route."""
+
+    def __init__(self, message: str = "Not authorized") -> None:
+        super().__init__(message=message, status_code=403)

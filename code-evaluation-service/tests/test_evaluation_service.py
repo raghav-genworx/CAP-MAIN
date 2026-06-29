@@ -97,6 +97,83 @@ def _request(
 
 
 class EvaluationServiceTest(unittest.TestCase):
+    def test_uses_ai_evaluator_when_request_has_no_quality_signal(self) -> None:
+        class StubEvaluator:
+            def evaluate(
+                self, *, language: str, source_code: str
+            ) -> AICodeQualitySignal:
+                self.language = language
+                self.source_code = source_code
+                return AICodeQualitySignal(
+                    score=73,
+                    approach="AI-reviewed approach.",
+                    time_complexity="O(n)",
+                    space_complexity="O(1)",
+                    readability="Clear.",
+                    maintainability="Maintainable.",
+                    strengths=["Focused"],
+                    weaknesses=[],
+                    improvements=[],
+                )
+
+        evaluator = StubEvaluator()
+        with TemporaryDirectory() as tmpdir:
+            service = EvaluationService(
+                _repository(tmpdir),
+                ReportPdfService(f"{tmpdir}/reports"),
+                code_quality_evaluator=evaluator,
+            )
+            request = _request("ca_ai_1", "AI Candidate", 4, 10).model_copy(
+                update={"ai_quality": None}
+            )
+
+            job = service.create_job(request)
+
+            self.assertEqual(job.result.scores.ai_score, 73)
+            self.assertEqual(job.result.scores.final_score, 94.6)
+            self.assertEqual(evaluator.language, "Python 3")
+            self.assertIn("def solve", evaluator.source_code)
+
+    def test_falls_back_to_heuristic_when_ai_evaluator_fails(self) -> None:
+        class FailingEvaluator:
+            def evaluate(
+                self, *, language: str, source_code: str
+            ) -> AICodeQualitySignal:
+                raise RuntimeError("Groq unavailable")
+
+        with TemporaryDirectory() as tmpdir:
+            service = EvaluationService(
+                _repository(tmpdir),
+                ReportPdfService(f"{tmpdir}/reports"),
+                code_quality_evaluator=FailingEvaluator(),
+            )
+            request = _request("ca_ai_2", "Fallback Candidate", 4, 10).model_copy(
+                update={"ai_quality": None}
+            )
+
+            job = service.create_job(request)
+
+            self.assertEqual(job.status, EvaluationJobStatus.COMPLETED)
+            self.assertIn("heuristic", job.result.ai_quality.weaknesses[0])
+
+    def test_request_quality_signal_takes_priority_over_ai_evaluator(self) -> None:
+        class UnexpectedEvaluator:
+            def evaluate(
+                self, *, language: str, source_code: str
+            ) -> AICodeQualitySignal:
+                raise AssertionError("Evaluator should not be called")
+
+        with TemporaryDirectory() as tmpdir:
+            service = EvaluationService(
+                _repository(tmpdir),
+                ReportPdfService(f"{tmpdir}/reports"),
+                code_quality_evaluator=UnexpectedEvaluator(),
+            )
+
+            job = service.create_job(_request("ca_ai_3", "Override Candidate", 4, 88))
+
+            self.assertEqual(job.result.scores.ai_score, 88)
+
     def test_health_returns_503_when_database_is_unavailable(self) -> None:
         app = create_app()
         app.dependency_overrides[settings_dependency] = lambda: Settings(

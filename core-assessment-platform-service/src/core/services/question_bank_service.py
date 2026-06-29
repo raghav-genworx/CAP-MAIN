@@ -37,6 +37,8 @@ from schemas.question_bank import (
     QuestionBulkImportRowError,
     QuestionCreateRequest,
     QuestionCreationMode,
+    QuestionDraftRefinementRequest,
+    QuestionDraftRefinementResponse,
     QuestionDraftValidationRequest,
     QuestionDraftValidationResponse,
     QuestionGroupCreateRequest,
@@ -514,6 +516,30 @@ class QuestionBankService:
         )
         return QuestionDraftValidationResponse(validation_report=report)
 
+    def refine_draft_test_cases(
+        self,
+        recruiter_uid: str,
+        request: QuestionDraftRefinementRequest,
+    ) -> QuestionDraftRefinementResponse:
+        """Repair existing testcase outputs using execution and semantic review."""
+
+        return self._question_generation_workflow.refine_test_cases(
+            recruiter_uid,
+            request.draft,
+        )
+
+    def refine_draft_solution(
+        self,
+        recruiter_uid: str,
+        request: QuestionDraftRefinementRequest,
+    ) -> QuestionDraftRefinementResponse:
+        """Repair existing source using the problem contract and failure evidence."""
+
+        return self._question_generation_workflow.refine_solution(
+            recruiter_uid,
+            request.draft,
+        )
+
     def _question_payload_from_csv_row(
         self,
         row: dict[str, str | None],
@@ -762,11 +788,15 @@ class QuestionBankService:
         """Persist multi-language solutions, mirroring the legacy primary solution."""
 
         normalized: dict[str, object] = {
-            language.strip().lower(): artifact.model_dump(mode="json")
+            QuestionBankService._normalize_solution_language(
+                language,
+            ): artifact.model_dump(mode="json")
             for language, artifact in artifacts.items()
             if language.strip()
         }
-        primary_language = reference_language.strip().lower() or "python"
+        primary_language = QuestionBankService._normalize_solution_language(
+            reference_language,
+        )
         if reference_solution.strip() and primary_language not in normalized:
             normalized[primary_language] = ReferenceSolutionArtifact(
                 language=primary_language,
@@ -1035,8 +1065,14 @@ class QuestionBankService:
     ) -> list[str]:
         """Return normalized supported languages including the reference language."""
 
-        languages = QuestionBankService._normalize_tokens(values)
-        reference = reference_language.strip().lower() or "python"
+        languages: list[str] = []
+        for value in values:
+            normalized = QuestionBankService._normalize_solution_language(value)
+            if normalized and normalized not in languages:
+                languages.append(normalized)
+        reference = QuestionBankService._normalize_solution_language(
+            reference_language,
+        )
         if reference not in languages:
             languages.insert(0, reference)
         return languages

@@ -24,6 +24,8 @@ from schemas.question_bank import (
     QuestionBulkImportRequest,
     QuestionBulkImportResponse,
     QuestionCreateRequest,
+    QuestionDraftRefinementRequest,
+    QuestionDraftRefinementResponse,
     QuestionDraftValidationRequest,
     QuestionDraftValidationResponse,
     QuestionGroupCreateRequest,
@@ -175,6 +177,50 @@ async def validate_question_draft(
     """Run a draft reference solution against its test cases before saving."""
 
     return service.validate_draft(payload)
+
+
+@router.post(
+    "/questions/refine-test-cases",
+    response_model=QuestionDraftRefinementResponse,
+    summary="Repair existing testcase expected outputs",
+    description=(
+        "Executes the current solution, semantically reviews mismatches against the "
+        "problem contract, and repairs only incorrect expected outputs."
+    ),
+)
+async def refine_question_test_cases(
+    current_user: Annotated[
+        AuthenticatedUser,
+        Depends(require_role(UserRole.RECRUITER)),
+    ],
+    service: Annotated[QuestionBankService, Depends(get_question_bank_service)],
+    payload: QuestionDraftRefinementRequest,
+) -> QuestionDraftRefinementResponse:
+    """Refine existing testcase outputs and return fresh execution evidence."""
+
+    return service.refine_draft_test_cases(current_user.uid, payload)
+
+
+@router.post(
+    "/questions/refine-solution",
+    response_model=QuestionDraftRefinementResponse,
+    summary="Repair the existing reference solution",
+    description=(
+        "Repairs the current source from the problem statement and constraints, "
+        "using failing execution cases only as diagnostic evidence."
+    ),
+)
+async def refine_question_solution(
+    current_user: Annotated[
+        AuthenticatedUser,
+        Depends(require_role(UserRole.RECRUITER)),
+    ],
+    service: Annotated[QuestionBankService, Depends(get_question_bank_service)],
+    payload: QuestionDraftRefinementRequest,
+) -> QuestionDraftRefinementResponse:
+    """Refine existing solution source and return fresh execution evidence."""
+
+    return service.refine_draft_solution(current_user.uid, payload)
 
 
 @router.patch(

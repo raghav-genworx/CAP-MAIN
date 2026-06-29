@@ -32,8 +32,18 @@ class Settings(BaseSettings):
         description="Base URL for the code execution service.",
     )
     code_evaluation_service_base_url: str = Field(
-        default="http://localhost:8001",
+        default="http://localhost:8004",
         description="Base URL for the code evaluation service.",
+    )
+    internal_service_token: str = Field(
+        default="change-me-local-internal-service-token",
+        min_length=24,
+        description="Credential injected only into trusted internal requests.",
+    )
+    candidate_session_secret: str = Field(
+        default="change-me-local-candidate-session-secret",
+        min_length=24,
+        description="Shared secret used to validate candidate session JWTs.",
     )
     upstream_request_timeout_seconds: float = Field(
         default=10.0,
@@ -55,6 +65,25 @@ class Settings(BaseSettings):
         ]
         if invalid:
             raise ValueError("Production CORS origins must use explicit HTTPS URLs")
+        local_secrets = {
+            "INTERNAL_SERVICE_TOKEN": (
+                self.internal_service_token,
+                "change-me-local-internal-service-token",
+            ),
+            "CANDIDATE_SESSION_SECRET": (
+                self.candidate_session_secret,
+                "change-me-local-candidate-session-secret",
+            ),
+        }
+        invalid_secrets = [
+            name for name, (value, local_value) in local_secrets.items()
+            if value == local_value
+        ]
+        if invalid_secrets:
+            raise ValueError(
+                "Production secrets must be configured: "
+                + ", ".join(invalid_secrets)
+            )
         return self
 
     @property

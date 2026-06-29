@@ -235,6 +235,14 @@ export interface QuestionDraftValidationResponse {
   validation_report: SolutionValidationReport;
 }
 
+export interface QuestionDraftRefinementResponse {
+  draft: QuestionCreatePayload;
+  validation_report: SolutionValidationReport;
+  summary: string;
+  repaired_test_case_count: number;
+  solution_changed: boolean;
+}
+
 export interface QuestionGroupQuestionSummary {
   id: string;
   title: string;

@@ -80,6 +80,8 @@ services:
       CODE_EXECUTION_SERVICE_BASE_URL: http://code-execution-service:8000
       CODE_EVALUATION_SERVICE_BASE_URL: http://code-evaluation-service:8000
       UPSTREAM_REQUEST_TIMEOUT_SECONDS: ${UPSTREAM_REQUEST_TIMEOUT_SECONDS:-10}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      CANDIDATE_SESSION_SECRET: ${CANDIDATE_SESSION_SECRET:-change-me-local-candidate-session-secret}
     depends_on:
       core-assessment-platform-service:
         condition: service_healthy
@@ -249,11 +251,7 @@ services:
         - frontend_env
     restart: unless-stopped
     depends_on:
-      core-assessment-platform-service:
-        condition: service_healthy
-      code-execution-service:
-        condition: service_healthy
-      code-evaluation-service:
+      api-gateway-service:
         condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-5173}:80"

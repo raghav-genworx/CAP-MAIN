@@ -1,5 +1,6 @@
 """Business logic for candidate evaluation and recruiter scorecards."""
 
+import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -9,6 +10,10 @@ from core.exceptions.evaluation import (
     AssessmentNotFoundError,
     EvaluationJobNotFoundError,
     EvaluationRetryError,
+)
+from core.services.code_quality_evaluator import (
+    CodeQualityEvaluator,
+    GroqCodeQualityEvaluator,
 )
 from core.services.report_pdf_service import GeneratedReport, ReportPdfService
 from data.repositories.evaluation_repository import EvaluationRepository
@@ -34,6 +39,8 @@ from schemas.evaluation import (
     TestReportResponse,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 
 class EvaluationService:
     """Evaluate final submissions and maintain assessment scoreboards."""
@@ -44,11 +51,13 @@ class EvaluationService:
         report_pdf_service: ReportPdfService,
         *,
         seed_demo_data: bool = False,
+        code_quality_evaluator: CodeQualityEvaluator | None = None,
     ) -> None:
         """Create an evaluation service backed by durable storage."""
 
         self._repository = repository
         self._report_pdf_service = report_pdf_service
+        self._code_quality_evaluator = code_quality_evaluator
         if seed_demo_data:
             self._seed_demo_data()
 
@@ -388,8 +397,8 @@ class EvaluationService:
         )
         test_case_score = self._test_case_score(request.hidden_results)
         coding_score = self._coding_score(request.hidden_results)
-        ai_quality = request.ai_quality or self._heuristic_ai_quality(
-            request.source_code,
+        ai_quality = self._resolve_ai_quality(
+            request,
             test_case_score,
             coding_score,
         )
@@ -557,6 +566,33 @@ class EvaluationService:
             + ai_score * weights.ai_weight
         ) / 100
 
+    def _resolve_ai_quality(
+        self,
+        request: EvaluationJobCreateRequest,
+        test_case_score: float,
+        coding_score: float,
+    ) -> AICodeQualitySignal:
+        if request.ai_quality is not None:
+            return request.ai_quality
+        if self._code_quality_evaluator is not None:
+            try:
+                return self._code_quality_evaluator.evaluate(
+                    language=request.language,
+                    source_code=request.source_code,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "AI code-quality evaluation failed; using heuristic fallback "
+                    "candidate_assessment_id=%s error_type=%s",
+                    request.candidate_assessment_id,
+                    type(exc).__name__,
+                )
+        return self._heuristic_ai_quality(
+            request.source_code,
+            test_case_score,
+            coding_score,
+        )
+
     @staticmethod
     def _heuristic_ai_quality(
         source_code: str,
@@ -590,8 +626,8 @@ class EvaluationService:
         return AICodeQualitySignal(
             score=round(score, 2),
             approach=(
-                "Submission is evaluated against hidden correctness, execution "
-                "stability, and observable structure until the AI gateway is wired."
+                "Fallback quality estimate based on hidden correctness, execution "
+                "stability, and observable code structure."
             ),
             time_complexity="Estimated from implementation structure",
             space_complexity="Estimated from memory usage and code structure",
@@ -610,10 +646,10 @@ class EvaluationService:
                 "Execution stability is included in the quality signal.",
             ],
             weaknesses=[
-                "AI gateway feedback is not yet connected for natural-language review."
+                "AI review was unavailable; this result uses heuristic analysis."
             ],
             improvements=[
-                "Connect the production AI evaluator for richer strengths and fixes."
+                "Re-run the evaluation when the AI reviewer is available."
             ],
         )
 
@@ -805,11 +841,28 @@ def get_evaluation_service(
     ),
     report_dir: str = "data/reports",
     seed_demo_data: bool = False,
+    groq_api_key: str = "",
+    groq_base_url: str = "https://api.groq.com/openai/v1",
+    groq_model: str = "llama-3.3-70b-versatile",
+    groq_request_timeout_seconds: float = 60,
+    groq_retry_count: int = 3,
+    groq_max_source_chars: int = 80_000,
 ) -> EvaluationService:
     """Return a process-local evaluation service backed by durable storage."""
 
+    code_quality_evaluator = None
+    if groq_api_key.strip():
+        code_quality_evaluator = GroqCodeQualityEvaluator(
+            api_key=groq_api_key,
+            base_url=groq_base_url,
+            model=groq_model,
+            timeout_seconds=groq_request_timeout_seconds,
+            retry_count=groq_retry_count,
+            max_source_chars=groq_max_source_chars,
+        )
     return EvaluationService(
         EvaluationRepository(database_url),
         ReportPdfService(report_dir),
         seed_demo_data=seed_demo_data,
+        code_quality_evaluator=code_quality_evaluator,
     )

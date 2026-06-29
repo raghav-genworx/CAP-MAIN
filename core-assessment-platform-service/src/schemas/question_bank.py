@@ -90,10 +90,21 @@ class TestCase(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    input: str
-    expected_output: str
-    is_sample: bool = False
-    explanation: str = ""
+    input: str = Field(
+        min_length=1,
+        description="Exact raw STDIN text, with no labels or markdown.",
+    )
+    expected_output: str = Field(
+        description="Exact deterministic raw STDOUT text, with no labels or markdown.",
+    )
+    is_sample: bool = Field(
+        default=False,
+        description="True only for public sample cases; false for hidden cases.",
+    )
+    explanation: str = Field(
+        default="",
+        description="Concise reason the expected output follows from the input.",
+    )
 
 
 class ReferenceSolutionArtifact(BaseModel):
@@ -342,6 +353,22 @@ class QuestionDraftValidationResponse(BaseModel):
     """Execution validation result for an unsaved draft."""
 
     validation_report: SolutionValidationReport
+
+
+class QuestionDraftRefinementRequest(BaseModel):
+    """Refine existing draft tests or source without regenerating the question."""
+
+    draft: QuestionAIDraftContext
+
+
+class QuestionDraftRefinementResponse(BaseModel):
+    """Refined draft plus execution evidence for the applied repair."""
+
+    draft: QuestionCreateRequest
+    validation_report: SolutionValidationReport
+    summary: str
+    repaired_test_case_count: int = 0
+    solution_changed: bool = False
 
 
 class QuestionGroupQuestionSummary(BaseModel):

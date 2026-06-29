@@ -60,6 +60,7 @@ def test_structured_request_uses_strict_schema_and_minimal_audit_payload() -> No
     assert result == _Answer(value="accepted")
     request = create.call_args.kwargs
     assert request["model"] == service._settings.groq_model
+    assert request["temperature"] == 0
     assert request["messages"][0] == {
         "role": "system",
         "content": "system prompt with private rubric",

@@ -6,6 +6,8 @@ import {
   deleteQuestionBankQuestion,
   createQuestionBankQuestion,
   generateQuestionBankDraft,
+  refineQuestionBankSolution,
+  refineQuestionBankTestCases,
   streamQuestionBankDraft,
   validateQuestionBankDraft,
   fetchQuestionBankQuestions,
@@ -137,6 +139,20 @@ export function useValidateQuestionBankDraft(user: User | null) {
   return useMutation({
     mutationFn: async (payload: QuestionDraftValidationRequest) =>
       validateQuestionBankDraft(await getRequiredIdToken(user), payload),
+  });
+}
+
+export function useRefineQuestionBankTestCases(user: User | null) {
+  return useMutation({
+    mutationFn: async (payload: QuestionDraftValidationRequest) =>
+      refineQuestionBankTestCases(await getRequiredIdToken(user), payload),
+  });
+}
+
+export function useRefineQuestionBankSolution(user: User | null) {
+  return useMutation({
+    mutationFn: async (payload: QuestionDraftValidationRequest) =>
+      refineQuestionBankSolution(await getRequiredIdToken(user), payload),
   });
 }
 

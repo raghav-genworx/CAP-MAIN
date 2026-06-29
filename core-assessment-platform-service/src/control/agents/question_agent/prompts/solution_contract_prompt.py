@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..states.question_state import QuestionGenerationState
+from .prompt_contract import build_task_system_prompt, build_task_user_prompt
 
 
 def strict_solution_contract_guidance(normalized_language: str) -> str:
@@ -55,28 +56,52 @@ def build_solution_contract_retry_prompt(
     sample_cases: list[dict[str, Any]],
     hidden_cases: list[dict[str, Any]],
 ) -> tuple[str, str]:
-    system_prompt = (
-        "You are correcting an invalid reference-solution response. Return valid "
-        "JSON, but the `reference_solution` value itself must be complete, "
-        "runnable source code in the requested language. Do not return algorithm "
-        "names, explanations, markdown, TODOs, or pseudocode."
+    system_prompt = build_task_system_prompt(
+        role="source-code contract corrector",
+        objective=(
+            "Replace an invalid solution response with complete runnable source "
+            "code in the requested language."
+        ),
+        rules=(
+            "Correct only the response-contract and source completeness defect.",
+            "Preserve the intended problem behavior and full-domain correctness.",
+            (
+                "Never return pseudocode, markdown fences, TODOs, or an "
+                "algorithm name as source."
+            ),
+        ),
     )
-    user_prompt = (
-        f"{rejection_context}\n"
-        f"Rejected answer:\n{source_code or '[empty]'}\n"
-        f"Rejection reason: {rejection_reason}\n"
-        f"Title: {state.get('title', '')}\n"
-        f"Problem statement: {state.get('problem_statement', '')}\n"
-        f"Constraints: {state.get('constraints', '')}\n"
-        f"Input format: {state.get('input_format', '')}\n"
-        f"Output format: {state.get('output_format', '')}\n"
-        f"Sample tests: {sample_cases}\n"
-        f"Hidden tests: {hidden_cases}\n"
-        f"Reference language: {normalized_language}\n"
-        f"{strict_solution_contract_guidance(normalized_language)} "
-        f"{solution_contract_guidance(normalized_language)} "
-        "For example, if the approach is Kadane's algorithm, write the actual "
-        "loop-based implementation. Do not write only 'Kadane Algorithm'."
+    user_prompt = build_task_user_prompt(
+        task="Regenerate the rejected response as a runnable reference solution.",
+        context={
+            "rejection": {
+                "context": rejection_context,
+                "reason": rejection_reason,
+                "rejected_source": source_code,
+            },
+            "problem_contract": {
+                "title": state.get("title", ""),
+                "problem_statement": state.get("problem_statement", ""),
+                "input_format": state.get("input_format", ""),
+                "output_format": state.get("output_format", ""),
+                "constraints": state.get("constraints", ""),
+            },
+            "testcases": {"sample": sample_cases, "hidden": hidden_cases},
+            "reference_language": normalized_language,
+        },
+        requirements=(
+            strict_solution_contract_guidance(normalized_language),
+            solution_contract_guidance(normalized_language),
+            "Set reference_solution to complete source code only.",
+            (
+                "Set supported_languages to only reference_language and "
+                "reference_solutions to an empty object."
+            ),
+            (
+                "Return approach and complexity metadata that describes the "
+                "regenerated source."
+            ),
+        ),
     )
     return system_prompt, user_prompt
 

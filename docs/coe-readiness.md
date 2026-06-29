@@ -89,8 +89,9 @@ not a substitute for executable gates.
   response includes CSP, COOP, HSTS, permissions, referrer, MIME-sniffing, and
   frame-denial headers.
 - The production frontend uses same-origin `/api/core`, `/api/execution`, and
-  `/api/evaluation` reverse proxies, keeps local-development endpoints out of its
-  CSP, accepts the bounded 3 MB candidate import payload, and passed Nginx syntax,
+  `/api/evaluation` routes through the authenticated API gateway, keeps
+  local-development endpoints out of its CSP, accepts the bounded 3 MB candidate
+  import payload, and passed Nginx syntax,
   container health, response-header, and all three proxied service health checks.
 
 ## Remaining Completion Evidence

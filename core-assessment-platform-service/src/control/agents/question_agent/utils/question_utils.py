@@ -13,6 +13,7 @@ from schemas.question_bank import (
     TestCase,
 )
 
+from ..prompts.guardrail_prompt import build_guarded_system_prompt
 from ..prompts.solution_contract_prompt import (
     build_solution_contract_retry_prompt,
     solution_contract_guidance,
@@ -278,13 +279,18 @@ class QuestionAgentUtilsMixin:
         system_prompt: str,
         user_prompt: str,
     ) -> Any:
+        guarded_system_prompt = build_guarded_system_prompt(
+            schema_name=schema_name,
+            system_prompt=system_prompt,
+        )
         return self._ai_gateway.structured_completion(
             schema_name=schema_name,
             schema_model=schema_model,
-            system_prompt=system_prompt,
+            system_prompt=guarded_system_prompt,
             user_prompt=user_prompt,
             task_name=schema_name,
             recruiter_uid=self._current_recruiter_uid,
+            prompt_version="v3_structured_contracts",
             workflow_mode=self._current_workflow_mode,
         )
 
@@ -311,15 +317,14 @@ class QuestionAgentUtilsMixin:
         preferred_language: str,
         requested_languages: list[str],
     ) -> list[str]:
-        base = [preferred_language.strip().lower() or "python"]
+        base = [
+            QuestionAgentUtilsMixin._normalize_solution_language(preferred_language),
+        ]
         for candidate in values + requested_languages:
-            normalized = candidate.strip().lower()
+            normalized = QuestionAgentUtilsMixin._normalize_solution_language(candidate)
             if normalized and normalized not in base:
                 base.append(normalized)
-        for extra in ["python", "java", "cpp", "c"]:
-            if extra not in base:
-                base.append(extra)
-        return base
+        return base or ["python"]
 
 
 __all__ = ["QuestionAgentUtilsMixin"]

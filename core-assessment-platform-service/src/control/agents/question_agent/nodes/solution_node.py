@@ -50,7 +50,7 @@ class SolutionNodeMixin(QuestionAgentToolsMixin):
             state.get("execution_history", []),
             "Solution Agent: created CodeChef-style reference implementation",
         )
-        primary_language = reference_language.strip().lower() or "python"
+        primary_language = self._normalize_solution_language(reference_language)
         reference_solutions = dict(state.get("reference_solutions", {}))
         reference_solutions[primary_language] = ReferenceSolutionArtifact(
             language=primary_language,

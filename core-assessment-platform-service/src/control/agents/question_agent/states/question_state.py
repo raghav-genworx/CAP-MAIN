@@ -20,14 +20,14 @@ class ProblemStatementOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    title: str
-    problem_statement: str
+    title: str = Field(min_length=3, max_length=180)
+    problem_statement: str = Field(min_length=20)
     topics: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     category: str = ""
-    input_format: str
+    input_format: str = Field(min_length=3)
     input_explanation: str = ""
-    output_format: str
+    output_format: str = Field(min_length=3)
     output_explanation: str = ""
     constraints: str = ""
     sample_test_cases: list[TestCase] = Field(default_factory=list)
@@ -40,10 +40,10 @@ class MetadataOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     difficulty: DifficultyLevel
-    topics: list[str]
-    tags: list[str]
-    category: str
-    expected_solve_time_minutes: int
+    topics: list[str] = Field(min_length=3, max_length=6)
+    tags: list[str] = Field(min_length=3, max_length=6)
+    category: str = Field(min_length=2, max_length=80)
+    expected_solve_time_minutes: int = Field(ge=1, le=180)
     rationale: str
     solution_approach: str = ""
     time_complexity: str = ""
@@ -60,11 +60,11 @@ class ConstraintOutput(BaseModel):
     input_explanation: str = ""
     output_format: str = ""
     output_explanation: str = ""
-    constraints: str
-    time_limit_minutes: int = 45
-    candidate_solve_time_minutes: int = 45
-    execution_time_limit_seconds: int = 2
-    memory_limit_mb: int = 256
+    constraints: str = Field(min_length=3)
+    time_limit_minutes: int = Field(default=45, ge=1, le=180)
+    candidate_solve_time_minutes: int = Field(default=45, ge=1, le=180)
+    execution_time_limit_seconds: int = Field(default=2, ge=1, le=30)
+    memory_limit_mb: int = Field(default=256, ge=64, le=2048)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -73,7 +73,7 @@ class ExampleOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    sample_test_cases: list[TestCase]
+    sample_test_cases: list[TestCase] = Field(min_length=1, max_length=10)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -82,7 +82,7 @@ class HiddenTestOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    hidden_test_cases: list[TestCase]
+    hidden_test_cases: list[TestCase] = Field(max_length=50)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -117,7 +117,7 @@ class SolutionOutput(BaseModel):
             "markdown, or a TODO stub."
         ),
     )
-    supported_languages: list[str]
+    supported_languages: list[str] = Field(min_length=1)
     solution_approach: str = Field(
         default="",
         description=(
@@ -148,7 +148,7 @@ class RepairDecisionOutput(BaseModel):
         "invalid_problem",
         "execution_failure",
     ]
-    rationale: str
+    rationale: str = Field(min_length=3)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -168,7 +168,7 @@ class DuplicateOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     duplicate_warnings: list[str] = Field(default_factory=list)
-    similarity_score: float
+    similarity_score: float = Field(ge=0, le=1)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -177,10 +177,10 @@ class QualityOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    quality_score: int
-    readiness_score: int
-    ai_confidence_score: int
-    summary: str
+    quality_score: int = Field(ge=0, le=100)
+    readiness_score: int = Field(ge=0, le=100)
+    ai_confidence_score: int = Field(ge=0, le=100)
+    summary: str = Field(min_length=3, max_length=500)
     notes: list[str] = Field(default_factory=list)
 
 

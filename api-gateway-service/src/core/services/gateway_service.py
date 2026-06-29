@@ -1,6 +1,7 @@
 """API gateway upstream coordination."""
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -25,14 +26,30 @@ SERVICE_PURPOSES = {
     "code-evaluation": "AI-assisted submission evaluation and reporting",
 }
 
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
 
 class GatewayService:
     """Coordinate public gateway requests to internal platform services."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         """Initialize the service with runtime settings."""
 
         self._settings = settings
+        self._transport = transport
 
     def get_service_catalog(self) -> GatewayServiceCatalog:
         """Return registered upstream services."""
@@ -77,7 +94,8 @@ class GatewayService:
 
         try:
             async with httpx.AsyncClient(
-                timeout=self._settings.upstream_request_timeout_seconds
+                timeout=self._settings.upstream_request_timeout_seconds,
+                transport=self._transport,
             ) as client:
                 response = await client.get(health_url)
         except httpx.HTTPError:
@@ -102,7 +120,8 @@ class GatewayService:
 
         try:
             async with httpx.AsyncClient(
-                timeout=self._settings.upstream_request_timeout_seconds
+                timeout=self._settings.upstream_request_timeout_seconds,
+                transport=self._transport,
             ) as client:
                 response = await client.get(target_url)
                 response.raise_for_status()
@@ -114,6 +133,82 @@ class GatewayService:
             raise UpstreamServiceUnavailableError("core")
 
         return data
+
+    async def open_proxy_response(
+        self,
+        *,
+        service_name: str,
+        path: str,
+        method: str,
+        query: str,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> tuple[httpx.AsyncClient, httpx.Response]:
+        """Open a streaming request to an approved upstream service."""
+
+        base_url = self._get_base_url(service_name)
+        target_url = f"{base_url}/api/v1/{path.lstrip('/')}"
+        if query:
+            target_url = f"{target_url}?{query}"
+
+        upstream_headers = self._forward_request_headers(headers)
+        if service_name in {"code-execution", "code-evaluation"}:
+            upstream_headers["X-Internal-Service-Token"] = (
+                self._settings.internal_service_token
+            )
+
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                self._settings.upstream_request_timeout_seconds,
+                read=None,
+            ),
+            transport=self._transport,
+        )
+        request = client.build_request(
+            method=method,
+            url=target_url,
+            headers=upstream_headers,
+            content=body,
+        )
+        try:
+            response = await client.send(request, stream=True)
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise UpstreamServiceUnavailableError(service_name) from exc
+        return client, response
+
+    @staticmethod
+    def response_headers(headers: httpx.Headers) -> dict[str, str]:
+        """Return end-to-end response headers safe to relay to a browser."""
+
+        return {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in HOP_BY_HOP_HEADERS
+        }
+
+    @staticmethod
+    async def close_proxy_response(
+        client: httpx.AsyncClient,
+        response: httpx.Response,
+    ) -> None:
+        """Release an upstream response and its client after streaming."""
+
+        await response.aclose()
+        await client.aclose()
+
+    @staticmethod
+    def _forward_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
+        """Drop connection-specific and privileged browser request headers."""
+
+        blocked = HOP_BY_HOP_HEADERS | {
+            "content-length",
+            "host",
+            "x-internal-service-token",
+        }
+        return {
+            key: value for key, value in headers.items() if key.lower() not in blocked
+        }
 
     def _get_base_url(self, service_name: str) -> str:
         """Return a configured upstream service URL."""

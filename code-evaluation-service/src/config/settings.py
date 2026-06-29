@@ -65,6 +65,21 @@ class Settings(BaseSettings):
         le=3600,
         description="Seconds before an abandoned processing job can be reclaimed.",
     )
+    groq_api_key: str = Field(
+        default="",
+        description="Groq API key used for AI code-quality evaluation.",
+    )
+    groq_base_url: str = Field(
+        default="https://api.groq.com/openai/v1",
+        description="Groq OpenAI-compatible API base URL.",
+    )
+    groq_model: str = Field(
+        default="llama-3.3-70b-versatile",
+        description="Groq model used for code-quality evaluation.",
+    )
+    groq_request_timeout_seconds: float = Field(default=60, ge=1, le=300)
+    groq_retry_count: int = Field(default=3, ge=1, le=5)
+    groq_max_source_chars: int = Field(default=80_000, ge=1_000, le=200_000)
 
     @model_validator(mode="after")
     def require_production_service_token(self) -> "Settings":

@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from ..states.question_state import QuestionGenerationState
+from .prompt_contract import (
+    build_task_system_prompt,
+    build_task_user_prompt,
+    parse_recruiter_request,
+)
 
 
 def build_problem_statement_prompt(
@@ -11,38 +16,63 @@ def build_problem_statement_prompt(
     prompt: str,
     title_hint: str,
 ) -> tuple[str, str]:
-    system_prompt = (
-        "You are the problem statement agent for a coding assessment platform. "
-        "Create recruiter-ready CodeChef-style programming questions that are "
-        "clear, unambiguous, and suitable for structured interviews. Candidates "
-        "write complete programs that read STDIN and print STDOUT. Do not create "
-        "LeetCode-style function signatures, interactive prompts, hidden "
-        "requirements, or partial implementation tasks. Preserve recruiter-entered "
-        "facts and never invent constraints that conflict with existing fields."
+    system_prompt = build_task_system_prompt(
+        role="coding-problem specification editor",
+        objective=(
+            "Create a self-contained, recruiter-ready STDIN/STDOUT programming "
+            "problem while preserving explicit recruiter facts."
+        ),
+        rules=(
+            "Write candidate-visible requirements only; never create hidden behavior.",
+            "Use complete-program STDIN/STDOUT semantics, not function signatures.",
+            (
+                "Preserve non-empty draft fields unless the requested scope "
+                "requires improvement."
+            ),
+        ),
     )
-    user_prompt = (
-        f"Recruiter description: {prompt}\n"
-        f"Title hint: {title_hint or 'none'}\n"
-        f"Existing problem statement: "
-        f"{state.get('problem_statement', '') or 'none'}\n"
-        f"Existing input format: {state.get('input_format', '') or 'none'}\n"
-        f"Existing input explanation: "
-        f"{state.get('input_explanation', '') or 'none'}\n"
-        f"Existing output format: {state.get('output_format', '') or 'none'}\n"
-        f"Existing output explanation: "
-        f"{state.get('output_explanation', '') or 'none'}\n"
-        f"Existing constraints: {state.get('constraints', '') or 'none'}\n"
-        f"Focus tags: {', '.join(state.get('focus_tags', [])) or 'none'}\n"
-        f"Existing question titles: "
-        f"{', '.join(state.get('existing_question_titles', [])) or 'none'}\n"
-        "Use the recruiter description and any existing draft fields as the "
-        "source of truth. Return a polished title, complete problem statement, "
-        "topics, tags, category, input format, input explanation, output format, "
-        "output explanation, constraints, and sample tests when the scope asks "
-        "for a full problem section. Explain what each input value represents "
-        "and exactly what must be printed. Keep the statement self-contained: "
-        "all symbols used in constraints or formats must be introduced in the "
-        "statement or explanations."
+    user_prompt = build_task_user_prompt(
+        task="Generate or refine the problem specification for the requested scope.",
+        context={
+            "generation_scope": state.get("generation_scope", "full"),
+            "recruiter_request": parse_recruiter_request(prompt),
+            "title_hint": title_hint,
+            "current_draft": {
+                "title": state.get("title", ""),
+                "problem_statement": state.get("problem_statement", ""),
+                "input_format": state.get("input_format", ""),
+                "input_explanation": state.get("input_explanation", ""),
+                "output_format": state.get("output_format", ""),
+                "output_explanation": state.get("output_explanation", ""),
+                "constraints": state.get("constraints", ""),
+            },
+            "focus_tags": state.get("focus_tags", []),
+            "existing_question_titles": state.get("existing_question_titles", []),
+        },
+        requirements=(
+            "Return a specific title and an unambiguous problem_statement.",
+            (
+                "Define every input value, output value, symbol, ordering rule, "
+                "and edge behavior."
+            ),
+            (
+                "Keep input_format and output_format syntactic; put meaning in "
+                "their explanations."
+            ),
+            (
+                "Use concise machine-checkable constraints and normalized "
+                "topics, tags, and category."
+            ),
+            (
+                "For non-full scopes, retain unrelated non-empty current_draft "
+                "values and do not invent sample tests."
+            ),
+            (
+                "Set sample_test_cases to an empty list unless valid samples "
+                "already exist in context."
+            ),
+            "Use notes only for material assumptions or unresolved ambiguity.",
+        ),
     )
     return system_prompt, user_prompt
 

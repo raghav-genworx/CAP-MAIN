@@ -31,6 +31,12 @@ def evaluation_service_dependency() -> Generator[EvaluationService, None, None]:
         settings.database_url,
         settings.evaluation_report_dir,
         settings.seed_demo_evaluations,
+        settings.groq_api_key,
+        settings.groq_base_url,
+        settings.groq_model,
+        settings.groq_request_timeout_seconds,
+        settings.groq_retry_count,
+        settings.groq_max_source_chars,
     )
 
 

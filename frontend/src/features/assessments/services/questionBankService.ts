@@ -9,6 +9,7 @@ import type {
   QuestionCreatePayload,
   QuestionDraftValidationRequest,
   QuestionDraftValidationResponse,
+  QuestionDraftRefinementResponse,
   QuestionGroupCreatePayload,
   QuestionGroupListResponse,
   QuestionGroupRecord,
@@ -194,6 +195,30 @@ export async function validateQuestionBankDraft(
     {
       headers: authHeader(idToken),
     },
+  );
+  return response.data;
+}
+
+export async function refineQuestionBankTestCases(
+  idToken: string,
+  payload: QuestionDraftValidationRequest,
+): Promise<QuestionDraftRefinementResponse> {
+  const response = await coreApiClient.post<QuestionDraftRefinementResponse>(
+    "/question-bank/questions/refine-test-cases",
+    payload,
+    { headers: authHeader(idToken) },
+  );
+  return response.data;
+}
+
+export async function refineQuestionBankSolution(
+  idToken: string,
+  payload: QuestionDraftValidationRequest,
+): Promise<QuestionDraftRefinementResponse> {
+  const response = await coreApiClient.post<QuestionDraftRefinementResponse>(
+    "/question-bank/questions/refine-solution",
+    payload,
+    { headers: authHeader(idToken) },
   );
   return response.data;
 }

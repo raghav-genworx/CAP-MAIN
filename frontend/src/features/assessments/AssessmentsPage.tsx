@@ -1,9 +1,8 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowLeft,
   ArrowRight,
-  CheckCircle2,
   FileText,
   Play,
   Plus,
@@ -24,6 +23,8 @@ import {
   useDeleteQuestionBankQuestion,
   useQuestionBank,
   useQuestionGroups,
+  useRefineQuestionBankSolution,
+  useRefineQuestionBankTestCases,
   useStreamQuestionBankDraft,
   useUpdateQuestionGroup,
   useUpdateQuestionBankQuestion,
@@ -33,6 +34,7 @@ import type {
   DifficultyLevel,
   QuestionBulkImportResponse,
   QuestionCreatePayload,
+  QuestionDraftRefinementResponse,
   QuestionGenerationSettings,
   QuestionAIDraftProgressEvent,
   QuestionGroupRecord,
@@ -107,25 +109,15 @@ interface PromptContextSource {
   ready: boolean;
 }
 
+type FieldToastTone = "warning" | "error";
+
+interface FieldToast {
+  id: number;
+  message: string;
+  tone: FieldToastTone;
+}
+
 const AVAILABLE_LANGUAGES = ["python", "java", "cpp", "c"] as const;
-const AVAILABLE_TOPICS = [
-  "arrays",
-  "strings",
-  "hashing",
-  "sorting",
-  "two pointers",
-  "sliding window",
-  "stack",
-  "queue",
-  "linked list",
-  "trees",
-  "graphs",
-  "dynamic programming",
-  "greedy",
-  "binary search",
-  "math",
-  "recursion",
-] as const;
 const BULK_IMPORT_COLUMNS = [
   "title",
   "problem_statement",
@@ -236,7 +228,7 @@ function createEmptyGenerationSettings(): GenerationSettingsState {
     easy_count: 0,
     medium_count: 0,
     hard_count: 1,
-    topics_text: "arrays, hashing, trees",
+    topics_text: "",
     interview_style: "DSA interview",
     company_style: "Enterprise",
     time_limit_minutes: 45,
@@ -264,6 +256,21 @@ function createTimelineEntry(
       minute: "2-digit",
     }),
   };
+}
+
+function buildSingleTestResultMap(
+  report: SolutionValidationReport | null | undefined,
+): Record<string, SolutionValidationCaseResult> {
+  if (!report) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    report.results.map((result) => [
+      `${result.bucket === "sample" ? "sample_test_cases" : "hidden_test_cases"}-${result.index - 1}`,
+      result,
+    ]),
+  );
 }
 
 function splitList(value: string) {
@@ -435,6 +442,22 @@ function buildAgentThinkingLines(scope: BusyScope): string[] {
     "Generating the requested section",
     "Reviewing the result",
   ];
+}
+
+function createInitialGenerationProgressEvent(
+  scope: DraftScope,
+): QuestionAIDraftProgressEvent {
+  return {
+    type: "start",
+    scope,
+    message:
+      scope === "full"
+        ? "Sending the builder context to the AI orchestrator."
+        : "Sending the current builder context to the AI agent.",
+    current_node: "queued",
+    next_node: "queued",
+    progress: 4,
+  };
 }
 
 function agentCommentary(scope: BusyScope) {
@@ -949,7 +972,6 @@ function getPromptContextSources(
     case "full":
       return [
         source("Title", composer.title),
-        source("Optional topic hints", generationSettings.topics_text),
         source("Languages", composer.supported_languages.join(", "), true),
         source("Test targets", testTargets, true),
         source("Limits", `${solveTime}; ${runtimeCap}; ${memoryCap}`, true),
@@ -959,7 +981,6 @@ function getPromptContextSources(
       return [
         source("Title", composer.title),
         source("Problem statement", composer.problem_statement),
-        source("Topic hints", generationSettings.topics_text),
         source("Languages", composer.supported_languages.join(", "), true),
       ];
     case "constraints":
@@ -1017,82 +1038,39 @@ function getPromptContextSources(
       ];
     case "basics":
     default:
-      return [
-        source("Topic hints", generationSettings.topics_text),
-        source("Languages", composer.supported_languages.join(", "), true),
-      ];
+      return [source("Languages", composer.supported_languages.join(", "), true)];
   }
 }
 
 function buildSectionPrompt(
   scope: DraftScope,
-  composer: QuestionCreatePayload,
   recruiterPrompt: string,
 ) {
-  const sampleTests = composer.sample_test_cases
-    .filter((testCase) => testCase.input.trim() || testCase.expected_output.trim())
-    .map(
-      (testCase, index) =>
-        `Sample ${index + 1}: input=${testCase.input}; output=${testCase.expected_output}; explanation=${testCase.explanation || "not set"}`,
-    )
-    .join("\n");
-  const hiddenTests = composer.hidden_test_cases
-    .filter((testCase) => testCase.input.trim() || testCase.expected_output.trim())
-    .map(
-      (testCase, index) =>
-        `Hidden ${index + 1}: input=${testCase.input}; output=${testCase.expected_output}; explanation=${testCase.explanation || "not set"}`,
-    )
-    .join("\n");
+  const taskByScope: Record<DraftScope, string> = {
+    full: "Generate and validate the complete question draft.",
+    basics: "Generate only the starter title and context fields.",
+    problem: "Generate only the title and problem statement.",
+    problem_field: "Complete only missing or explicitly requested problem fields.",
+    constraints: "Generate only I/O formats, constraints, and execution limits.",
+    constraints_formats: "Generate only I/O formats, constraints, and execution limits.",
+    examples: "Generate only the requested public sample testcases.",
+    tests: "Generate only the requested sample and hidden testcases.",
+    tests_solution: "Generate testcases, the primary solution, and validation.",
+    solution: "Generate only the primary runnable reference solution.",
+    other_languages: "Generate only requested non-primary language solutions.",
+    recruiter_validation: "Validate the current draft without regenerating sections.",
+    difficulty: "Classify final difficulty and metadata only.",
+    metadata: "Classify final difficulty and metadata only.",
+  };
 
-  return [
-    `Generate the ${scope} section for this coding question using the current builder state.`,
-    recruiterPrompt.trim()
-      ? `Optional recruiter instruction:\n${recruiterPrompt.trim()}`
-      : "No extra recruiter instruction was provided. Use the current builder context and generation settings.",
-    `Title: ${composer.title || "not set"}`,
-    `Problem statement: ${composer.problem_statement || "not set"}`,
-    `Input format: ${composer.input_format || "not set"}`,
-    `Input explanation: ${composer.input_explanation || "not set"}`,
-    `Output format: ${composer.output_format || "not set"}`,
-    `Output explanation: ${composer.output_explanation || "not set"}`,
-    `Constraints: ${composer.constraints || "not set"}`,
-    `Sample tests:\n${sampleTests || "not set"}`,
-    `Hidden tests:\n${hiddenTests || "not set"}`,
-    `Reference solution:\n${composer.reference_solution || "not set"}`,
-    `Reference language: ${composer.reference_language}`,
-    `Supported languages: ${composer.supported_languages.join(", ") || "python"}`,
-    `Candidate solve time: ${composer.candidate_solve_time_minutes} minutes`,
-    `Execution time limit: ${composer.execution_time_limit_seconds} seconds`,
-    `Memory limit: ${composer.memory_limit_mb} MB`,
-    `Current AI topics: ${composer.topics.join(", ") || "not set"}`,
-    `Current AI tags: ${composer.tags.join(", ") || "not set"}`,
-    `Current category: ${composer.category || "not set"}`,
-    `Validation status: ${composer.validation_status}`,
-    scope === "problem"
-      ? "Generate only the problem statement portion. Preserve existing constraints, formats, samples, tests, and solutions unless they are needed as context."
-      : "",
-    scope === "constraints_formats" || scope === "constraints"
-      ? "Generate input format, input explanation, output format, output explanation, concise constraints, and runtime limits. Do not generate tests or solutions for this scope."
-      : "",
-    scope === "tests_solution" || scope === "tests" || scope === "examples"
-      ? scope === "tests_solution"
-        ? "Generate exactly the requested number of sample and hidden test cases from the generation settings, then generate a runnable primary reference solution and validate it. Test inputs must stay inside constraints; use deterministic checks plus execution validation to repair wrong testcase outputs or wrong solution code."
-        : "Generate exactly the requested number of sample and hidden test cases from the generation settings. Do not generate solution code for this scope. Test inputs must stay inside constraints."
-      : "",
-    scope === "other_languages"
-      ? "Generate only additional language reference solutions for supported languages other than the primary reference language. Use the already validated testcase set and do not change the problem, tests, or primary solution."
-      : "",
-    scope === "recruiter_validation"
-      ? "Run validation/review only on the current draft. Do not generate new problem text, new tests, or new solutions unless validation repair is explicitly needed."
-      : "",
-    scope === "difficulty" || scope === "metadata"
-      ? "Classify difficulty, topics, tags/category, solution approach, time complexity, and space complexity. Use the final problem, tests, solution, and validation result."
-      : "",
-    scope === "solution"
-      ? "Generate only the reference solution code for the selected language. Do not execute validation in this scope. Reference solution contract: return complete runnable computer-language source code. Do not return algorithm names like 'Kadane Algorithm', pseudocode, explanations, markdown fences, TODO stubs, or LeetCode-only signatures. Include a solve helper plus a main/stdin/stdout runner."
-      : "",
-    "Carry forward all available upstream fields. Do not ignore typed recruiter content. Prefer CodeChef-style complete programs, not LeetCode-style function signatures.",
-  ].join("\n");
+  return JSON.stringify(
+    {
+      task: taskByScope[scope],
+      recruiter_instruction: recruiterPrompt.trim() || null,
+    },
+    null,
+    2,
+  );
 }
 
 function mergeDraftIntoComposer(
@@ -1910,6 +1888,8 @@ export function QuestionCreationFlowPage() {
   const deleteQuestion = useDeleteQuestionBankQuestion(currentUser);
   const streamDraftQuestion = useStreamQuestionBankDraft(currentUser);
   const validateDraft = useValidateQuestionBankDraft(currentUser);
+  const refineTestCases = useRefineQuestionBankTestCases(currentUser);
+  const refineSolution = useRefineQuestionBankSolution(currentUser);
   const { data } = useQuestionBank(currentUser, {
     search: "",
     difficulty: "",
@@ -1930,6 +1910,10 @@ export function QuestionCreationFlowPage() {
     createEmptyGenerationSettings(),
   );
   const [activeStep, setActiveStep] = useState<WizardStep>(1);
+  const [visitedSteps, setVisitedSteps] = useState<Set<WizardStep>>(() => new Set([1]));
+  const [advanceAttemptedSteps, setAdvanceAttemptedSteps] = useState<Set<WizardStep>>(
+    () => new Set(),
+  );
   const [assistantMessage, setAssistantMessage] = useState(
     "Move step by step. Each AI action uses the fields already in the builder.",
   );
@@ -1939,7 +1923,7 @@ export function QuestionCreationFlowPage() {
   const [toolbarBusy, setToolbarBusy] = useState<BusyScope | null>(null);
   const [completedAiScopes, setCompletedAiScopes] = useState<Set<DraftScope>>(new Set());
   const [historyStack, setHistoryStack] = useState<QuestionCreatePayload[]>([]);
-  const [fieldError, setFieldError] = useState("");
+  const [, setFieldError] = useState("");
   const [showActivityPanel, setShowActivityPanel] = useState(false);
   const [aiPromptRequest, setAiPromptRequest] = useState<AiPromptRequest | null>(null);
   const [solutionValidation, setSolutionValidation] = useState<SolutionValidationReport | null>(
@@ -1953,11 +1937,28 @@ export function QuestionCreationFlowPage() {
   const [generationProgress, setGenerationProgress] = useState<
     QuestionAIDraftProgressEvent[]
   >([]);
+  const [fieldToasts, setFieldToasts] = useState<FieldToast[]>([]);
   const latestGenerationEvent = generationProgress[generationProgress.length - 1] ?? null;
+  const toastTimerIdsRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    return () => {
+      toastTimerIdsRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    };
+  }, []);
+
+  useEffect(() => {
+    setVisitedSteps((current) => new Set(current).add(activeStep));
+  }, [activeStep]);
 
   useEffect(() => {
     if (editingQuestion) {
       setComposer(fromRecord(editingQuestion));
+      setGenerationSettings((current) => ({
+        ...current,
+        sample_test_case_count: Math.max(1, editingQuestion.sample_test_cases.length),
+        hidden_test_case_count: Math.max(1, editingQuestion.hidden_test_cases.length),
+      }));
       setPersistedQuestionId(editingQuestion.id);
       setCompletedAiScopes(new Set());
       setAssistantMessage(`Editing ${editingQuestion.title}.`);
@@ -1966,6 +1967,7 @@ export function QuestionCreationFlowPage() {
         ...current,
       ]);
       setSolutionValidation(editingQuestion.validation_report ?? null);
+      setSingleTestResults(buildSingleTestResultMap(editingQuestion.validation_report));
       setSolutionValidationStale(false);
       setAiPromptRequest(null);
     }
@@ -1981,10 +1983,6 @@ export function QuestionCreationFlowPage() {
   const activePromptSources = aiPromptRequest
     ? getPromptContextSources(aiPromptRequest.scope, composer, generationSettings)
     : [];
-  const selectedTopics = useMemo(
-    () => splitList(generationSettings.topics_text),
-    [generationSettings.topics_text],
-  );
   const generatedLanguageSolutions = useMemo(
     () =>
       Object.entries(composer.reference_solutions ?? {}).filter(
@@ -1994,14 +1992,36 @@ export function QuestionCreationFlowPage() {
     [composer.reference_language, composer.reference_solutions],
   );
   const draftSaving = createQuestion.isPending || updateQuestion.isPending;
+  const singleTestResultValues = useMemo(
+    () => Object.values(singleTestResults),
+    [singleTestResults],
+  );
+  const executedTestCount =
+    solutionValidation?.results.length ?? singleTestResultValues.length;
+  const passedTestCount =
+    solutionValidation?.passed_count ??
+    singleTestResultValues.filter((result) => result.passed).length;
+  const failedTestCount =
+    solutionValidation?.failed_count ??
+    singleTestResultValues.filter((result) => !result.passed).length;
 
   function pushActivity(label: string, detail: string, tone: ActivityEntry["tone"]) {
     setActivityLog((current) => [createTimelineEntry(label, detail, tone), ...current].slice(0, 6));
   }
 
-  function notifyFieldError(message: string) {
+  function dismissFieldToast(toastId: number) {
+    setFieldToasts((current) => current.filter((toast) => toast.id !== toastId));
+  }
+
+  function notifyFieldError(message: string, tone: FieldToastTone = "warning") {
     setFieldError(message);
-    window.alert(message);
+    const toastId = Date.now() + Math.floor(Math.random() * 1000);
+    setFieldToasts((current) => [...current.slice(-2), { id: toastId, message, tone }]);
+    const timerId = window.setTimeout(() => {
+      dismissFieldToast(toastId);
+      toastTimerIdsRef.current = toastTimerIdsRef.current.filter((item) => item !== timerId);
+    }, 4500);
+    toastTimerIdsRef.current.push(timerId);
   }
 
   function assertCanGenerate(scope: DraftScope) {
@@ -2043,6 +2063,7 @@ export function QuestionCreationFlowPage() {
 
   function invalidateSolutionValidation() {
     setSolutionValidationStale(true);
+    setSingleTestResults({});
     setComposer((current) => ({
       ...current,
       validation_status:
@@ -2118,27 +2139,118 @@ export function QuestionCreationFlowPage() {
     });
   }
 
-  function toggleTopic(topic: string) {
-    setGenerationSettings((current) => {
-      const currentTopics = splitList(current.topics_text);
-      const nextTopics = currentTopics.includes(topic)
-        ? currentTopics.filter((item) => item !== topic)
-        : [...currentTopics, topic];
-
+  function getTestCaseStatusMeta(
+    bucket: TestBucket,
+    index: number,
+    testCase: TestCase,
+  ) {
+    const result = singleTestResults[`${bucket}-${index}`];
+    if (result) {
       return {
-        ...current,
-        topics_text: nextTopics.join(", "),
+        detail: `Last run: ${result.status}`,
+        label: result.passed ? "Passed" : "Failed",
+        toneClass: result.passed ? "is-passed" : "is-failed",
       };
-    });
+    }
+
+    if (testCase.input.trim() && testCase.expected_output.trim()) {
+      return {
+        detail: "Ready for execution",
+        label: "Ready",
+        toneClass: "is-ready",
+      };
+    }
+
+    return {
+      detail: "Add input and expected output",
+      label: "Needs input/output",
+      toneClass: "is-needed",
+    };
   }
 
   function validateBasics() {
     const message = getBasicsSetupError(composer, generationSettings);
     setFieldError(message);
     if (message) {
-      window.alert(message);
+      notifyFieldError(message);
     }
     return !message;
+  }
+
+  function getStepNavigationError(step: WizardStep) {
+    if (step === 1) {
+      return getBasicsSetupError(composer, generationSettings);
+    }
+    if (step === 2) {
+      if (!composer.problem_statement.trim() || composer.problem_statement.trim().length <= 20) {
+        return "Add a clear problem statement before moving forward.";
+      }
+      if (!composer.input_format.trim() || !composer.output_format.trim()) {
+        return "Add both input and output formats before moving forward.";
+      }
+      if (!composer.constraints.trim()) {
+        return "Add constraints before moving forward.";
+      }
+      return "";
+    }
+    if (step === 3) {
+      if (!exactTestCountsSatisfied(composer, generationSettings)) {
+        return "Match the requested sample and hidden testcase counts before moving forward.";
+      }
+      if (!composer.reference_solution.trim()) {
+        return "Add or generate the reference solution before moving forward.";
+      }
+      if (composer.validation_status !== "passed") {
+        return "Run all test cases and pass validation before moving forward.";
+      }
+      return "";
+    }
+    if (step === 4) {
+      return stepIsComplete(4, composer) ? "" : "Generate the selected other language solutions before moving forward.";
+    }
+    if (!difficultyIsAgentSet) {
+      return "Classify difficulty and metadata before final save.";
+    }
+    return "";
+  }
+
+  function getStepVisualState(step: WizardStep) {
+    if (!visitedSteps.has(step)) {
+      return "untouched";
+    }
+    if (advanceAttemptedSteps.has(step) && stepIsComplete(step, composer, generationSettings)) {
+      return "complete";
+    }
+    return "in-progress";
+  }
+
+  function moveToStep(step: WizardStep) {
+    setActiveStep(step);
+  }
+
+  function goToPreviousStep() {
+    if (activeStep === 1) {
+      return;
+    }
+    setActiveStep((activeStep - 1) as WizardStep);
+  }
+
+  function goToNextStep() {
+    if (activeStep >= 5) {
+      return;
+    }
+    void saveAndMoveNext((activeStep + 1) as WizardStep);
+  }
+
+  async function saveAndMoveNext(nextStep: WizardStep) {
+    const message = getStepNavigationError(activeStep);
+    setAdvanceAttemptedSteps((current) => new Set(current).add(activeStep));
+    setVisitedSteps((current) => new Set(current).add(activeStep));
+    if (message) {
+      notifyFieldError(message);
+      return;
+    }
+    await saveDraftProgress(nextStep);
   }
 
   function goToProblemStatement() {
@@ -2146,6 +2258,7 @@ export function QuestionCreationFlowPage() {
       return;
     }
 
+    setAdvanceAttemptedSteps((current) => new Set(current).add(1));
     setActiveStep(2);
   }
 
@@ -2197,10 +2310,10 @@ export function QuestionCreationFlowPage() {
         setSolutionValidationStale(false);
       }
 
-      setGenerationProgress([]);
+      setGenerationProgress([createInitialGenerationProgressEvent(scope)]);
       const response = await streamDraftQuestion.mutateAsync({
         payload: {
-        prompt: buildSectionPrompt(scope, composer, recruiterPrompt),
+        prompt: buildSectionPrompt(scope, recruiterPrompt),
         generation_scope: scope,
         reference_language: composer.reference_language,
         title_hint: composer.title.trim() || undefined,
@@ -2231,7 +2344,7 @@ export function QuestionCreationFlowPage() {
 
       // Check if generation failed
       if (response.error) {
-        setFieldError(response.error);
+        notifyFieldError(response.error, "error");
         setAssistantMessage("AI generation failed");
         pushActivity("AI draft failed", response.error, "error");
         return;
@@ -2244,8 +2357,9 @@ export function QuestionCreationFlowPage() {
           (scope === "solution" || scope === "tests_solution") &&
           !generatedDraft.reference_solution.trim()
         ) {
-          setFieldError(
+          notifyFieldError(
             "AI returned tests but did not return runnable solution code. Try Regenerate Solution Code or add a more specific instruction.",
+            "warning",
           );
           pushActivity(
             "Solution code missing",
@@ -2321,6 +2435,7 @@ export function QuestionCreationFlowPage() {
           scope === "full")
       ) {
         setSolutionValidation(response.solution_validation);
+        setSingleTestResults(buildSingleTestResultMap(response.solution_validation));
         setSolutionValidationStale(false);
         setComposer((current) => ({
           ...current,
@@ -2347,7 +2462,7 @@ export function QuestionCreationFlowPage() {
 
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to generate draft.";
-      setFieldError(message);
+      notifyFieldError(message, "error");
       setAssistantMessage("AI generation could not complete.");
       pushActivity("AI draft failed", message, "error");
     } finally {
@@ -2363,20 +2478,14 @@ export function QuestionCreationFlowPage() {
         notifyFieldError(validationError);
         return;
       }
+      setGenerationProgress([]);
       setToolbarBusy("validation");
       pushActivity("Validation started", "Running reference solution against test cases.", "info");
 
       const response = await validateDraft.mutateAsync({ draft: composer });
       const report = response.validation_report;
       setSolutionValidation(report);
-      setSingleTestResults(
-        Object.fromEntries(
-          report.results.map((result) => [
-            `${result.bucket === "sample" ? "sample_test_cases" : "hidden_test_cases"}-${result.index - 1}`,
-            result,
-          ]),
-        ),
-      );
+      setSingleTestResults(buildSingleTestResultMap(report));
       setSolutionValidationStale(false);
       setComposer((current) => ({
         ...current,
@@ -2393,8 +2502,112 @@ export function QuestionCreationFlowPage() {
       setActiveStep(3);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to validate draft.";
-      setFieldError(message);
+      notifyFieldError(message, "error");
       pushActivity("Validation failed", message, "error");
+    } finally {
+      setToolbarBusy(null);
+    }
+  }
+
+  function applyRefinementReport(response: QuestionDraftRefinementResponse) {
+    const report = response.validation_report;
+    setSolutionValidation(report);
+    setSingleTestResults(buildSingleTestResultMap(report));
+    setSolutionValidationStale(false);
+    return report;
+  }
+
+  async function refineExistingTestCases() {
+    const validationError = getValidationPrerequisiteError(
+      composer,
+      generationSettings,
+    );
+    if (validationError) {
+      notifyFieldError(validationError);
+      return;
+    }
+
+    try {
+      setFieldError("");
+      setGenerationProgress([]);
+      setToolbarBusy("tests");
+      snapshotForUndo();
+      pushActivity(
+        "Testcase refinement started",
+        "Executing existing cases and reviewing expected-output mismatches.",
+        "info",
+      );
+      const response = await refineTestCases.mutateAsync({ draft: composer });
+      const report = applyRefinementReport(response);
+      setComposer((current) => ({
+        ...current,
+        sample_test_cases: response.draft.sample_test_cases,
+        hidden_test_cases: response.draft.hidden_test_cases,
+        reference_solution: response.draft.reference_solution,
+        reference_solutions: response.draft.reference_solutions,
+        solution_approach: response.draft.solution_approach,
+        time_complexity: response.draft.time_complexity,
+        space_complexity: response.draft.space_complexity,
+        validation_report: report,
+        validation_status: report.status,
+        validation_updated_at: new Date().toISOString(),
+      }));
+      setAssistantMessage(response.summary);
+      pushActivity(
+        "Testcase refinement complete",
+        response.summary,
+        report.status === "passed" ? "success" : "warning",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to refine test cases.";
+      notifyFieldError(message, "error");
+      pushActivity("Testcase refinement failed", message, "error");
+    } finally {
+      setToolbarBusy(null);
+    }
+  }
+
+  async function refineExistingSolution() {
+    const validationError = getValidationPrerequisiteError(
+      composer,
+      generationSettings,
+    );
+    if (validationError) {
+      notifyFieldError(validationError);
+      return;
+    }
+
+    try {
+      setFieldError("");
+      setGenerationProgress([]);
+      setToolbarBusy("solution");
+      snapshotForUndo();
+      pushActivity(
+        "Solution refinement started",
+        "Repairing from the problem contract with failures as diagnostic evidence.",
+        "info",
+      );
+      const response = await refineSolution.mutateAsync({ draft: composer });
+      const report = applyRefinementReport(response);
+      setComposer((current) => ({
+        ...current,
+        reference_solution: response.draft.reference_solution,
+        validation_report: report,
+        validation_status: report.status,
+        validation_updated_at: new Date().toISOString(),
+      }));
+      setAssistantMessage(response.summary);
+      pushActivity(
+        "Solution refinement complete",
+        response.summary,
+        report.status === "passed" ? "success" : "warning",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to refine the solution.";
+      notifyFieldError(message, "error");
+      pushActivity("Solution refinement failed", message, "error");
     } finally {
       setToolbarBusy(null);
     }
@@ -2441,7 +2654,7 @@ export function QuestionCreationFlowPage() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to run this test case.";
-      notifyFieldError(message);
+      notifyFieldError(message, "error");
       pushActivity("Single test failed", message, "error");
     } finally {
       setSingleTestRunningKey(null);
@@ -2489,7 +2702,10 @@ export function QuestionCreationFlowPage() {
         setActiveStep(nextStep);
       }
     } catch (error) {
-      setFieldError(error instanceof Error ? error.message : "Unable to save draft progress.");
+      notifyFieldError(
+        error instanceof Error ? error.message : "Unable to save draft progress.",
+        "error",
+      );
       pushActivity("Save failed", "Could not persist this draft step.", "warning");
     }
   }
@@ -2501,26 +2717,48 @@ export function QuestionCreationFlowPage() {
     }
     return (
       <div className={`single-test-result ${result.passed ? "passed" : "failed"}`}>
-        <div>
-          <strong>{result.passed ? "Passed" : "Failed"}</strong>
-          <span>{result.status}</span>
+        <div className="single-test-result-head">
+          <div>
+            <span>Last execution</span>
+            <strong>{result.passed ? "Passed" : "Failed"}</strong>
+          </div>
+          <span className="single-test-result-pill">{result.status}</span>
         </div>
         <div className="single-test-result-grid">
-          <p>
+          <div>
             <span>Expected</span>
-            <code>{result.expected_output || "(empty)"}</code>
-          </p>
-          <p>
+            <pre>{result.expected_output || "(empty)"}</pre>
+          </div>
+          <div>
             <span>Actual</span>
-            <code>{result.actual_output || "(empty)"}</code>
-          </p>
-          <p>
+            <pre>{result.actual_output || "(empty)"}</pre>
+          </div>
+          <div>
             <span>Runtime</span>
-            <code>{result.execution_time || "n/a"}</code>
-          </p>
+            <pre>{result.execution_time || "n/a"}</pre>
+          </div>
         </div>
         {result.stderr || result.compile_output || result.message ? (
-          <em>{result.stderr || result.compile_output || result.message}</em>
+          <div className="single-test-diagnostics">
+            {result.message ? (
+              <div>
+                <span>Message</span>
+                <pre>{result.message}</pre>
+              </div>
+            ) : null}
+            {result.stderr ? (
+              <div>
+                <span>stderr</span>
+                <pre>{result.stderr}</pre>
+              </div>
+            ) : null}
+            {result.compile_output ? (
+              <div>
+                <span>Compile output</span>
+                <pre>{result.compile_output}</pre>
+              </div>
+            ) : null}
+          </div>
         ) : null}
       </div>
     );
@@ -2533,15 +2771,16 @@ export function QuestionCreationFlowPage() {
       solutionValidationStale,
     );
     if (saveError) {
-      setFieldError(saveError);
+      notifyFieldError(saveError);
       return;
     }
     if (
       composer.status === "validated" &&
       !exactTestCountsSatisfied(composer, generationSettings)
     ) {
-      setFieldError(
+      notifyFieldError(
         "Validated questions require the sample and hidden testcase counts to match Step 1.",
+        "warning",
       );
       return;
     }
@@ -2564,9 +2803,18 @@ export function QuestionCreationFlowPage() {
       pushActivity("Question created", created.title, "success");
       navigate("/recruiter/question-management");
     } catch (error) {
-      setFieldError(error instanceof Error ? error.message : "Unable to save question.");
+      notifyFieldError(
+        error instanceof Error ? error.message : "Unable to save question.",
+        "error",
+      );
       pushActivity("Save failed", "Could not persist the question.", "warning");
     }
+  }
+
+  function saveQuestionFromWizard() {
+    setVisitedSteps((current) => new Set(current).add(5));
+    setAdvanceAttemptedSteps((current) => new Set(current).add(5));
+    void saveQuestion();
   }
 
   async function deleteEditingQuestion() {
@@ -2583,13 +2831,40 @@ export function QuestionCreationFlowPage() {
       await deleteQuestion.mutateAsync(editingQuestion.id);
       navigate("/recruiter/question-management");
     } catch (error) {
-      setFieldError(error instanceof Error ? error.message : "Unable to delete question.");
+      notifyFieldError(
+        error instanceof Error ? error.message : "Unable to delete question.",
+        "error",
+      );
       pushActivity("Delete failed", "Could not delete this question.", "warning");
     }
   }
 
   return (
     <main className="question-flow-page">
+      {fieldToasts.length ? (
+        <div className="question-flow-toast-stack" aria-live="polite" aria-label="Question flow notifications">
+          {fieldToasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`question-flow-toast is-${toast.tone}`}
+              role="alert"
+            >
+              <div>
+                <strong>{toast.tone === "error" ? "Error" : "Check this"}</strong>
+                <p>{toast.message}</p>
+              </div>
+              <button
+                type="button"
+                className="question-flow-toast-dismiss"
+                onClick={() => dismissFieldToast(toast.id)}
+                aria-label="Dismiss notification"
+              >
+                Close
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <section className="flow-hero flow-hero-compact">
         <div>
           <p>{editingQuestion ? "Edit question" : "New question"}</p>
@@ -2621,40 +2896,79 @@ export function QuestionCreationFlowPage() {
 
       <section className="flow-grid question-builder-grid">
         <Card className="flow-workbench">
-          {fieldError ? <div className="inline-alert">{fieldError}</div> : null}
-          {toolbarBusy && latestGenerationEvent ? (
-            <div className="agent-live-progress" aria-live="polite">
-              <div className="agent-live-progress-head">
-                <div>
-                  <span>Agent progress</span>
-                  <strong>{latestGenerationEvent.message}</strong>
-                </div>
-                <em>{latestGenerationEvent.progress}%</em>
-              </div>
-              <div className="agent-live-track">
-                <span style={{ width: `${latestGenerationEvent.progress}%` }} />
-              </div>
-              <div className="agent-live-events">
-                {generationProgress.slice(-4).map((event, index) => (
-                  <span key={`${event.type}-${event.current_node || "start"}-${index}`}>
-                    {event.next_node || event.current_node || event.type}
-                  </span>
-                ))}
-              </div>
+          <div className="question-page-wizard">
+            <div className="question-page-rail" aria-label="Question creation pages">
+              {STEP_DEFINITIONS.map((step) => {
+                const state = getStepVisualState(step.id);
+                return (
+                  <button
+                    key={step.id}
+                    type="button"
+                    className={[
+                      "question-page-step",
+                      activeStep === step.id ? "is-active" : "",
+                      `is-${state}`,
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onClick={() => moveToStep(step.id)}
+                    aria-current={activeStep === step.id ? "step" : undefined}
+                  >
+                    <span>{step.id}</span>
+                    <strong>{step.title}</strong>
+                    <em>
+                      {state === "complete"
+                        ? "Done"
+                        : state === "untouched"
+                          ? "Not visited"
+                          : "In progress"}
+                    </em>
+                  </button>
+                );
+              })}
             </div>
-          ) : null}
 
+            <div className="question-page-shell">
+              <div className="question-page-header">
+                <div>
+                  <p>Page {activeStep} of {STEP_DEFINITIONS.length}</p>
+                  <h2>{STEP_DEFINITIONS[activeStep - 1].title}</h2>
+                </div>
+                <div className="question-page-nav">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={goToPreviousStep}
+                    disabled={activeStep === 1 || draftSaving}
+                  >
+                    <ArrowLeft size={16} />
+                    Previous
+                  </Button>
+                  {activeStep < 5 ? (
+                    <Button type="button" onClick={goToNextStep} disabled={draftSaving || Boolean(toolbarBusy)}>
+                      {draftSaving ? "Saving..." : "Next"}
+                      <ArrowRight size={16} />
+                    </Button>
+                  ) : (
+                    <Button type="button" onClick={saveQuestionFromWizard}>
+                      <Save size={16} />
+                      {editingQuestion ? "Save Changes" : "Save Question"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+          {selectedStep === 1 ? (
           <StepCard
             step={STEP_DEFINITIONS[0]}
             active={selectedStep === 1}
+            visualState={getStepVisualState(1)}
             busy={toolbarBusy === "basics"}
             onToggle={() => setActiveStep(1)}
             completed={
               completedAiScopes.has("basics") ||
               stepIsComplete(1, composer, generationSettings)
             }
-            onSaveNext={() => void saveDraftProgress(2)}
-            saving={draftSaving}
           >
             <div className="field-grid">
               <label className="field">
@@ -2679,26 +2993,6 @@ export function QuestionCreationFlowPage() {
               </label>
             </div>
             <div className="field-grid">
-              <div className="field">
-                <span>
-                  Topic hints <em>Optional context</em>
-                </span>
-                <div className="topic-label-row" aria-label="Topic labels">
-                  {AVAILABLE_TOPICS.map((topic) => {
-                    const active = selectedTopics.includes(topic);
-                    return (
-                      <button
-                        key={topic}
-                        type="button"
-                        className={active ? "topic-label is-active" : "topic-label"}
-                        onClick={() => toggleTopic(topic)}
-                      >
-                        {topic}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
               <div className="field">
                 <span>
                   Languages <em>Required</em>
@@ -2789,16 +3083,17 @@ export function QuestionCreationFlowPage() {
               </Button>
             </div>
           </StepCard>
+          ) : null}
 
+          {selectedStep === 2 ? (
           <StepCard
             step={STEP_DEFINITIONS[1]}
             active={selectedStep === 2}
+            visualState={getStepVisualState(2)}
             busy={toolbarBusy === "problem" || toolbarBusy === "constraints_formats"}
             onToggle={() => setActiveStep(2)}
             completed={stepIsComplete(2, composer)}
             onGenerate={() => openAiPrompt("problem")}
-            onSaveNext={() => void saveDraftProgress(3)}
-            saving={draftSaving}
           >
             <label className="field">
               <span>
@@ -2911,10 +3206,13 @@ export function QuestionCreationFlowPage() {
               </span>
             </div>
           </StepCard>
+          ) : null}
 
+          {selectedStep === 3 ? (
           <StepCard
             step={STEP_DEFINITIONS[2]}
             active={selectedStep === 3}
+            visualState={getStepVisualState(3)}
             busy={
               toolbarBusy === "tests" ||
               toolbarBusy === "tests_solution" ||
@@ -2926,8 +3224,6 @@ export function QuestionCreationFlowPage() {
               completedAiScopes.has("tests_solution") ||
               stepIsComplete(3, composer, generationSettings)
             }
-            onSaveNext={() => void saveDraftProgress(4)}
-            saving={draftSaving}
           >
             <div className="mode-card-row">
               <Button
@@ -2943,7 +3239,7 @@ export function QuestionCreationFlowPage() {
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() => void generateDraft("tests")}
+                onClick={() => void refineExistingTestCases()}
                 disabled={Boolean(toolbarBusy)}
               >
                 <Wand2 size={16} />
@@ -2952,7 +3248,7 @@ export function QuestionCreationFlowPage() {
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() => void generateDraft("solution")}
+                onClick={() => void refineExistingSolution()}
                 disabled={Boolean(toolbarBusy)}
               >
                 <FileText size={16} />
@@ -3006,8 +3302,64 @@ export function QuestionCreationFlowPage() {
               </span>
             </div>
 
+            <div className="step-three-status-grid">
+              <div
+                className={[
+                  "validation-status-banner",
+                  solutionValidation?.status || composer.validation_status || "not_run",
+                  solutionValidationStale ? "is-stale" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              >
+                <span>Execution status</span>
+                <strong>
+                  {solutionValidation
+                    ? solutionValidation.status === "passed"
+                      ? "Execution validation passed"
+                      : solutionValidation.status === "failed"
+                        ? "Execution validation failed"
+                        : "Execution validation skipped"
+                    : "Execution validation not run"}
+                </strong>
+                <p>
+                  {solutionValidation
+                    ? solutionValidation.summary
+                    : "Run the reference program against the testcase cards below to see outputs, failures, and diagnostics inline."}
+                </p>
+                {solutionValidationStale || composer.validation_status === "stale" ? (
+                  <span>Results are stale because the solution or testcase values changed.</span>
+                ) : null}
+              </div>
+
+              <div className="quality-summary">
+                <span>Executed</span>
+                <strong>{executedTestCount}</strong>
+              </div>
+              <div className="quality-summary">
+                <span>Passed</span>
+                <strong>{passedTestCount}</strong>
+              </div>
+              <div className="quality-summary">
+                <span>Failed</span>
+                <strong>{failedTestCount}</strong>
+              </div>
+            </div>
+
+            {solutionValidation?.runner_notes.length ? (
+              <div className="runner-note-panel">
+                <span>Runner notes</span>
+                <div className="runner-note-list">
+                  {solutionValidation.runner_notes.map((note) => (
+                    <p key={note}>{note}</p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <div className="section-head">
               <div>
+                <p>Keep the case data, actual output, and diagnostics together on each card.</p>
                 <h3>Sample tests</h3>
               </div>
               <Button type="button" variant="secondary" onClick={() => addTestCase("sample_test_cases")}>
@@ -3017,21 +3369,21 @@ export function QuestionCreationFlowPage() {
             </div>
 
             <div className="testcase-stack">
-              {composer.sample_test_cases.map((testCase, index) => (
+              {composer.sample_test_cases.map((testCase, index) => {
+                const statusMeta = getTestCaseStatusMeta(
+                  "sample_test_cases",
+                  index,
+                  testCase,
+                );
+
+                return (
                 <div key={`sample-${index}`} className="testcase-card">
                   <div className="testcase-head">
-                    <div>
+                    <div className="testcase-heading-copy">
                       <strong>Sample {index + 1}</strong>
-                      <span
-                        className={
-                          testCase.input.trim() && testCase.expected_output.trim()
-                            ? "testcase-status is-ready"
-                            : "testcase-status is-needed"
-                        }
-                      >
-                        {testCase.input.trim() && testCase.expected_output.trim()
-                          ? "Ready"
-                          : "Needs input/output"}
+                      <p className="testcase-caption">{statusMeta.detail}</p>
+                      <span className={`testcase-status ${statusMeta.toneClass}`}>
+                        {statusMeta.label}
                       </span>
                     </div>
                     <div className="testcase-actions">
@@ -3094,11 +3446,12 @@ export function QuestionCreationFlowPage() {
                   </label>
                   {renderSingleTestResult(`sample_test_cases-${index}`)}
                 </div>
-              ))}
+              )})}
             </div>
 
             <div className="section-head">
               <div>
+                <p>Hidden cases keep the same run feedback inline without moving to a separate result area.</p>
                 <h3>Hidden tests</h3>
               </div>
               <Button type="button" variant="secondary" onClick={() => addTestCase("hidden_test_cases")}>
@@ -3108,21 +3461,21 @@ export function QuestionCreationFlowPage() {
             </div>
 
             <div className="testcase-stack">
-              {composer.hidden_test_cases.map((testCase, index) => (
+              {composer.hidden_test_cases.map((testCase, index) => {
+                const statusMeta = getTestCaseStatusMeta(
+                  "hidden_test_cases",
+                  index,
+                  testCase,
+                );
+
+                return (
                 <div key={`hidden-${index}`} className="testcase-card subtle">
                   <div className="testcase-head">
-                    <div>
+                    <div className="testcase-heading-copy">
                       <strong>Hidden {index + 1}</strong>
-                      <span
-                        className={
-                          testCase.input.trim() && testCase.expected_output.trim()
-                            ? "testcase-status is-ready"
-                            : "testcase-status is-needed"
-                        }
-                      >
-                        {testCase.input.trim() && testCase.expected_output.trim()
-                          ? "Ready"
-                          : "Needs input/output"}
+                      <p className="testcase-caption">{statusMeta.detail}</p>
+                      <span className={`testcase-status ${statusMeta.toneClass}`}>
+                        {statusMeta.label}
                       </span>
                     </div>
                     <div className="testcase-actions">
@@ -3185,10 +3538,10 @@ export function QuestionCreationFlowPage() {
                   </label>
                   {renderSingleTestResult(`hidden_test_cases-${index}`)}
                 </div>
-              ))}
+              )})}
             </div>
 
-            <div className="field-grid solution-entry-grid">
+            <div className="field-grid solution-entry-grid step-three-solution-grid">
               <label className="field">
                 <span>
                   Reference solution <em>Required</em>
@@ -3200,7 +3553,7 @@ export function QuestionCreationFlowPage() {
                   placeholder="Complete runnable program that reads STDIN and prints STDOUT."
                 />
               </label>
-              <div className="sub-panel">
+              <div className="sub-panel step-three-side-panel">
                 <div className="contract-note">
                   <span>CodeChef-style contract</span>
                   <p>
@@ -3279,145 +3632,27 @@ export function QuestionCreationFlowPage() {
                     />
                   </label>
                 </div>
-              </div>
-            </div>
-
-            <div className="validation-workspace">
-              <div className="validation-overview-grid">
-                <div
-                  className={[
-                    "validation-status-banner",
-                    solutionValidation?.status || composer.validation_status || "not_run",
-                    solutionValidationStale ? "is-stale" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                >
-                  <strong>
-                    {solutionValidation
-                      ? solutionValidation.status === "passed"
-                        ? "Execution validation passed"
-                        : solutionValidation.status === "failed"
-                          ? "Execution validation failed"
-                          : "Execution validation skipped"
-                      : "Execution validation not run"}
-                  </strong>
-                  <p>
-                    {solutionValidation
-                      ? solutionValidation.summary
-                      : "Run the reference program against sample and hidden tests before publishing."}
-                  </p>
-                  {solutionValidationStale || composer.validation_status === "stale" ? (
-                    <span>Validation is stale because solution or testcase inputs changed.</span>
-                  ) : null}
+                <div className="metadata-pending-box">
+                  Each testcase card below shows the latest actual output, pass or fail state,
+                  runtime, and any compiler or runtime diagnostics from the most recent run.
                 </div>
-                <div className="validation-action-card">
-                  <span>Recruiter validation</span>
-                  <div className="button-row">
-                    <Button
-                      type="button"
-                      onClick={() => void validateCurrentDraft()}
-                      disabled={Boolean(toolbarBusy)}
-                    >
-                      <CheckCircle2 size={16} />
-                      {toolbarBusy === "validation" ? "Validating..." : "Run All Test Cases"}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="validation-console">
-                <div className="section-head">
-                  <div>
-                    <h3>Test case result</h3>
-                  </div>
-                  <span>
-                    {toolbarBusy === "validation" || toolbarBusy === "solution" || toolbarBusy === "full"
-                      ? "Running"
-                      : solutionValidation
-                        ? `${solutionValidation.passed_count}/${solutionValidation.passed_count + solutionValidation.failed_count} passed`
-                        : "Pending"}
-                  </span>
-                </div>
-
-                {solutionValidation?.runner_notes.length ? (
-                  <div className="runner-note-list">
-                    {solutionValidation.runner_notes.map((note) => (
-                      <p key={note}>{note}</p>
-                    ))}
-                  </div>
-                ) : null}
-
-                {solutionValidation?.results.length ? (
-                  <div className="validation-result-list">
-                    {solutionValidation.results.map((result) => (
-                      <div
-                        key={`${result.bucket}-${result.index}-${result.token || result.status}`}
-                        className={`validation-result-card ${result.passed ? "passed" : "failed"}`}
-                      >
-                        <div className="validation-result-head">
-                          <strong>
-                            {result.bucket === "sample" ? "Sample" : "Hidden"} {result.index}
-                          </strong>
-                          <span>{result.status}</span>
-                        </div>
-                        <div className="validation-result-grid">
-                          <div>
-                            <span>Input</span>
-                            <pre>{result.stdin || "(empty)"}</pre>
-                          </div>
-                          <div>
-                            <span>Expected</span>
-                            <pre>{result.expected_output || "(empty)"}</pre>
-                          </div>
-                          <div>
-                            <span>Actual</span>
-                            <pre>{result.actual_output || "(empty)"}</pre>
-                          </div>
-                          <div>
-                            <span>Runtime</span>
-                            <pre>{result.execution_time || "n/a"}</pre>
-                          </div>
-                        </div>
-                        {result.stderr || result.compile_output || result.message ? (
-                          <div className="validation-result-meta">
-                            {result.stderr ? <p>stderr: {result.stderr}</p> : null}
-                            {result.compile_output ? (
-                              <p>compile: {result.compile_output}</p>
-                            ) : null}
-                            {result.message ? <p>message: {result.message}</p> : null}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             </div>
 
           </StepCard>
+          ) : null}
 
+          {selectedStep === 4 ? (
           <StepCard
             step={STEP_DEFINITIONS[3]}
             active={selectedStep === 4}
+            visualState={getStepVisualState(4)}
             busy={toolbarBusy === "other_languages"}
             onToggle={() => setActiveStep(4)}
             completed={stepIsComplete(4, composer)}
             onGenerate={() => openAiPrompt("other_languages")}
-            onSaveNext={() => void saveDraftProgress(5)}
-            saving={draftSaving}
           >
             <div className="language-solution-panel">
-              <div className="section-head">
-                <div>
-                  <h3>Other language reference solutions</h3>
-                  <p>
-                    Generated only after the primary solution passes the accepted
-                    sample and hidden tests.
-                  </p>
-                </div>
-                <span>{generatedLanguageSolutions.length} generated</span>
-              </div>
 
               <div className="validation-overview-grid compact-check-grid">
                 <div className="metadata-pending-box">
@@ -3464,10 +3699,13 @@ export function QuestionCreationFlowPage() {
               )}
             </div>
           </StepCard>
+          ) : null}
 
+          {selectedStep === 5 ? (
           <StepCard
             step={STEP_DEFINITIONS[4]}
             active={selectedStep === 5}
+            visualState={getStepVisualState(5)}
             busy={toolbarBusy === "metadata" || toolbarBusy === "difficulty"}
             onToggle={() => setActiveStep(5)}
             completed={difficultyIsAgentSet}
@@ -3610,12 +3848,38 @@ export function QuestionCreationFlowPage() {
                 <Button type="button" variant="secondary" onClick={undoAiChanges} disabled={!historyStack.length}>
                   Undo AI
                 </Button>
-                <Button type="button" onClick={() => void saveQuestion()}>
+                <Button type="button" onClick={saveQuestionFromWizard}>
                   {editingQuestion ? "Save Changes" : "Save Question"}
                 </Button>
               </div>
             </div>
           </StepCard>
+          ) : null}
+
+              <div className="question-page-footer-nav">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={goToPreviousStep}
+                  disabled={activeStep === 1 || draftSaving}
+                >
+                  <ArrowLeft size={16} />
+                  Previous
+                </Button>
+                {activeStep < 5 ? (
+                  <Button type="button" onClick={goToNextStep} disabled={draftSaving || Boolean(toolbarBusy)}>
+                    {draftSaving ? "Saving..." : "Next"}
+                    <ArrowRight size={16} />
+                  </Button>
+                ) : (
+                  <Button type="button" onClick={saveQuestionFromWizard}>
+                    <Save size={16} />
+                    {editingQuestion ? "Save Changes" : "Save Question"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
         </Card>
       </section>
 
@@ -3624,6 +3888,8 @@ export function QuestionCreationFlowPage() {
           scope={toolbarBusy}
           commentary={agentCommentary(toolbarBusy)}
           lines={buildAgentThinkingLines(toolbarBusy)}
+          progressEvents={generationProgress}
+          latestEvent={latestGenerationEvent}
         />
       ) : null}
 
@@ -4101,10 +4367,14 @@ function AgentRunOverlay({
   scope,
   commentary,
   lines,
+  progressEvents,
+  latestEvent,
 }: {
   scope: BusyScope;
   commentary: string;
   lines: string[];
+  progressEvents: QuestionAIDraftProgressEvent[];
+  latestEvent: QuestionAIDraftProgressEvent | null;
 }) {
   const title =
     scope === "full"
@@ -4112,6 +4382,10 @@ function AgentRunOverlay({
       : scope === "validation"
         ? "Running execution validation"
         : "Generating section";
+  const showLiveProgress = Boolean(latestEvent);
+  const liveUpdates = progressEvents.slice(-5);
+  const liveCommentary = latestEvent?.message || commentary;
+  const progressValue = latestEvent?.progress ?? null;
 
   return (
     <div className="agent-run-backdrop" role="status" aria-live="polite">
@@ -4119,22 +4393,68 @@ function AgentRunOverlay({
         <div className="agent-run-head">
           <div className="agent-orb" aria-hidden="true" />
           <div>
-            <span>Generation</span>
+            <span>{scope === "validation" ? "Validation" : "Generation"}</span>
             <h2>{title}</h2>
-            <p>{commentary}</p>
+            <p>{liveCommentary}</p>
           </div>
         </div>
-        <div className="agent-thinking-list">
-          {lines.map((line, index) => (
-            <div key={line} className={index === 0 ? "agent-thinking-line is-active" : "agent-thinking-line"}>
-              <span aria-hidden="true" />
-              <p>{line}<b className="thinking-dots" aria-hidden="true" /></p>
+        {showLiveProgress && progressValue !== null ? (
+          <div className="agent-run-progress" aria-live="polite">
+            <div className="agent-run-progress-head">
+              <div>
+                <span>Live progress</span>
+                <strong>{latestEvent?.next_node || latestEvent?.current_node || "working"}</strong>
+              </div>
+              <em>{progressValue}%</em>
             </div>
-          ))}
-        </div>
+            <div
+              className="agent-run-progress-track"
+              role="progressbar"
+              aria-label="AI generation progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressValue}
+            >
+              <span style={{ width: `${progressValue}%` }} />
+            </div>
+          </div>
+        ) : null}
+        {showLiveProgress ? (
+          <div className="agent-thinking-list">
+            {liveUpdates.map((event, index) => (
+              <div
+                key={`${event.type}-${event.current_node || "start"}-${index}`}
+                className={[
+                  "agent-thinking-line",
+                  index === liveUpdates.length - 1 ? "is-active" : "is-complete",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              >
+                <span aria-hidden="true" />
+                <p>{event.message}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="agent-thinking-list">
+            {lines.map((line, index) => (
+              <div
+                key={line}
+                className={index === 0 ? "agent-thinking-line is-active" : "agent-thinking-line"}
+              >
+                <span aria-hidden="true" />
+                <p>
+                  {line}
+                  <b className="thinking-dots" aria-hidden="true" />
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
         <p className="agent-run-foot">
-          Keep this page open. The builder will apply the accepted fields when the
-          graph finishes.
+          Keep this page open. This popup now tracks the live agent updates, and
+          the builder will apply the accepted fields automatically when the run finishes.
         </p>
       </Card>
     </div>
@@ -4144,22 +4464,20 @@ function AgentRunOverlay({
 function StepCard({
   step,
   active,
+  visualState = "untouched",
   busy = false,
   completed = false,
   onToggle,
   onGenerate,
-  onSaveNext,
-  saving = false,
   children,
 }: {
   step: StepDefinition;
   active: boolean;
+  visualState?: "untouched" | "in-progress" | "complete";
   busy?: boolean;
   completed?: boolean;
   onToggle: () => void;
   onGenerate?: () => void;
-  onSaveNext?: () => void;
-  saving?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -4168,6 +4486,7 @@ function StepCard({
         "step-card",
         active ? "is-active" : "",
         completed ? "is-complete" : "",
+        `is-${visualState}`,
         busy ? "is-loading" : "",
       ]
         .filter(Boolean)
@@ -4176,7 +4495,15 @@ function StepCard({
       <div className="step-card-header">
         <button type="button" className="step-card-toggle" onClick={onToggle}>
           <div>
-            <p>{busy ? "Agent loading" : completed ? "Section complete" : `Step ${step.id}`}</p>
+            <p>
+              {busy
+                ? "Agent loading"
+                : visualState === "complete"
+                  ? "Section complete"
+                  : visualState === "untouched"
+                    ? "Not visited"
+                    : `Step ${step.id} in progress`}
+            </p>
             <h3>{step.title}</h3>
           </div>
         </button>
@@ -4198,19 +4525,6 @@ function StepCard({
       {active ? (
         <div className="step-card-body">
           {children}
-          {onSaveNext ? (
-            <div className="step-save-row">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={onSaveNext}
-                disabled={saving || busy}
-              >
-                <Save size={16} />
-                {saving ? "Saving..." : "Save & Next"}
-              </Button>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </Card>

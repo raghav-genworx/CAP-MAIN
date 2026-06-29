@@ -11,11 +11,9 @@ import {
   ListChecks,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { PageHeader } from "../../components/common/PageHeader";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { useAuth } from "../auth";
@@ -389,11 +387,6 @@ export function RecruiterAssessmentsPage() {
 
   return (
     <main className="recruiter-assessments-page assessment-flow-page">
-      <PageHeader
-        title="Assessments"
-        description="Manage assessment templates, schedule different test sessions, assign candidates, and monitor progress."
-      />
-
       {view === "list" ? (
         <AssessmentList
           assessments={assessments}
@@ -658,17 +651,77 @@ function CreateAssessmentView({
         ? "unlimited"
         : "limited";
 
+  const requiredMark = <em className="required-indicator" aria-hidden="true">*</em>;
+  const sectionDefinitions = [
+    {
+      id: "basics" as const,
+      label: "Basics",
+      title: "Template details",
+      description: "Name the assessment, set the time box, and add candidate-facing instructions.",
+      meta: "Name, duration, pass mark",
+      ready: basicsReady,
+    },
+    {
+      id: "questions" as const,
+      label: "Question set",
+      title: "Choose the question set",
+      description: "Build the pool, set the per-candidate count, and align it with the blueprint.",
+      meta: `${selectedQuestionIds.length} in pool, ${desiredQuestionCount} per candidate`,
+      ready: questionSetReady,
+    },
+    {
+      id: "rules" as const,
+      label: "Rules",
+      title: "Finalize scoring and policy",
+      description: "Balance the evaluation weights, languages, and candidate experience rules.",
+      meta: "Scoring, languages, policy",
+      ready: rulesReady,
+    },
+  ];
+  const activeSectionIndex = sectionDefinitions.findIndex((section) => section.id === activeSection);
+  const activeSectionDefinition =
+    sectionDefinitions[activeSectionIndex] ?? sectionDefinitions[0];
+  const canCreateAssessment =
+    !createPending &&
+    basicsReady &&
+    questionSetReady &&
+    rulesReady &&
+    assessmentForm.title.trim().length > 0 &&
+    scoringIsValid &&
+    assessmentForm.supported_languages.length > 0;
+
+  function sectionReady(section: AssessmentCreateSection) {
+    return section === "basics"
+      ? basicsReady
+      : section === "questions"
+        ? questionSetReady
+        : rulesReady;
+  }
+
   function sectionState(section: AssessmentCreateSection) {
-    const done =
-      section === "basics"
-        ? basicsReady
-        : section === "questions"
-          ? questionSetReady
-          : rulesReady;
+    const done = sectionReady(section);
     if (activeSection === section) {
       return done ? "is-active is-complete" : "is-active is-needed";
     }
     return done ? "is-complete" : "is-needed";
+  }
+
+  function moveToSection(section: AssessmentCreateSection) {
+    setActiveSection(section);
+  }
+
+  function goToPreviousSection() {
+    if (activeSectionIndex <= 0) {
+      return;
+    }
+    setActiveSection(sectionDefinitions[activeSectionIndex - 1].id);
+  }
+
+  function goToNextSection() {
+    if (!sectionReady(activeSection) || activeSectionIndex >= sectionDefinitions.length - 1) {
+      return;
+    }
+    setActiveSection(sectionDefinitions[activeSectionIndex + 1].id);
   }
 
   function toggleLanguage(language: string, checked: boolean) {
@@ -802,31 +855,14 @@ function CreateAssessmentView({
       </button>
 
       <Card className="assessment-panel assessment-panel-wide assessment-create-panel">
-        <div className="assessment-create-hero assessment-create-hero-pro">
-          <div className="assessment-create-hero-copy">
-            <span className="panel-eyebrow">New Assessment</span>
-            <h2>Build a polished coding assessment</h2>
-            <p>Create a coding assessment.</p>
-            <div className="assessment-create-hero-actions">
-              <span>
-                <Sparkles size={15} />
-                Modern template setup
-              </span>
-              <span>
-                <ShieldCheck size={15} />
-                Candidate policy ready
-              </span>
+        <div className="assessment-builder-wizard">
+          <div className="assessment-builder-banner">
+            <div className="assessment-builder-banner-copy">
+              <span className="panel-eyebrow">New Assessment</span>
+              <h2>Create assessment</h2>
+              <p>Set the basics, choose the question set, and finish the scoring rules in three guided pages.</p>
             </div>
-          </div>
-          <div className="assessment-create-preview" aria-label="Assessment setup summary">
-            <div className="assessment-preview-topline">
-              <span>Template readiness</span>
-              <strong>{assessmentForm.title.trim() ? "Drafting" : "Start"}</strong>
-            </div>
-            <div className="assessment-preview-ring">
-              <BadgeCheck size={28} />
-            </div>
-            <div className="assessment-preview-grid">
+            <div className="assessment-builder-metrics" aria-label="Assessment setup summary">
               <span>
                 <strong>{assessmentForm.duration_minutes}</strong>
                 Minutes
@@ -836,6 +872,10 @@ function CreateAssessmentView({
                 Passing
               </span>
               <span>
+                <strong>{selectedQuestionIds.length}</strong>
+                In pool
+              </span>
+              <span>
                 <strong>{assessmentForm.supported_languages.length}</strong>
                 Languages
               </span>
@@ -843,68 +883,91 @@ function CreateAssessmentView({
                 <strong>{enabledPolicyCount}</strong>
                 Policies
               </span>
+              <span>
+                <strong>{assessmentForm.title.trim() ? "Drafting" : "Start"}</strong>
+                Status
+              </span>
             </div>
           </div>
-        </div>
 
-        <div className="assessment-step-rail" aria-label="Assessment creation steps">
-          {[
-            {
-              id: "basics" as const,
-              label: "Basics",
-              meta: "Name, duration, pass mark",
-              ready: basicsReady,
-            },
-            {
-              id: "questions" as const,
-              label: "Question set",
-              meta: `${selectedQuestionIds.length} in pool, ${desiredQuestionCount} per candidate`,
-              ready: questionSetReady,
-            },
-            {
-              id: "rules" as const,
-              label: "Rules",
-              meta: "Scoring, languages, policy",
-              ready: rulesReady,
-            },
-          ].map((step, index) => (
-            <button
-              key={step.id}
-              type="button"
-              className={sectionState(step.id)}
-              onClick={() => setActiveSection(step.id)}
-            >
-              <span>{index + 1}</span>
-              <strong>{step.label}</strong>
-              <em>{step.ready ? "Done" : step.meta}</em>
-            </button>
-          ))}
-        </div>
-
-        <div className="assessment-create-layout">
-          <div className="assessment-form-stack assessment-form-pro assessment-create-form">
-            <div
-              className={`assessment-form-section assessment-primary-section assessment-section-pro assessment-accordion-section ${sectionState("basics")}`}
-            >
+          <div className="assessment-step-rail assessment-builder-rail" aria-label="Assessment creation steps">
+            {sectionDefinitions.map((step, index) => (
               <button
+                key={step.id}
                 type="button"
-                className="assessment-section-heading assessment-section-trigger"
-                onClick={() => setActiveSection("basics")}
+                className={sectionState(step.id)}
+                onClick={() => moveToSection(step.id)}
+                aria-current={activeSection === step.id ? "step" : undefined}
               >
-                <span className="assessment-section-icon">
-                  <FileText size={18} />
-                </span>
-                <div>
-                  <span className="panel-eyebrow">Basics</span>
-                  <h3>Template details</h3>
-                </div>
-                <strong>{basicsReady ? "Complete" : "Needs details"}</strong>
+                <span>{index + 1}</span>
+                <strong>{step.label}</strong>
+                <em>{step.ready ? "Ready" : step.meta}</em>
               </button>
+            ))}
+          </div>
 
-              {activeSection === "basics" ? (
-                <div className="assessment-section-body">
+          <div className="assessment-builder-shell">
+            <div className="assessment-builder-header">
+              <div>
+                <p>
+                  Page {activeSectionIndex + 1} of {sectionDefinitions.length}
+                </p>
+                <h3>{activeSectionDefinition.title}</h3>
+                <span>{activeSectionDefinition.description}</span>
+              </div>
+              <strong
+                className={
+                  sectionReady(activeSection)
+                    ? "assessment-builder-status is-ready"
+                    : "assessment-builder-status is-needed"
+                }
+              >
+                {sectionReady(activeSection) ? "Ready to continue" : "Required fields pending"}
+              </strong>
+            </div>
+
+            <p className="assessment-builder-required-note">
+              Fields marked with {requiredMark} are required before you continue.
+            </p>
+
+            {activeSection === "basics" ? (
+              <div className="assessment-form-stack assessment-form-pro assessment-create-form">
+                <div className="question-status-strip" aria-label="Assessment basics readiness">
+                  <span className={assessmentForm.title.trim().length >= 3 ? "is-ready" : "is-needed"}>
+                    Title {assessmentForm.title.trim().length >= 3 ? "ready" : "needed"}
+                  </span>
+                  <span className={assessmentForm.duration_minutes >= 15 ? "is-ready" : "is-needed"}>
+                    Duration {assessmentForm.duration_minutes >= 15 ? "ready" : "needs 15+ min"}
+                  </span>
+                  <span
+                    className={
+                      assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
+                        ? "is-ready"
+                        : "is-needed"
+                    }
+                  >
+                    Passing score{" "}
+                    {assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
+                      ? "ready"
+                      : "out of range"}
+                  </span>
+                </div>
+
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
+                  <div className="assessment-section-heading">
+                    <span className="assessment-section-icon">
+                      <FileText size={18} />
+                    </span>
+                    <div>
+                      <span className="panel-eyebrow">Basics</span>
+                      <h3>Template details</h3>
+                    </div>
+                  </div>
+
                   <label className="field field-pro field-full">
-                    <span>Assessment title</span>
+                    <span>
+                      Assessment title {requiredMark}
+                    </span>
                     <input
                       placeholder="Backend Developer Screening"
                       value={assessmentForm.title}
@@ -916,7 +979,9 @@ function CreateAssessmentView({
 
                   <div className="assessment-inline-fields">
                     <label className="field field-pro metric-field">
-                      <span>Candidate duration</span>
+                      <span>
+                        Candidate duration {requiredMark}
+                      </span>
                       <div className="field-control-with-icon">
                         <Clock3 size={16} />
                         <input
@@ -934,7 +999,9 @@ function CreateAssessmentView({
                       </div>
                     </label>
                     <label className="field field-pro metric-field">
-                      <span>Passing score</span>
+                      <span>
+                        Passing score {requiredMark}
+                      </span>
                       <div className="field-control-with-icon">
                         <Gauge size={16} />
                         <input
@@ -954,7 +1021,7 @@ function CreateAssessmentView({
                     </label>
                   </div>
 
-                  <div className="assessment-inline-fields" style={{ marginTop: "16px" }}>
+                  <div className="assessment-inline-fields">
                     <label className="field field-pro field-full">
                       <span>Description</span>
                       <textarea
@@ -976,41 +1043,41 @@ function CreateAssessmentView({
                       />
                     </label>
                   </div>
+                </div>
+              </div>
+            ) : null}
 
-                  {/* Section Actions navigation */}
-                  <div className="assessment-actions-row" style={{ marginTop: "24px", paddingTop: "16px", borderTop: "1px solid #e2e8f0" }}>
-                    <Button
-                      type="button"
-                      disabled={!basicsReady}
-                      onClick={() => setActiveSection("questions")}
-                    >
-                      Save & Next
-                    </Button>
+            {activeSection === "questions" ? (
+              <div className="assessment-form-stack assessment-form-pro assessment-create-form">
+                <div className="question-status-strip" aria-label="Assessment question set readiness">
+                  <span
+                    className={
+                      selectedQuestionIds.length >= desiredQuestionCount && selectedQuestionIds.length > 0
+                        ? "is-ready"
+                        : "is-needed"
+                    }
+                  >
+                    Pool {selectedQuestionIds.length} / {desiredQuestionCount}
+                  </span>
+                  <span className={desiredQuestionCount > 0 ? "is-ready" : "is-needed"}>
+                    Per candidate {desiredQuestionCount}
+                  </span>
+                  <span className={questionSetReady ? "is-ready" : "is-needed"}>
+                    Delivery {assessmentForm.shuffle_questions ? "randomized" : "same set"}
+                  </span>
+                </div>
+
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
+                  <div className="assessment-section-heading">
+                    <span className="assessment-section-icon is-green">
+                      <BadgeCheck size={18} />
+                    </span>
+                    <div>
+                      <span className="panel-eyebrow">Question Set</span>
+                      <h3>Choose the questions used by every test slot</h3>
+                    </div>
                   </div>
-                </div>
-              ) : null}
-            </div>
 
-            <div
-              className={`assessment-form-section assessment-section-pro question-set-section assessment-accordion-section ${sectionState("questions")}`}
-            >
-              <button
-                type="button"
-                className="assessment-section-heading assessment-section-trigger"
-                onClick={() => setActiveSection("questions")}
-              >
-                <span className="assessment-section-icon is-green">
-                  <BadgeCheck size={18} />
-                </span>
-                <div>
-                  <span className="panel-eyebrow">Question Set</span>
-                  <h3>Choose the questions used by every test slot</h3>
-                </div>
-                <strong>{questionSetReady ? "Complete" : "Needs more questions"}</strong>
-              </button>
-
-              {activeSection === "questions" ? (
-                <div className="assessment-section-body">
                   <div className="question-set-mode-grid" role="tablist" aria-label="Question set source">
                     {[
                       {
@@ -1047,9 +1114,11 @@ function CreateAssessmentView({
                     ))}
                   </div>
 
-                  <div className="assessment-inline-fields" style={{ marginTop: "16px" }}>
+                  <div className="assessment-inline-fields">
                     <label className="field field-pro metric-field">
-                      <span>Questions per candidate</span>
+                      <span>
+                        Questions per candidate {requiredMark}
+                      </span>
                       <input
                         type="number"
                         min={1}
@@ -1070,7 +1139,9 @@ function CreateAssessmentView({
                         }
                       >
                         <strong>Same set</strong>
-                        <span>Every candidate gets the first {desiredQuestionCount} selected questions.</span>
+                        <span>
+                          Every candidate gets the first {desiredQuestionCount} selected questions.
+                        </span>
                       </button>
                       <button
                         type="button"
@@ -1108,9 +1179,7 @@ function CreateAssessmentView({
                           <div className="composer-import-row">
                             <select
                               value={selectedImportGroupId}
-                              onChange={(event) =>
-                                setSelectedImportGroupId(event.target.value)
-                              }
+                              onChange={(event) => setSelectedImportGroupId(event.target.value)}
                             >
                               <option value="">Choose group</option>
                               {questionGroups.map((group) => (
@@ -1151,17 +1220,12 @@ function CreateAssessmentView({
                           {createGroupPending ? "Saving..." : "Save Group & Apply"}
                         </Button>
                       </div>
-                      {groupSaveSuccess ? (
-                        <p className="helper-success">{groupSaveSuccess}</p>
-                      ) : null}
-                      {createGroupError ? (
-                        <p className="form-error">{createGroupError}</p>
-                      ) : null}
+                      {groupSaveSuccess ? <p className="helper-success">{groupSaveSuccess}</p> : null}
+                      {createGroupError ? <p className="form-error">{createGroupError}</p> : null}
                     </div>
                   ) : null}
 
-                  {/* Side-by-Side Question Composer Grid to use full space */}
-                  <div className="questions-composer-grid" style={{ marginTop: "20px" }}>
+                  <div className="questions-composer-grid">
                     {questionSetMode === "select-groups" ? (
                       <div className="group-pick-grid group-picker-column">
                         {questionGroupsLoading ? (
@@ -1232,10 +1296,13 @@ function CreateAssessmentView({
 
                     <div className="questions-blueprint-and-selected">
                       <div className="difficulty-blueprint">
-                          <div className="question-set-subhead">
-                            <strong>Difficulty blueprint</strong>
-                          <span>Set the expected shape for the {desiredQuestionCount} questions delivered in a test.</span>
-                          </div>
+                        <div className="question-set-subhead">
+                          <strong>Difficulty blueprint</strong>
+                          <span>
+                            Set the expected shape for the {desiredQuestionCount} questions delivered in a
+                            test.
+                          </span>
+                        </div>
                         <div className="difficulty-slot-grid">
                           {difficultyBlueprint.map((difficulty, index) => (
                             <label key={`difficulty-${index}`}>
@@ -1258,7 +1325,7 @@ function CreateAssessmentView({
                       </div>
 
                       {selectedQuestionIds.length ? (
-                        <div className="selected-question-order" style={{ marginTop: "20px" }}>
+                        <div className="selected-question-order">
                           <div className="question-set-subhead">
                             <strong>Selected question pool</strong>
                             <span>
@@ -1331,48 +1398,39 @@ function CreateAssessmentView({
                       ) : null}
                     </div>
                   </div>
+                </div>
+              </div>
+            ) : null}
 
-                  {/* Section Actions navigation */}
-                  <div className="assessment-actions-row" style={{ marginTop: "24px", paddingTop: "16px", borderTop: "1px solid #e2e8f0" }}>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={() => setActiveSection("basics")}
-                    >
-                      Back
-                    </Button>
-                    <Button
-                      type="button"
-                      disabled={!questionSetReady}
-                      onClick={() => setActiveSection("rules")}
-                    >
-                      Save & Next
-                    </Button>
+            {activeSection === "rules" ? (
+              <div className="assessment-form-stack assessment-form-pro assessment-create-form">
+                <div className="question-status-strip" aria-label="Assessment rules readiness">
+                  <span className={scoringIsValid ? "is-ready" : "is-needed"}>
+                    Scoring {scoringTotal} / 100
+                  </span>
+                  <span
+                    className={
+                      assessmentForm.supported_languages.length > 0 ? "is-ready" : "is-needed"
+                    }
+                  >
+                    Languages {assessmentForm.supported_languages.length}
+                  </span>
+                  <span className={rulesReady ? "is-ready" : "is-needed"}>
+                    Policy {enabledPolicyCount} active
+                  </span>
+                </div>
+
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
+                  <div className="assessment-section-heading">
+                    <span className="assessment-section-icon is-warm">
+                      <SlidersHorizontal size={18} />
+                    </span>
+                    <div>
+                      <span className="panel-eyebrow">Rules</span>
+                      <h3>Scoring and candidate policy</h3>
+                    </div>
                   </div>
-                </div>
-              ) : null}
-            </div>
 
-            <div
-              className={`assessment-form-section assessment-section-pro assessment-accordion-section assessment-rules-section ${sectionState("rules")}`}
-            >
-              <button
-                type="button"
-                className="assessment-section-heading assessment-section-trigger"
-                onClick={() => setActiveSection("rules")}
-              >
-                <span className="assessment-section-icon is-warm">
-                  <SlidersHorizontal size={18} />
-                </span>
-                <div>
-                  <span className="panel-eyebrow">Rules</span>
-                  <h3>Scoring and candidate policy</h3>
-                </div>
-                <strong>{rulesReady ? "Complete" : "Needs rules"}</strong>
-              </button>
-
-              {activeSection === "rules" ? (
-                <div className="assessment-section-body">
                   <div className="assessment-form-section assessment-section-pro">
                     <div className="assessment-section-heading">
                       <span className="assessment-section-icon is-green">
@@ -1419,7 +1477,9 @@ function CreateAssessmentView({
                     </div>
                     <div className="assessment-inline-fields assessment-three-fields">
                       <label className="field field-pro">
-                        <span>Test case weight</span>
+                        <span>
+                          Test case weight {requiredMark}
+                        </span>
                         <input
                           type="number"
                           min={0}
@@ -1434,7 +1494,9 @@ function CreateAssessmentView({
                         />
                       </label>
                       <label className="field field-pro">
-                        <span>Coding metrics</span>
+                        <span>
+                          Coding metrics {requiredMark}
+                        </span>
                         <input
                           type="number"
                           min={0}
@@ -1449,7 +1511,9 @@ function CreateAssessmentView({
                         />
                       </label>
                       <label className="field field-pro">
-                        <span>AI quality</span>
+                        <span>
+                          AI quality {requiredMark}
+                        </span>
                         <input
                           type="number"
                           min={0}
@@ -1550,9 +1614,11 @@ function CreateAssessmentView({
                       ))}
                     </div>
 
-                    <div className="assessment-inline-fields" style={{ marginTop: "16px" }}>
+                    <div className="assessment-inline-fields">
                       <label className="field field-pro">
-                        <span>Supported languages</span>
+                        <span>
+                          Supported languages {requiredMark}
+                        </span>
                         <div className="assessment-language-grid">
                           {ASSESSMENT_LANGUAGES.map((language) => {
                             const selected =
@@ -1652,7 +1718,7 @@ function CreateAssessmentView({
                     </div>
 
                     {assessmentForm.hidden_feedback_mode === "summary" ? (
-                      <div className="assessment-inline-fields" style={{ marginTop: "16px" }}>
+                      <div className="assessment-inline-fields">
                         {hiddenCheckOption === "limited" ? (
                           <label className="field field-pro">
                             <span>Max hidden checks</span>
@@ -1688,39 +1754,42 @@ function CreateAssessmentView({
                       </div>
                     ) : null}
                   </div>
-
-                  {/* Section Actions navigation */}
-                  <div className="assessment-actions-row" style={{ marginTop: "24px", paddingTop: "16px", borderTop: "1px solid #e2e8f0" }}>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={() => setActiveSection("questions")}
-                    >
-                      Back
-                    </Button>
-                    <Button
-                      type="button"
-                      onClick={onCreate}
-                      disabled={
-                        createPending ||
-                        !assessmentForm.title.trim() ||
-                        !questionSetReady ||
-                        !scoringIsValid ||
-                        assessmentForm.supported_languages.length === 0
-                      }
-                    >
-                      <BadgeCheck size={17} />
-                      {createPending ? "Creating..." : "Create Assessment"}
-                    </Button>
-                    <Button type="button" variant="secondary" onClick={onBack}>
-                      Cancel
-                    </Button>
-                  </div>
-                  {createError ? <p className="form-error" style={{ marginTop: "12px" }}>{createError}</p> : null}
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
 
+            <div className="assessment-builder-footer">
+              <div className="assessment-builder-footer-copy">
+                {createError ? <p className="form-error">{createError}</p> : null}
+              </div>
+              <div className="assessment-actions-row">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={goToPreviousSection}
+                  disabled={activeSectionIndex === 0}
+                >
+                  Back
+                </Button>
+                {activeSection !== "rules" ? (
+                  <Button
+                    type="button"
+                    onClick={goToNextSection}
+                    disabled={!sectionReady(activeSection)}
+                  >
+                    Save & Continue
+                  </Button>
+                ) : (
+                  <Button type="button" onClick={onCreate} disabled={!canCreateAssessment}>
+                    <BadgeCheck size={17} />
+                    {createPending ? "Creating..." : "Create Assessment"}
+                  </Button>
+                )}
+                <Button type="button" variant="secondary" onClick={onBack}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       </Card>

@@ -132,6 +132,28 @@ class Judge0ClientContractTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Judge0ServiceError, "invalid encoded"):
             await client.execute({"source_code": "print(1)", "language_id": 71})
 
+    async def test_base64_result_allows_transport_whitespace(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(201, json={"token": "token"})
+            return httpx.Response(
+                200,
+                json={
+                    "token": "token",
+                    "status": {"id": 3, "description": "Accepted"},
+                    "stdout": f"{_encoded('60')}\n",
+                },
+            )
+
+        client = Judge0Client(
+            self._settings(),
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.execute({"source_code": "print(60)", "language_id": 71})
+
+        self.assertEqual(result.stdout, "60")
+
 
 if __name__ == "__main__":
     unittest.main()

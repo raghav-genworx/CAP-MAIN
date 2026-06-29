@@ -136,6 +136,19 @@ Step 3 AI loop:
 11. After primary language solution passes, generate equivalent solutions for the other supported languages.
 12. Validate other language solutions too if the current execution service supports them.
 
+Dedicated refinement actions operate on the existing draft rather than starting
+generation again:
+
+* `Refine Test Cases` executes the current solution against every existing row.
+  The problem statement, formats, and constraints decide whether expected or
+  actual output is correct. Only incorrect expected outputs may change; testcase
+  inputs, passing rows, order, and counts remain unchanged. The full set is then
+  executed again.
+* `Refine Solution Code` treats the problem statement and constraints as the
+  primary specification. Failing cases are limited diagnostic examples, not the
+  definition of behavior. The repaired solution is validated against the full,
+  unchanged testcase set.
+
 The UI should show this loop visually:
 
 * Do not just show a spinner.

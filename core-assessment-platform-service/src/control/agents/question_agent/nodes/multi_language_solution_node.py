@@ -31,6 +31,10 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
         """Generate and validate equivalent solutions after the primary passes."""
 
         solution_validation = state.get("solution_validation")
+        validation_status = state.get("validation_status")
+        validation_status_value = getattr(validation_status, "value", validation_status)
+        if not solution_validation and validation_status_value == "passed":
+            solution_validation = self._validate_reference_solution(state)
         if not solution_validation or solution_validation.status != "passed":
             return {
                 "execution_history": self._append_notes(
@@ -42,15 +46,18 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
                 ),
             }
 
-        primary_language = (
-            state.get("reference_language", "python").strip().lower() or "python"
+        primary_language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
         )
         supported_languages = state.get("supported_languages", [primary_language])
-        target_languages = [
-            self._normalize_solution_language(language)
-            for language in supported_languages
-            if self._normalize_solution_language(language) != primary_language
-        ]
+        target_languages: list[str] = []
+        for language in supported_languages:
+            normalized_language = self._normalize_solution_language(language)
+            if (
+                normalized_language != primary_language
+                and normalized_language not in target_languages
+            ):
+                target_languages.append(normalized_language)
         if not target_languages:
             return {
                 "execution_history": self._append_notes(
@@ -162,6 +169,8 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
 
         return {
             "reference_solutions": reference_solutions,
+            "solution_validation": solution_validation,
+            "validation_status": solution_validation.status,
             "notes": self._append_notes(state.get("notes", []), *node_notes),
             "execution_history": self._append_notes(
                 state.get("execution_history", []),

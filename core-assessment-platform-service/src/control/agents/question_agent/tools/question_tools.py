@@ -61,7 +61,9 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
         sample_tests = self._complete_test_cases(
             state.get("sample_test_cases", []),
         )
-        language = state.get("reference_language", "python").strip().lower() or "python"
+        language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
+        )
         rounds: list[SolutionValidationRound] = []
 
         if not source_code or (not sample_tests and not hidden_tests):
@@ -365,6 +367,18 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             case.model_copy(update={"is_sample": False})
             for case in self._complete_test_cases(model.hidden_test_cases)
         ]
+        repaired_sample_cases = self._preserve_repaired_testcase_inputs(
+            sample_tests,
+            failing_sample_indexes,
+            repaired_sample_cases,
+            is_sample=True,
+        )
+        repaired_hidden_cases = self._preserve_repaired_testcase_inputs(
+            hidden_tests,
+            failing_hidden_indexes,
+            repaired_hidden_cases,
+            is_sample=False,
+        )
         repaired_sample_cases = self._validate_test_cases_against_constraints(
             state=state,
             test_cases=repaired_sample_cases,
@@ -447,6 +461,17 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
         if not failing_results:
             return False
 
+        return all(
+            QuestionAgentToolsMixin._is_expected_output_repair_candidate(result)
+            for result in failing_results
+        )
+
+    @staticmethod
+    def _is_expected_output_repair_candidate(
+        result: SolutionValidationCaseResult,
+    ) -> bool:
+        """Return whether execution produced usable output for semantic review."""
+
         execution_failure_markers = (
             "compile",
             "runtime",
@@ -455,21 +480,47 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             "error",
             "exception",
         )
-        for result in failing_results:
-            status = result.status.lower()
-            diagnostic = " ".join(
-                [
-                    result.stderr,
-                    result.compile_output,
-                    result.message,
-                    status,
-                ]
-            ).lower()
-            if any(marker in diagnostic for marker in execution_failure_markers):
-                return False
-            if not result.actual_output.strip():
-                return False
-        return True
+        status = result.status.lower()
+        diagnostic = " ".join(
+            [
+                result.stderr,
+                result.compile_output,
+                result.message,
+                status,
+            ]
+        ).lower()
+        return bool(result.actual_output.strip()) and not any(
+            marker in diagnostic for marker in execution_failure_markers
+        )
+
+    @staticmethod
+    def _preserve_repaired_testcase_inputs(
+        existing: list[TestCase],
+        failed_indexes: set[int],
+        replacements: list[TestCase],
+        *,
+        is_sample: bool,
+    ) -> list[TestCase]:
+        """Accept repaired outputs while retaining each existing testcase input."""
+
+        repaired: list[TestCase] = []
+        for index, replacement in zip(
+            sorted(failed_indexes),
+            replacements,
+            strict=False,
+        ):
+            if index < 1 or index > len(existing):
+                continue
+            original = existing[index - 1]
+            repaired.append(
+                TestCase(
+                    input=original.input,
+                    expected_output=replacement.expected_output,
+                    is_sample=is_sample,
+                    explanation=replacement.explanation or original.explanation,
+                )
+            )
+        return repaired
 
     @staticmethod
     def _merge_unique_test_cases(
@@ -699,7 +750,9 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 ],
             )
 
-        language = state.get("reference_language", "python").strip().lower() or "python"
+        language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
+        )
         contract_error = self._reference_solution_contract_error(source_code, language)
         if contract_error:
             return self._source_contract_failure_report(

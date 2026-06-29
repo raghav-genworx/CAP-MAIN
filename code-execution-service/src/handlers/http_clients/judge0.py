@@ -166,7 +166,9 @@ class Judge0Client:
 
     def _decode_text(self, value: str) -> str:
         try:
-            decoded = base64.b64decode(value.encode("ascii"), validate=True)
+            encoded = value.encode("ascii")
+            normalized = b"".join(encoded.split())
+            decoded = base64.b64decode(normalized, validate=True)
         except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
             raise Judge0ServiceError(
                 "Judge0 returned an invalid encoded response."

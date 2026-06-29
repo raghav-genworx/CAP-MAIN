@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..states.question_state import QuestionGenerationState
+from .prompt_contract import build_task_system_prompt, build_task_user_prompt
 from .question_prompts import ADVERSARIAL_TESTS_PER_ROUND, ADVERSARIAL_VALIDATION_ROUNDS
 
 
@@ -16,26 +17,51 @@ def build_adversarial_test_prompt(
     existing_hidden_cases: list[dict[str, Any]],
     round_number: int,
 ) -> tuple[str, str]:
-    system_prompt = (
-        "You are an adversarial test-case agent. Find valid edge cases that could "
-        "expose bugs in the current reference solution while staying faithful to "
-        "the problem statement, input format, and constraints."
+    system_prompt = build_task_system_prompt(
+        role="adversarial testcase challenger",
+        objective=(
+            "Find new contract-valid inputs that expose likely defects in the "
+            "current solution."
+        ),
+        rules=(
+            (
+                "Derive expected outputs from the problem contract, never from "
+                "current source behavior."
+            ),
+            "Return no duplicate input from the supplied sample or hidden suites.",
+            "Prefer high-value boundaries and semantic branches over random cases.",
+        ),
     )
-    user_prompt = (
-        f"Round: {round_number} of {ADVERSARIAL_VALIDATION_ROUNDS}\n"
-        f"Title: {state.get('title', '')}\n"
-        f"Problem statement: {state.get('problem_statement', '')}\n"
-        f"Constraints: {state.get('constraints', '')}\n"
-        f"Input format: {state.get('input_format', '')}\n"
-        f"Output format: {state.get('output_format', '')}\n"
-        f"Existing sample tests: {existing_sample_cases}\n"
-        f"Existing hidden tests: {existing_hidden_cases}\n"
-        f"Current reference solution:\n{source_code}\n"
-        "Generate only valid hidden tests with expected outputs derived from the "
-        "problem statement, not from the solution. "
-        f"Return at most {ADVERSARIAL_TESTS_PER_ROUND} new cases. Prefer boundary, "
-        "branch, empty/minimum, maximum, and format-sensitive cases that a "
-        "simplistic solution may miss."
+    user_prompt = build_task_user_prompt(
+        task="Generate a small adversarial hidden-test challenge for this QC round.",
+        context={
+            "qc_round": {
+                "current": round_number,
+                "maximum": ADVERSARIAL_VALIDATION_ROUNDS,
+            },
+            "problem_contract": {
+                "title": state.get("title", ""),
+                "problem_statement": state.get("problem_statement", ""),
+                "input_format": state.get("input_format", ""),
+                "output_format": state.get("output_format", ""),
+                "constraints": state.get("constraints", ""),
+            },
+            "existing_testcases": {
+                "sample": existing_sample_cases,
+                "hidden": existing_hidden_cases,
+            },
+            "current_reference_solution": source_code,
+            "maximum_new_cases": ADVERSARIAL_TESTS_PER_ROUND,
+        },
+        requirements=(
+            "Return 0..maximum_new_cases hidden_test_cases and set is_sample=false.",
+            (
+                "Target a concrete likely weakness in the source while keeping "
+                "every input contract-valid."
+            ),
+            "Recompute exact expected STDOUT independently from the problem statement.",
+            "Use an empty list when no distinct high-value valid case exists.",
+        ),
     )
     return system_prompt, user_prompt
 

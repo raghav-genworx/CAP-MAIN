@@ -9,7 +9,7 @@ reporting.
 | Service | Local port | Responsibility |
 | --- | ---: | --- |
 | Frontend | 5173 | Recruiter and candidate React application |
-| API gateway | 8001 | Public service discovery, health aggregation, Firebase config proxy |
+| API gateway | 8001 | Browser authentication, authorization, and upstream routing |
 | Core platform | 8002 | Assessments, candidates, authentication, AI orchestration, email |
 | Code execution | 8003 | Trusted backend-only Judge0 adapter |
 | Code evaluation | 8004 | Scoring, ranking, evaluation jobs, PDF reports |
@@ -33,6 +33,11 @@ control shared infrastructure, published ports, and shared tokens. Each
 application keeps its standalone settings in its own ignored `.env` file. The
 frontend build uses same-origin `/api/*` routes and reads Firebase configuration
 from `frontend/.env` through a Docker build secret.
+
+All browser API traffic passes through the API gateway. Recruiter requests are
+validated against Firebase identity and the active core-platform role before
+forwarding. Candidate portal requests use gateway-verified candidate session
+tokens; invite verification and session start are the only public exceptions.
 
 The core and evaluation schemas are upgraded by one-shot migration services
 before either API becomes ready. Both jobs also reject model/schema drift.

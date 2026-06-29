@@ -52,8 +52,8 @@ class ValidationNodeMixin(QuestionAgentToolsMixin):
             "Validation Agent: completed consistency review",
             f"Execution Validation: {solution_validation.summary}",
         )
-        primary_language = (
-            state.get("reference_language", "python").strip().lower() or "python"
+        primary_language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
         )
         reference_solutions = dict(state.get("reference_solutions", {}))
         if loop_result["reference_solution"].strip():

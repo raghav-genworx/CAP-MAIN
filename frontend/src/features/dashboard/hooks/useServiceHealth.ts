@@ -4,14 +4,21 @@ import {
   fetchCodeExecutionHealth,
   fetchCoreHealth,
 } from "../../../services/healthService";
+import { useAuth } from "../../auth";
 
 export function useServiceHealth() {
+  const { currentUser } = useAuth();
+
   return useQuery({
-    queryKey: ["service-health"],
+    queryKey: ["service-health", currentUser?.uid],
     queryFn: async () => {
+      if (!currentUser) {
+        throw new Error("Recruiter session is required");
+      }
+      const idToken = await currentUser.getIdToken();
       const [core, execution] = await Promise.all([
-        fetchCoreHealth(),
-        fetchCodeExecutionHealth(),
+        fetchCoreHealth(idToken),
+        fetchCodeExecutionHealth(idToken),
       ]);
 
       return [
@@ -23,5 +30,6 @@ export function useServiceHealth() {
         },
       ];
     },
+    enabled: Boolean(currentUser),
   });
 }

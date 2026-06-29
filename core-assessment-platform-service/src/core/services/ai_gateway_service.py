@@ -181,6 +181,7 @@ class AIGatewayService:
         kwargs: dict[str, Any] = {
             "model": self._settings.groq_model,
             "messages": messages,
+            "temperature": 0,
         }
         if use_json_schema:
             kwargs["response_format"] = {

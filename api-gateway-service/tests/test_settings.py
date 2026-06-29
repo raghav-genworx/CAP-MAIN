@@ -19,6 +19,8 @@ class SettingsTests(unittest.TestCase):
         settings = Settings(
             app_env="production",
             cors_allowed_origins="https://cap.example.com",
+            internal_service_token="production-internal-service-token",
+            candidate_session_secret="production-candidate-session-secret",
         )
 
         self.assertEqual(settings.cors_origins, ["https://cap.example.com"])

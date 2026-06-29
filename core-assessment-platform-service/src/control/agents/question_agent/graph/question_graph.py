@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 
 from langgraph.graph import END, START, StateGraph
 
@@ -15,18 +16,26 @@ from schemas.question_bank import (
     DifficultyLevel,
     DifficultySource,
     MetadataStatus,
+    QuestionAIDraftContext,
     QuestionAIDraftRequest,
     QuestionAIDraftResponse,
     QuestionCreateRequest,
     QuestionCreationMode,
+    QuestionDraftRefinementResponse,
+    QuestionGenerationSettings,
     QuestionRecord,
     QuestionStatus,
+    ReferenceSolutionArtifact,
+    SolutionValidationCaseResult,
+    SolutionValidationReport,
+    TestCase,
     ValidationStatus,
 )
 
 from ..nodes.question_nodes import QuestionAgentNodesMixin
+from ..prompts.bruteforce_solution_prompt import build_bruteforce_solution_prompt
 from ..prompts.question_prompts import SCOPE_NODE_SEQUENCE, SCOPE_SUMMARIES
-from ..states.question_state import QuestionGenerationState
+from ..states.question_state import QuestionGenerationState, SolutionOutput
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +52,8 @@ FULL_NODE_SEQUENCE = [
     "duplicate_detection",
     "quality_review",
 ]
+
+QC_REFINEMENT_ROUNDS = 3
 
 NODE_LABELS = {
     "orchestrator": "Preparing request",
@@ -108,6 +119,460 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 solution_validation=None,
                 error=error_message,
             )
+
+    def refine_test_cases(
+        self,
+        recruiter_uid: str,
+        draft: QuestionAIDraftContext,
+    ) -> QuestionDraftRefinementResponse:
+        """QC existing tests with a brute-force oracle and repair tests or source."""
+
+        self._current_recruiter_uid = recruiter_uid
+        self._current_workflow_mode = "interactive"
+        state = self._build_refinement_state(draft, "tests")
+        sample_tests = list(draft.sample_test_cases)
+        hidden_tests = list(draft.hidden_test_cases)
+        source_code = self._sanitize_reference_solution(draft.reference_solution)
+        brute_force_source = self._generate_bruteforce_solution(state)
+        repaired_count = 0
+        solution_changed = False
+        qc_notes: list[str] = []
+
+        for round_number in range(1, QC_REFINEMENT_ROUNDS + 1):
+            round_state = cast(
+                QuestionGenerationState,
+                {
+                    **state,
+                    "sample_test_cases": sample_tests,
+                    "hidden_test_cases": hidden_tests,
+                    "reference_solution": source_code,
+                },
+            )
+            primary_report = self._validate_reference_solution(round_state)
+            oracle_report = self._validate_oracle_solution(
+                round_state,
+                brute_force_source,
+            )
+            sample_tests, hidden_tests, expected_output_changes = (
+                self._repair_expected_outputs_from_oracle(
+                    sample_tests,
+                    hidden_tests,
+                    oracle_report,
+                )
+            )
+            if expected_output_changes:
+                repaired_count += expected_output_changes
+                qc_notes.append(
+                    (
+                        f"Round {round_number}: brute-force oracle corrected "
+                        f"{expected_output_changes} expected output"
+                        f"{'' if expected_output_changes == 1 else 's'}."
+                    ),
+                )
+                continue
+
+            solution_repair_results = self._solution_repair_results_from_oracle(
+                primary_report,
+                oracle_report,
+            )
+            if solution_repair_results:
+                repair_report = self._report_for_results(
+                    primary_report,
+                    solution_repair_results,
+                )
+                repair_sample_tests, repair_hidden_tests = self._tests_for_results(
+                    sample_tests,
+                    hidden_tests,
+                    solution_repair_results,
+                )
+                repaired_source = self._repair_reference_solution(
+                    state=round_state,
+                    source_code=source_code,
+                    validation_report=repair_report,
+                    sample_tests=repair_sample_tests,
+                    hidden_tests=repair_hidden_tests,
+                    round_number=round_number,
+                )
+                if repaired_source.strip() != source_code.strip():
+                    source_code = repaired_source
+                    solution_changed = True
+                    qc_notes.append(
+                        (
+                            f"Round {round_number}: expected output matched the "
+                            "brute-force oracle, so the solution was repaired."
+                        ),
+                    )
+                    continue
+
+            qc_notes.append(
+                f"Round {round_number}: QC found no further automatic repairs.",
+            )
+            break
+
+        refined_state = cast(
+            QuestionGenerationState,
+            {
+                **state,
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+                "reference_solution": source_code,
+            },
+        )
+        final_report = self._validate_reference_solution(refined_state)
+        if final_report.status == "passed" and repaired_count and solution_changed:
+            summary = (
+                f"QC repaired {repaired_count} expected output"
+                f"{'' if repaired_count == 1 else 's'}, repaired the solution, "
+                "and re-ran all tests successfully."
+            )
+        elif final_report.status == "passed" and repaired_count:
+            summary = (
+                f"QC repaired {repaired_count} expected output"
+                f"{'' if repaired_count == 1 else 's'} with the brute-force "
+                "oracle and re-ran all tests successfully."
+            )
+        elif final_report.status == "passed" and solution_changed:
+            summary = (
+                "QC kept expected outputs unchanged, repaired the solution using "
+                "the brute-force oracle evidence, and re-ran all tests successfully."
+            )
+        else:
+            summary = (
+                "QC completed but remaining failures need recruiter review. "
+                + " ".join(qc_notes[-2:])
+            )
+        return QuestionDraftRefinementResponse(
+            draft=self._refined_draft(
+                draft,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+                reference_solution=source_code,
+                report=final_report,
+            ),
+            validation_report=final_report,
+            summary=summary,
+            repaired_test_case_count=repaired_count,
+            solution_changed=solution_changed,
+        )
+
+    def refine_solution(
+        self,
+        recruiter_uid: str,
+        draft: QuestionAIDraftContext,
+    ) -> QuestionDraftRefinementResponse:
+        """Repair source from the problem contract, using failures as evidence."""
+
+        self._current_recruiter_uid = recruiter_uid
+        self._current_workflow_mode = "interactive"
+        state = self._build_refinement_state(draft, "solution")
+        initial_report = self._validate_reference_solution(state)
+        sample_tests = list(draft.sample_test_cases)
+        hidden_tests = list(draft.hidden_test_cases)
+        source_code = self._sanitize_reference_solution(draft.reference_solution)
+        repaired_source = source_code
+        if initial_report.status != "passed":
+            failing_sample_indexes = {
+                result.index
+                for result in initial_report.results
+                if result.bucket == "sample" and not result.passed
+            }
+            failing_hidden_indexes = {
+                result.index
+                for result in initial_report.results
+                if result.bucket == "hidden" and not result.passed
+            }
+            repaired_source = self._repair_reference_solution(
+                state=state,
+                source_code=source_code,
+                validation_report=initial_report,
+                sample_tests=[
+                    test_case
+                    for index, test_case in enumerate(sample_tests, start=1)
+                    if index in failing_sample_indexes
+                ],
+                hidden_tests=[
+                    test_case
+                    for index, test_case in enumerate(hidden_tests, start=1)
+                    if index in failing_hidden_indexes
+                ],
+                round_number=1,
+            )
+
+        solution_changed = repaired_source.strip() != source_code.strip()
+        refined_state = cast(
+            QuestionGenerationState,
+            {**state, "reference_solution": repaired_source},
+        )
+        final_report = self._validate_reference_solution(refined_state)
+        if initial_report.status == "passed":
+            summary = "The current solution already passes all existing tests."
+        elif solution_changed:
+            summary = (
+                "Repaired the solution from the problem statement and constraints, "
+                "then re-ran all tests."
+            )
+        else:
+            summary = "The solution could not be changed; review remaining failures."
+        return QuestionDraftRefinementResponse(
+            draft=self._refined_draft(
+                draft,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+                reference_solution=repaired_source,
+                report=final_report,
+            ),
+            validation_report=final_report,
+            summary=summary,
+            solution_changed=solution_changed,
+        )
+
+    def _generate_bruteforce_solution(
+        self,
+        state: QuestionGenerationState,
+    ) -> str:
+        """Generate an independent correctness-first oracle for testcase QC."""
+
+        language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
+        )
+        system_prompt, user_prompt = build_bruteforce_solution_prompt(
+            state,
+            language=language,
+            sample_cases=[
+                {"input": case.input, "is_sample": case.is_sample}
+                for case in state.get("sample_test_cases", [])
+            ],
+            hidden_cases=[
+                {"input": case.input, "is_sample": case.is_sample}
+                for case in state.get("hidden_test_cases", [])
+            ],
+            strict_contract_guidance=self._strict_solution_contract_guidance(language),
+            language_contract_guidance=self._solution_contract_guidance(language),
+        )
+        model = self._structured_completion(
+            schema_name="bruteforce_solution",
+            schema_model=SolutionOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return self._ensure_runnable_reference_solution(
+            state=state,
+            candidate=model.reference_solution,
+            language=language,
+            schema_name="bruteforce_solution_contract_retry",
+            rejection_context=(
+                "Brute-force oracle generation did not satisfy the runnable-code "
+                "contract."
+            ),
+        )
+
+    def _validate_oracle_solution(
+        self,
+        state: QuestionGenerationState,
+        brute_force_source: str,
+    ) -> SolutionValidationReport:
+        """Run the brute-force oracle against the current expected outputs."""
+
+        language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
+        )
+        return self._validate_source_against_tests(
+            language=language,
+            source_code=brute_force_source,
+            sample_tests=self._complete_test_cases(
+                state.get("sample_test_cases", []),
+            ),
+            hidden_tests=self._complete_test_cases(
+                state.get("hidden_test_cases", []),
+            ),
+            rounds=[],
+            time_limit_seconds=state.get("execution_time_limit_seconds"),
+            memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+        )
+
+    def _repair_expected_outputs_from_oracle(
+        self,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        oracle_report: SolutionValidationReport,
+    ) -> tuple[list[TestCase], list[TestCase], int]:
+        """Use brute-force actual output as the repaired expected output."""
+
+        repaired_sample_tests = list(sample_tests)
+        repaired_hidden_tests = list(hidden_tests)
+        repaired_count = 0
+        for result in oracle_report.results:
+            if result.passed or not self._is_expected_output_repair_candidate(result):
+                continue
+            target_tests = (
+                repaired_sample_tests
+                if result.bucket == "sample"
+                else repaired_hidden_tests
+            )
+            target_index = result.index - 1
+            if target_index < 0 or target_index >= len(target_tests):
+                continue
+            original = target_tests[target_index]
+            if original.expected_output == result.actual_output:
+                continue
+            target_tests[target_index] = original.model_copy(
+                update={"expected_output": result.actual_output},
+            )
+            repaired_count += 1
+        return repaired_sample_tests, repaired_hidden_tests, repaired_count
+
+    @staticmethod
+    def _solution_repair_results_from_oracle(
+        primary_report: SolutionValidationReport,
+        oracle_report: SolutionValidationReport,
+    ) -> list[SolutionValidationCaseResult]:
+        """Return primary failures where the brute-force oracle validates expected."""
+
+        oracle_results = {
+            (result.bucket, result.index): result
+            for result in oracle_report.results
+        }
+        return [
+            result
+            for result in primary_report.results
+            if not result.passed
+            and oracle_results.get((result.bucket, result.index))
+            and oracle_results[(result.bucket, result.index)].passed
+        ]
+
+    @staticmethod
+    def _report_for_results(
+        report: SolutionValidationReport,
+        results: list[SolutionValidationCaseResult],
+    ) -> SolutionValidationReport:
+        """Create a focused validation report for solution repair prompts."""
+
+        return report.model_copy(
+            update={
+                "results": results,
+                "passed_count": 0,
+                "failed_count": len(results),
+                "summary": (
+                    f"Reference solution failed {len(results)} oracle-confirmed "
+                    "execution check"
+                    f"{'' if len(results) == 1 else 's'}."
+                ),
+            },
+        )
+
+    @staticmethod
+    def _tests_for_results(
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        results: list[SolutionValidationCaseResult],
+    ) -> tuple[list[TestCase], list[TestCase]]:
+        """Return testcase rows that correspond to the supplied result list."""
+
+        sample_indexes = {
+            result.index
+            for result in results
+            if result.bucket == "sample"
+        }
+        hidden_indexes = {
+            result.index
+            for result in results
+            if result.bucket == "hidden"
+        }
+        return (
+            [
+                test_case
+                for index, test_case in enumerate(sample_tests, start=1)
+                if index in sample_indexes
+            ],
+            [
+                test_case
+                for index, test_case in enumerate(hidden_tests, start=1)
+                if index in hidden_indexes
+            ],
+        )
+
+    def _build_refinement_state(
+        self,
+        draft: QuestionAIDraftContext,
+        scope: Literal["tests", "solution"],
+    ) -> QuestionGenerationState:
+        """Build normal agent state while preserving the complete current draft."""
+
+        request = QuestionAIDraftRequest(
+            prompt=(
+                "Refine the existing draft using execution evidence while preserving "
+                "the authoritative problem contract."
+            ),
+            generation_scope=scope,
+            reference_language=draft.reference_language,
+            title_hint=draft.title or None,
+            focus_tags=draft.tags,
+            current_draft=draft,
+            generation_settings=QuestionGenerationSettings(
+                topics=draft.topics,
+                supported_languages=draft.supported_languages,
+                candidate_solve_time_minutes=draft.candidate_solve_time_minutes,
+                time_limit_minutes=draft.candidate_solve_time_minutes,
+                execution_time_limit_seconds=draft.execution_time_limit_seconds,
+                memory_limit_mb=draft.memory_limit_mb,
+                sample_test_case_count=min(
+                    10,
+                    max(1, len(draft.sample_test_cases)),
+                ),
+                hidden_test_case_count=min(
+                    50,
+                    max(1, len(draft.hidden_test_cases)),
+                ),
+            ),
+        )
+        return self._build_initial_state(request, [])
+
+    @staticmethod
+    def _count_expected_output_changes(
+        before: list[TestCase],
+        after: list[TestCase],
+    ) -> int:
+        return sum(
+            1
+            for old, new in zip(before, after, strict=False)
+            if old.expected_output != new.expected_output
+        )
+
+    @staticmethod
+    def _refined_draft(
+        draft: QuestionAIDraftContext,
+        *,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        reference_solution: str,
+        report: SolutionValidationReport,
+    ) -> QuestionCreateRequest:
+        payload = draft.model_dump()
+        primary_language = QuestionGenerationWorkflow._normalize_solution_language(
+            draft.reference_language,
+        )
+        reference_solutions = dict(draft.reference_solutions)
+        if reference_solution.strip():
+            reference_solutions[primary_language] = ReferenceSolutionArtifact(
+                language=primary_language,
+                source_code=reference_solution,
+                validation_status=ValidationStatus(report.status),
+                time_complexity=draft.time_complexity,
+                space_complexity=draft.space_complexity,
+            )
+        payload.update(
+            {
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+                "reference_solution": reference_solution,
+                "reference_solutions": reference_solutions,
+                "validation_report": report,
+                "validation_status": report.status,
+                "validation_updated_at": datetime.now(UTC),
+                "creation_mode": QuestionCreationMode.AI_ASSISTED,
+            }
+        )
+        return QuestionCreateRequest.model_validate(payload)
 
     def generate_events(
         self,
