@@ -1,0 +1,336 @@
+name: cap-platform
+
+x-api-healthcheck: &api-healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
+  interval: 30s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+x-service-common-env: &service-common-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_PREFIX: /api/v1
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/1
+
+x-judge0-slim-build: &judge0-slim-build
+  context: ./docker/judge0
+  dockerfile: Dockerfile
+  args:
+    JUDGE0_REF: ${JUDGE0_REF:-master}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cap_core}
+      POSTGRES_USER: ${POSTGRES_USER:-cap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
+      JUDGE0_POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
+      EVALUATION_POSTGRES_DB: ${EVALUATION_POSTGRES_DB:-cap_evaluation}
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - cap-postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - sh
+      - -c
+      - redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cap_redis_password}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - cap-redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$${REDIS_PASSWORD}" ping | grep PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api-gateway-service:
+    build:
+      context: ./api-gateway-service
+    restart: unless-stopped
+    env_file:
+      - ./api-gateway-service/.env
+    environment:
+      <<: *service-common-env
+      APP_NAME: API Gateway Service
+      CORE_SERVICE_BASE_URL: http://core-assessment-platform-service:8000
+      CODE_EXECUTION_SERVICE_BASE_URL: http://code-execution-service:8000
+      CODE_EVALUATION_SERVICE_BASE_URL: http://code-evaluation-service:8000
+      UPSTREAM_REQUEST_TIMEOUT_SECONDS: ${UPSTREAM_REQUEST_TIMEOUT_SECONDS:-10}
+    depends_on:
+      core-assessment-platform-service:
+        condition: service_healthy
+      code-execution-service:
+        condition: service_healthy
+      code-evaluation-service:
+        condition: service_healthy
+    ports:
+      - "${API_GATEWAY_PORT:-8001}:8000"
+    healthcheck: *api-healthcheck
+
+  core-assessment-migrate:
+    build:
+      context: ./core-assessment-platform-service
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - alembic -c alembic.ini upgrade head && alembic -c alembic.ini check
+    env_file:
+      - ./core-assessment-platform-service/.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  core-assessment-platform-service:
+    build:
+      context: ./core-assessment-platform-service
+    restart: unless-stopped
+    env_file:
+      - ./core-assessment-platform-service/.env
+    environment:
+      <<: *service-common-env
+      APP_NAME: Core Assessment Platform Service
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      AUTO_CREATE_RECRUITER_ROLE: ${AUTO_CREATE_RECRUITER_ROLE:-true}
+      CODE_EXECUTION_API_BASE_URL: http://code-execution-service:8000/api/v1
+      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-90}
+      CODE_EVALUATION_API_BASE_URL: http://code-evaluation-service:8000/api/v1
+      CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
+      GROQ_REQUEST_TIMEOUT_SECONDS: ${GROQ_REQUEST_TIMEOUT_SECONDS:-60}
+      BREVO_REQUEST_TIMEOUT_SECONDS: ${BREVO_REQUEST_TIMEOUT_SECONDS:-30}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      INVITE_TOKEN_PEPPER: ${INVITE_TOKEN_PEPPER:-change-me-local-invite-token-pepper}
+      CANDIDATE_SESSION_SECRET: ${CANDIDATE_SESSION_SECRET:-change-me-local-candidate-session-secret}
+    depends_on:
+      core-assessment-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      code-execution-service:
+        condition: service_started
+      code-evaluation-service:
+        condition: service_started
+    ports:
+      - "${CORE_SERVICE_PORT:-8002}:8000"
+    healthcheck: *api-healthcheck
+
+  code-execution-service:
+    build:
+      context: ./code-execution-service
+    restart: unless-stopped
+    env_file:
+      - ./code-execution-service/.env
+    environment:
+      <<: *service-common-env
+      APP_NAME: Code Execution Service
+      JUDGE0_BASE_URL: http://judge0-server:2358
+      JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
+      JUDGE0_AUTH_HEADER: ${JUDGE0_AUTH_HEADER:-X-Auth-Token}
+      JUDGE0_REQUEST_TIMEOUT_SECONDS: ${JUDGE0_REQUEST_TIMEOUT_SECONDS:-10}
+      JUDGE0_POLL_INTERVAL_SECONDS: ${JUDGE0_POLL_INTERVAL_SECONDS:-0.5}
+      JUDGE0_MAX_POLL_ATTEMPTS: ${JUDGE0_MAX_POLL_ATTEMPTS:-30}
+      DEFAULT_CPU_TIME_LIMIT_SECONDS: ${DEFAULT_CPU_TIME_LIMIT_SECONDS:-2}
+      DEFAULT_MEMORY_LIMIT_KB: ${DEFAULT_MEMORY_LIMIT_KB:-128000}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      judge0-server:
+        condition: service_healthy
+    ports:
+      - "${CODE_EXECUTION_PORT:-8003}:8000"
+    healthcheck: *api-healthcheck
+
+  code-evaluation-migrate:
+    build:
+      context: ./code-evaluation-service
+    restart: "no"
+    command: [ "alembic", "-c", "alembic.ini", "upgrade", "head" ]
+    env_file:
+      - ./code-evaluation-service/.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  code-evaluation-service:
+    build:
+      context: ./code-evaluation-service
+    restart: unless-stopped
+    env_file:
+      - ./code-evaluation-service/.env
+    environment:
+      <<: *service-common-env
+      APP_NAME: Code Evaluation Service
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      EVALUATION_REPORT_DIR: /app/data/reports
+      SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
+      EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
+      EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
+      EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
+      EVALUATION_JOB_LEASE_SECONDS: ${EVALUATION_JOB_LEASE_SECONDS:-300}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+    volumes:
+      - cap-evaluation-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      code-evaluation-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      code-execution-service:
+        condition: service_healthy
+    ports:
+      - "${CODE_EVALUATION_PORT:-8004}:8000"
+    healthcheck: *api-healthcheck
+
+  code-evaluation-worker:
+    build:
+      context: ./code-evaluation-service
+    restart: unless-stopped
+    command: [ "python", "-m", "worker" ]
+    env_file:
+      - ./code-evaluation-service/.env
+    environment:
+      <<: *service-common-env
+      APP_NAME: Code Evaluation Worker
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      EVALUATION_REPORT_DIR: /app/data/reports
+      SEED_DEMO_EVALUATIONS: "false"
+      EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
+      EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
+      EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
+      EVALUATION_JOB_LEASE_SECONDS: ${EVALUATION_JOB_LEASE_SECONDS:-300}
+    volumes:
+      - cap-evaluation-data:/app/data
+    depends_on:
+      code-evaluation-service:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_CORE_API_BASE_URL: ${VITE_CORE_API_BASE_URL:-/api/core}
+        VITE_CODE_EXECUTION_API_BASE_URL: ${VITE_CODE_EXECUTION_API_BASE_URL:-/api/execution}
+        VITE_CODE_EVALUATION_API_BASE_URL: ${VITE_CODE_EVALUATION_API_BASE_URL:-/api/evaluation}
+      secrets:
+        - frontend_env
+    restart: unless-stopped
+    depends_on:
+      core-assessment-platform-service:
+        condition: service_healthy
+      code-execution-service:
+        condition: service_healthy
+      code-evaluation-service:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1/ >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  judge0-server:
+    image: cap/judge0-slim:local
+    build: *judge0-slim-build
+    volumes:
+      - ./docker/judge0/judge0.conf:/api/judge0.conf:ro
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
+      POSTGRES_USER: ${POSTGRES_USER:-cap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cap_redis_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${JUDGE0_PORT:-12358}:2358"
+    privileged: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:2358/languages >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  judge0-worker:
+    image: cap/judge0-slim:local
+    build: *judge0-slim-build
+    command: [ "./scripts/workers" ]
+    volumes:
+      - ./docker/judge0/judge0.conf:/api/judge0.conf:ro
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
+      POSTGRES_USER: ${POSTGRES_USER:-cap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cap_redis_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      judge0-server:
+        condition: service_healthy
+    privileged: true
+    restart: unless-stopped
+
+secrets:
+  frontend_env:
+    file: ./frontend/.env
+
+volumes:
+  cap-postgres-data:
+  cap-redis-data:
+  cap-evaluation-data:

@@ -1,0 +1,15 @@
+{
+  "candidates": [
+    {
+      "session_token": "replace-with-a-dedicated-load-test-session-token",
+      "questions": [
+        {
+          "question_id": "replace-with-question-id",
+          "source_code": "print(input())",
+          "language": "python",
+          "current_question_order": 1
+        }
+      ]
+    }
+  ]
+}

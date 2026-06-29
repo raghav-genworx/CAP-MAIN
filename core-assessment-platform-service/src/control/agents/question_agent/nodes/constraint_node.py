@@ -1,0 +1,52 @@
+"""Constraint node for the question agent."""
+
+from __future__ import annotations
+
+from ..prompts.constraint_prompt import build_constraint_prompt
+from ..states.question_state import (
+    ConstraintOutput,
+    QuestionGenerationState,
+)
+from ..tools.question_tools import QuestionAgentToolsMixin
+
+
+class ConstraintNodeMixin(QuestionAgentToolsMixin):
+    """Constraint node for the question agent."""
+
+    def _constraint_node(
+        self, state: QuestionGenerationState
+    ) -> QuestionGenerationState:
+        system_prompt, user_prompt = build_constraint_prompt(state)
+        model = self._structured_completion(
+            schema_name="constraints",
+            schema_model=ConstraintOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        notes = self._append_notes(state.get("notes", []), *model.notes)
+        execution_history = self._append_notes(
+            state.get("execution_history", []),
+            "Constraint Agent: shaped runtime and memory limits",
+        )
+        return {
+            "input_format": model.input_format.strip() or state.get("input_format", ""),
+            "input_explanation": model.input_explanation.strip()
+            or state.get("input_explanation", ""),
+            "output_format": model.output_format.strip()
+            or state.get("output_format", ""),
+            "output_explanation": model.output_explanation.strip()
+            or state.get("output_explanation", ""),
+            "constraints": model.constraints.strip(),
+            "candidate_solve_time_minutes": model.candidate_solve_time_minutes
+            or model.time_limit_minutes
+            or state.get("candidate_solve_time_minutes", 45),
+            "execution_time_limit_seconds": model.execution_time_limit_seconds
+            or state.get("execution_time_limit_seconds", 2),
+            "memory_limit_mb": model.memory_limit_mb
+            or state.get("memory_limit_mb", 256),
+            "notes": notes,
+            "execution_history": execution_history,
+        }
+
+
+__all__ = ["ConstraintNodeMixin"]

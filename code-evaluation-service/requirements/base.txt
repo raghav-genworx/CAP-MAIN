@@ -1,0 +1,1 @@
+# Runtime dependencies are managed in pyproject.toml and locked by uv.lock.
