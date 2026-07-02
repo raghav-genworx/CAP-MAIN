@@ -29,11 +29,6 @@ const RecruiterAssessmentsPage = lazy(() =>
     default: module.RecruiterAssessmentsPage,
   })),
 );
-const CodeEvaluationPage = lazy(() =>
-  import("../features/codeEvaluation").then((module) => ({
-    default: module.CodeEvaluationPage,
-  })),
-);
 const SettingsPage = lazy(() =>
   import("../features/settings").then((module) => ({
     default: module.SettingsPage,
@@ -42,6 +37,21 @@ const SettingsPage = lazy(() =>
 const LoginPage = lazy(() =>
   import("../features/auth").then((module) => ({
     default: module.RecruiterLoginPage,
+  })),
+);
+const EmailVerificationPage = lazy(() =>
+  import("../features/auth").then((module) => ({
+    default: module.EmailVerificationPage,
+  })),
+);
+const SignupPage = lazy(() =>
+  import("../features/auth").then((module) => ({
+    default: module.RecruiterSignupPage,
+  })),
+);
+const SubscriptionPage = lazy(() =>
+  import("../features/auth").then((module) => ({
+    default: module.RecruiterSubscriptionPage,
   })),
 );
 const CandidateInvitePage = lazy(() =>
@@ -72,6 +82,23 @@ export const router = createBrowserRouter([
     element: <LoginPage />,
   },
   {
+    path: "/recruiter/verify-email",
+    element: <EmailVerificationPage />,
+  },
+  {
+    path: "/recruiter/signup",
+    element: <SignupPage />,
+  },
+  {
+    element: <ProtectedRoute requireSubscription={false} />,
+    children: [
+      {
+        path: "/recruiter/subscription",
+        element: <SubscriptionPage />,
+      },
+    ],
+  },
+  {
     element: <ProtectedRoute />,
     children: [
       {
@@ -97,10 +124,6 @@ export const router = createBrowserRouter([
           {
             path: "/recruiter/candidates",
             element: <Navigate to="/recruiter/assessments" replace />,
-          },
-          {
-            path: "/recruiter/results",
-            element: <CodeEvaluationPage />,
           },
           {
             path: "/recruiter/settings",

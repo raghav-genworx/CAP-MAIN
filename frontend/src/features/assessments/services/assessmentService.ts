@@ -59,6 +59,15 @@ export async function updateAssessment(
   return response.data;
 }
 
+export async function deleteAssessment(
+  idToken: string,
+  assessmentId: string,
+): Promise<void> {
+  await coreApiClient.delete(`/assessments/${assessmentId}`, {
+    headers: authHeader(idToken),
+  });
+}
+
 export async function setAssessmentQuestions(
   idToken: string,
   assessmentId: string,

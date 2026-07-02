@@ -60,6 +60,7 @@ class HiddenExecutionResult(BaseModel):
     expected_output: str = Field(default="", max_length=20_000)
     actual_output: str = Field(default="", max_length=20_000)
     message: str = Field(default="", max_length=2_000)
+    case_category: str = Field(default="", max_length=120)
 
 
 class QuestionTestCaseResult(BaseModel):
@@ -76,12 +77,14 @@ class QuestionTestCaseResult(BaseModel):
     expected_output: str = ""
     actual_output: str = ""
     message: str = ""
+    case_category: str = ""
 
 
 class AICodeQualitySignal(BaseModel):
     """Structured AI code-quality output stored with a scorecard."""
 
     score: float = Field(ge=0, le=100)
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     approach: str = Field(min_length=1, max_length=600)
     time_complexity: str = Field(min_length=1, max_length=80)
     space_complexity: str = Field(min_length=1, max_length=80)
@@ -90,6 +93,44 @@ class AICodeQualitySignal(BaseModel):
     strengths: list[str] = Field(default_factory=list, max_length=6)
     weaknesses: list[str] = Field(default_factory=list, max_length=6)
     improvements: list[str] = Field(default_factory=list, max_length=6)
+
+
+class QuestionSubmission(BaseModel):
+    """Question-specific candidate source and assigned assessment marks."""
+
+    question_id: str = Field(min_length=1, max_length=80)
+    question_title: str = Field(min_length=1, max_length=160)
+    language: str = Field(default="unknown", max_length=40)
+    source_code: str = Field(default="", max_length=100_000)
+    marks: float = Field(default=1, gt=0, le=1_000)
+    difficulty: str = Field(default="", max_length=30)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    problem_statement: str = Field(default="", max_length=20_000)
+    input_format: str = Field(default="", max_length=6_000)
+    output_format: str = Field(default="", max_length=6_000)
+    constraints: str = Field(default="", max_length=10_000)
+    suggested_solution: str = Field(default="", max_length=100_000)
+    suggested_improvement_notes: list[str] = Field(default_factory=list, max_length=8)
+
+
+class CandidateActivitySignal(BaseModel):
+    """Candidate timing context, when available from the assessment runtime."""
+
+    started_at: datetime | None = None
+    submitted_at: datetime | None = None
+    total_time_seconds: int | None = Field(default=None, ge=0)
+    question_time_seconds: dict[str, int] = Field(default_factory=dict)
+
+
+class CandidateIntegritySignal(BaseModel):
+    """Optional proctoring and integrity signals for recruiter reports."""
+
+    proctoring_mode: str = Field(default="", max_length=40)
+    tab_switches: int | None = Field(default=None, ge=0)
+    copy_paste_count: int | None = Field(default=None, ge=0)
+    fullscreen_exits: int | None = Field(default=None, ge=0)
+    suspicious_activity: list[str] = Field(default_factory=list, max_length=20)
+    plagiarism_similarity_score: float | None = Field(default=None, ge=0, le=100)
 
 
 class EvaluationJobCreateRequest(BaseModel):
@@ -103,9 +144,15 @@ class EvaluationJobCreateRequest(BaseModel):
     submission_id: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=40)
     source_code: str = Field(min_length=1, max_length=200_000)
+    question_submissions: list[QuestionSubmission] = Field(
+        default_factory=list,
+        max_length=200,
+    )
     hidden_results: list[HiddenExecutionResult] = Field(min_length=1, max_length=500)
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
     ai_quality: AICodeQualitySignal | None = None
+    activity: CandidateActivitySignal | None = None
+    integrity: CandidateIntegritySignal | None = None
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     time_taken_seconds: int | None = Field(default=None, ge=0)
 
@@ -117,11 +164,26 @@ class QuestionEvaluationBreakdown(BaseModel):
     question_title: str
     language: str = ""
     submitted_code: str = ""
+    evaluation_status: str = "evaluated"
     passed_count: int
     total_count: int
     earned_points: float
     total_points: float
     score: float
+    assigned_marks: float = 0
+    earned_marks: float = 0
+    test_case_score: float = 0
+    coding_score: float = 0
+    ai_score: float = 0
+    ai_quality: AICodeQualitySignal | None = None
+    difficulty: str = ""
+    tags: list[str] = Field(default_factory=list)
+    problem_statement: str = ""
+    input_format: str = ""
+    output_format: str = ""
+    constraints: str = ""
+    suggested_solution: str = ""
+    suggested_improvement_notes: list[str] = Field(default_factory=list)
     mandatory_failed: bool
     test_cases: list[QuestionTestCaseResult] = Field(default_factory=list)
 
@@ -151,13 +213,26 @@ class CandidateEvaluationSummary(BaseModel):
     scores: EvaluationScores
     hidden_passed: int
     hidden_total: int
+    weights: ScoringWeights = Field(default_factory=ScoringWeights)
     total_execution_time_ms: float
     peak_memory_kb: int
     ai_quality: AICodeQualitySignal
     question_breakdown: list[QuestionEvaluationBreakdown]
+    activity: CandidateActivitySignal | None = None
+    integrity: CandidateIntegritySignal | None = None
     submitted_at: datetime
     evaluated_at: datetime | None = None
     time_taken_seconds: int | None = None
+
+
+class CandidateBenchmarkContext(BaseModel):
+    """Assessment-level context for one candidate report."""
+
+    candidate_rank: int | None = None
+    total_candidates: int = 0
+    average_score: float | None = None
+    average_completion_time_seconds: int | None = None
+    percentile: float | None = None
 
 
 class EvaluationJobResponse(BaseModel):
@@ -216,6 +291,7 @@ class CandidateReportResponse(BaseModel):
     assessment_id: str
     candidate_assessment_id: str
     candidate: CandidateEvaluationSummary
+    benchmark: CandidateBenchmarkContext | None = None
     generated_at: datetime
     download_label: str
 

@@ -54,20 +54,20 @@ jobs:
         run: uv run pytest -q -W error
 
   evaluation-postgres:
-    name: Evaluation PostgreSQL
+    name: Shared Core/Evaluation PostgreSQL
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: cap_evaluation
+          POSTGRES_DB: cap_core
           POSTGRES_USER: cap_user
           POSTGRES_PASSWORD: cap_password
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U cap_user -d cap_evaluation"
+          --health-cmd "pg_isready -U cap_user -d cap_core"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -76,19 +76,29 @@ jobs:
         working-directory: code-evaluation-service
     env:
       UV_PYTHON: "3.11"
-      DATABASE_URL: postgresql+psycopg://cap_user:cap_password@localhost:5432/cap_evaluation
-      EVALUATION_TEST_DATABASE_URL: postgresql+psycopg://cap_user:cap_password@localhost:5432/cap_evaluation
+      DATABASE_URL: postgresql+psycopg://cap_user:cap_password@localhost:5432/cap_core
+      EVALUATION_TEST_DATABASE_URL: postgresql+psycopg://cap_user:cap_password@localhost:5432/cap_core
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --dev --frozen
-      - name: Apply migrations
+      - name: Install evaluation dependencies
+        run: uv sync --dev --frozen
+      - name: Install core dependencies
+        working-directory: core-assessment-platform-service
+        run: uv sync --dev --frozen
+      - name: Apply core migrations
+        working-directory: core-assessment-platform-service
+        run: uv run alembic -c alembic.ini upgrade head
+      - name: Apply evaluation migrations
         run: uv run alembic -c alembic.ini upgrade head
       - name: Verify PostgreSQL repository
         run: uv run pytest tests/test_postgres_integration.py -q -W error
-      - name: Detect schema drift
+      - name: Detect evaluation schema drift
+        run: uv run alembic -c alembic.ini check
+      - name: Detect core schema drift
+        working-directory: core-assessment-platform-service
         run: uv run alembic -c alembic.ini check
 
   core-postgres:

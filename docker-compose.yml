@@ -33,7 +33,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-cap_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
       JUDGE0_POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
-      EVALUATION_POSTGRES_DB: ${EVALUATION_POSTGRES_DB:-cap_evaluation}
     ports:
       - "${POSTGRES_PORT:-55432}:5432"
     volumes:
@@ -126,7 +125,22 @@ services:
       CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-90}
       CODE_EVALUATION_API_BASE_URL: http://code-evaluation-service:8000/api/v1
       CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_API_KEY_1: ${GROQ_API_KEY_1:-}
+      GROQ_API_KEY_2: ${GROQ_API_KEY_2:-}
+      GROQ_API_KEY_3: ${GROQ_API_KEY_3:-}
+      GROQ_API_KEY_4: ${GROQ_API_KEY_4:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_QWEN_MODEL: ${GROQ_QWEN_MODEL:-qwen/qwen3-32b}
+      GROQ_GPT_OSS_MODEL: ${GROQ_GPT_OSS_MODEL:-openai/gpt-oss-120b}
+      GROQ_RETRY_COUNT: ${GROQ_RETRY_COUNT:-3}
+      GROQ_RETRY_BACKOFF_SECONDS: ${GROQ_RETRY_BACKOFF_SECONDS:-0.5}
       GROQ_REQUEST_TIMEOUT_SECONDS: ${GROQ_REQUEST_TIMEOUT_SECONDS:-60}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.3:70b}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-ollama}
       BREVO_REQUEST_TIMEOUT_SECONDS: ${BREVO_REQUEST_TIMEOUT_SECONDS:-30}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
       INVITE_TOKEN_PEPPER: ${INVITE_TOKEN_PEPPER:-change-me-local-invite-token-pepper}
@@ -183,7 +197,7 @@ services:
       - ./code-evaluation-service/.env
     environment:
       APP_ENV: ${APP_ENV:-development}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
     depends_on:
       postgres:
@@ -198,7 +212,7 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Code Evaluation Service
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
       EVALUATION_REPORT_DIR: /app/data/reports
       SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
       EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
@@ -231,7 +245,7 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Code Evaluation Worker
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${EVALUATION_POSTGRES_DB:-cap_evaluation}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
       EVALUATION_REPORT_DIR: /app/data/reports
       SEED_DEMO_EVALUATIONS: "false"
       EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}

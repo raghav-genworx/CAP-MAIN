@@ -10,8 +10,8 @@ import {
   downloadAssessmentEvaluationReport,
   downloadCandidateEvaluationReport,
   fetchAssessmentEvaluationDashboard,
-} from "../../codeEvaluation/services/codeEvaluationService";
-import type { CandidateEvaluationSummary } from "../../codeEvaluation/types/EvaluationResult";
+  type CandidateEvaluationSummary,
+} from "../../codeEvaluation";
 import type { EvaluationBackfillResponse } from "../types/Assessment";
 import type { Assessment, AssessmentSlot } from "../types/Assessment";
 import { RecruiterScorecardPreview } from "./RecruiterScorecardPreview";

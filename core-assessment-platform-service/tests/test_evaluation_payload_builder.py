@@ -39,6 +39,19 @@ def test_build_evaluation_payload_preserves_scoring_and_execution_evidence() -> 
     question = QuestionBankQuestionModel(
         id="question-1",
         title="Add two numbers",
+        difficulty="easy",
+        tags=["math", "io"],
+        problem_statement="Read two integers and print their sum.",
+        input_format="Two integers on one line.",
+        output_format="The sum.",
+        constraints="0 <= a,b <= 100",
+        hidden_test_cases=[
+            {"category": "Small numbers"},
+            {"case_type": "Compile guard"},
+        ],
+        solution_approach="Parse and add directly.",
+        time_complexity="O(1)",
+        space_complexity="O(1)",
     )
     submissions = [
         SubmissionModel(
@@ -97,7 +110,7 @@ def test_build_evaluation_payload_preserves_scoring_and_execution_evidence() -> 
     assert payload["assessment_id"] == "assessment-1"
     assert payload["candidate_assessment_id"] == "candidate-assessment-1"
     assert payload["candidate_name"] == "Candidate One"
-    assert payload["language"] == "multiple"
+    assert payload["language"] == "python"
     assert payload["time_taken_seconds"] == 42 * 60
     assert payload["weights"] == {
         "test_case_weight": 60,
@@ -105,7 +118,27 @@ def test_build_evaluation_payload_preserves_scoring_and_execution_evidence() -> 
         "ai_weight": 15,
     }
     assert "# Question: Add two numbers" in str(payload["source_code"])
-    assert "class Main {}" in str(payload["source_code"])
+    assert "class Main {}" not in str(payload["source_code"])
+    assert payload["question_submissions"] == [
+        {
+            "question_id": "question-1",
+            "question_title": "Add two numbers",
+            "language": "python",
+            "source_code": "print(sum(map(int, input().split())))",
+            "marks": 12.0,
+            "difficulty": "easy",
+            "tags": ["math", "io"],
+            "problem_statement": "Read two integers and print their sum.",
+            "input_format": "Two integers on one line.",
+            "output_format": "The sum.",
+            "constraints": "0 <= a,b <= 100",
+            "suggested_solution": "",
+            "suggested_improvement_notes": [
+                "Parse and add directly.",
+                "Expected complexity: time O(1), space O(1).",
+            ],
+        }
+    ]
 
     hidden_results = payload["hidden_results"]
     assert isinstance(hidden_results, list)
@@ -121,7 +154,17 @@ def test_build_evaluation_payload_preserves_scoring_and_execution_evidence() -> 
     assert hidden_results[1]["execution_time_ms"] is None
     assert hidden_results[0]["points"] == pytest.approx(2)
     assert hidden_results[0]["mandatory"] is True
+    assert hidden_results[0]["case_category"] == "Small numbers"
+    assert hidden_results[1]["case_category"] == "Compile guard"
     assert hidden_results[2]["message"] == "runtime details"
+    assert payload["activity"] == {
+        "started_at": (submitted_at - timedelta(minutes=42)).isoformat(),
+        "submitted_at": submitted_at.isoformat(),
+        "total_time_seconds": 42 * 60,
+        "question_time_seconds": {},
+    }
+    assert payload["integrity"]["proctoring_mode"] == ""
+    assert payload["integrity"]["tab_switches"] is None
 
 
 def test_build_evaluation_payload_handles_no_source_or_start_time() -> None:
@@ -153,3 +196,6 @@ def test_build_evaluation_payload_handles_no_source_or_start_time() -> None:
     assert payload["language"] == "unknown"
     assert payload["time_taken_seconds"] is None
     assert payload["hidden_results"] == []
+    assert payload["question_submissions"] == []
+    assert payload["activity"]["started_at"] is None
+    assert payload["activity"]["total_time_seconds"] is None

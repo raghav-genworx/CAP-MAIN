@@ -3,6 +3,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from starlette.concurrency import run_in_threadpool
 
 from api.rate_limit import limiter
 from api.rest.dependencies import (
@@ -40,7 +41,7 @@ async def verify_invite(
     payload: CandidateInviteVerificationRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateInviteVerificationResponse:
-    return service.verify_invite(payload.token)
+    return await run_in_threadpool(service.verify_invite, payload.token)
 
 
 @router.post(
@@ -55,7 +56,7 @@ async def start_candidate(
     payload: CandidateStartRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateStartResponse:
-    return service.start_candidate_session(payload.token)
+    return await run_in_threadpool(service.start_candidate_session, payload.token)
 
 
 @router.get(
@@ -71,7 +72,7 @@ async def get_assessment(
     ],
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateAssessmentPortalResponse:
-    return service.get_candidate_assessment(claims)
+    return await run_in_threadpool(service.get_candidate_assessment, claims)
 
 
 @router.post(
@@ -90,7 +91,7 @@ async def checkpoint(
     payload: CandidateCheckpointRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateCheckpointResponse:
-    return service.save_checkpoint(claims, payload)
+    return await run_in_threadpool(service.save_checkpoint, claims, payload)
 
 
 @router.post(
@@ -109,7 +110,7 @@ async def run_sample(
     payload: CandidateCodeRunRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> SampleRunResponse:
-    return service.run_sample(claims, payload)
+    return await run_in_threadpool(service.run_sample, claims, payload)
 
 
 @router.post(
@@ -118,7 +119,7 @@ async def run_sample(
     summary="Run hidden test summary",
     description="Runs hidden tests and returns an aggregate pass summary.",
 )
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def hidden_check(
     request: Request,
     claims: Annotated[
@@ -128,7 +129,7 @@ async def hidden_check(
     payload: CandidateCodeRunRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> HiddenCheckResponse:
-    return service.run_hidden_check(claims, payload)
+    return await run_in_threadpool(service.run_hidden_check, claims, payload)
 
 
 @router.post(
@@ -147,4 +148,4 @@ async def submit(
     payload: CandidateSubmitRequest,
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateSubmitResponse:
-    return service.submit_assessment(claims, payload)
+    return await run_in_threadpool(service.submit_assessment, claims, payload)

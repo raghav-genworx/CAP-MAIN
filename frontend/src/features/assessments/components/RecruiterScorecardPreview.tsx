@@ -1,7 +1,7 @@
 import { Download } from "lucide-react";
 
 import { Button } from "../../../components/ui/Button";
-import type { CandidateEvaluationSummary } from "../../codeEvaluation/types/EvaluationResult";
+import type { CandidateEvaluationSummary } from "../../codeEvaluation";
 
 interface RecruiterScorecardPreviewProps {
   candidate: CandidateEvaluationSummary | null;
@@ -75,11 +75,24 @@ export function RecruiterScorecardPreview({
               <div>
                 <strong>{question.question_title}</strong>
                 <span>
-                  {question.passed_count}/{question.total_count} cases passed
+                  {question.evaluation_status === "not_attempted"
+                    ? "Not attempted · evaluation skipped"
+                    : `${question.passed_count}/${question.total_count} cases passed`}
                 </span>
               </div>
-              <strong>{Math.round(question.score)}%</strong>
+              <strong>
+                {(question.earned_marks ?? 0).toFixed(1)}/{
+                  (question.assigned_marks ?? question.total_points).toFixed(1)
+                }
+              </strong>
             </header>
+            {question.evaluation_status !== "not_attempted" ? (
+              <div className="question-evaluation-score-parts">
+                <span>Hidden {Math.round(question.test_case_score ?? 0)}%</span>
+                <span>Metrics {Math.round(question.coding_score ?? 0)}%</span>
+                <span>AI quality {Math.round(question.ai_score ?? 0)}%</span>
+              </div>
+            ) : null}
             <pre>{question.submitted_code || "No submitted code available."}</pre>
             <div>
               {question.test_cases.map((testCase) => (

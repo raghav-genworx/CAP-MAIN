@@ -11,7 +11,9 @@ from control.agents.question_agent.prompts import (
     build_adversarial_test_prompt,
     build_bruteforce_solution_prompt,
     build_constraint_prompt,
+    build_constraint_replacement_prompt,
     build_constraint_review_prompt,
+    build_constraint_script_prompt,
     build_duplicate_detection_prompt,
     build_example_prompt,
     build_focused_language_solution_prompt,
@@ -30,8 +32,10 @@ from control.agents.question_agent.prompts import (
 )
 from control.agents.question_agent.states.question_state import (
     ConstraintOutput,
+    ConstraintValidationScriptOutput,
     DuplicateOutput,
     ExampleOutput,
+    FocusedLanguageSolutionOutput,
     HiddenTestOutput,
     MetadataOutput,
     ProblemStatementOutput,
@@ -132,6 +136,30 @@ def _validation_report() -> SolutionValidationReport:
     )
 
 
+def test_focused_language_prompt_contains_full_problem_context() -> None:
+    state = _state()
+    samples, hidden = _cases(state)
+
+    _, user_prompt = build_focused_language_solution_prompt(
+        state,
+        target_language="java",
+        sample_cases=samples,
+        hidden_cases=hidden,
+        strict_contract_guidance=STRICT_CONTRACT,
+        language_contract_guidance=LANGUAGE_CONTRACT,
+    )
+    payload = json.loads(user_prompt)
+
+    assert payload["context"]["target_language"] == "java"
+    assert payload["context"]["problem_statement"] == state["problem_statement"]
+    assert payload["context"]["constraints"] == state["constraints"]
+    assert payload["context"]["sample_test_cases"] == samples
+    assert payload["context"]["hidden_test_cases"] == hidden
+    assert (
+        payload["requirements"][-1] == "Do not generate any language other than java."
+    )
+
+
 def _builders() -> list[Callable[[], tuple[str, str]]]:
     state = _state()
     samples, hidden = _cases(state)
@@ -152,6 +180,7 @@ def _builders() -> list[Callable[[], tuple[str, str]]]:
             title_hint="Add Values",
         ),
         lambda: build_constraint_prompt(state),
+        lambda: build_constraint_script_prompt(state),
         lambda: build_example_prompt(state),
         lambda: build_hidden_test_prompt(state, sample_cases=samples),
         lambda: build_solution_prompt(
@@ -180,7 +209,6 @@ def _builders() -> list[Callable[[], tuple[str, str]]]:
         lambda: build_focused_language_solution_prompt(
             state,
             target_language="java",
-            primary_language="python",
             sample_cases=samples,
             hidden_cases=hidden,
             strict_contract_guidance=STRICT_CONTRACT,
@@ -198,6 +226,24 @@ def _builders() -> list[Callable[[], tuple[str, str]]]:
             bucket="hidden",
             constraints=state["constraints"],
             test_cases=hidden,
+        ),
+        lambda: build_constraint_replacement_prompt(
+            state,
+            invalid_sample_cases=[
+                {"index": 1, "input": "2000\n", "reason": "outside bounds"},
+            ],
+            invalid_hidden_cases=[],
+            valid_sample_cases=samples,
+            valid_hidden_cases=hidden,
+            script_rejections=[
+                {
+                    "bucket": "sample",
+                    "index": 1,
+                    "valid": False,
+                    "reason": "outside bounds",
+                }
+            ],
+            attempt=1,
         ),
         lambda: build_repair_decision_prompt(
             state,
@@ -252,7 +298,7 @@ def _builders() -> list[Callable[[], tuple[str, str]]]:
     ]
 
 
-@pytest.mark.parametrize("builder_index", range(18))
+@pytest.mark.parametrize("builder_index", range(20))
 def test_every_prompt_uses_the_structured_json_contract(builder_index: int) -> None:
     system_prompt, user_prompt = _builders()[builder_index]()
 
@@ -314,7 +360,9 @@ def test_guarded_system_prompt_enforces_exact_json_and_task_rules() -> None:
     [
         ProblemStatementOutput,
         ConstraintOutput,
+        ConstraintValidationScriptOutput,
         ExampleOutput,
+        FocusedLanguageSolutionOutput,
         HiddenTestOutput,
         SolutionOutput,
         RepairDecisionOutput,

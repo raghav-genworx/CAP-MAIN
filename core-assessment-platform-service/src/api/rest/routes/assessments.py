@@ -3,6 +3,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Response
+from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import get_assessment_service, require_role
 from core.services.assessment_service import AssessmentService
@@ -51,7 +52,7 @@ async def list_assessments(
     ],
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> AssessmentListResponse:
-    return service.list_assessments(current_user.uid)
+    return await run_in_threadpool(service.list_assessments, current_user.uid)
 
 
 @router.post(
@@ -68,7 +69,7 @@ async def create_assessment(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     payload: AssessmentCreateRequest,
 ) -> AssessmentRecord:
-    return service.create_assessment(current_user.uid, payload)
+    return await run_in_threadpool(service.create_assessment, current_user.uid, payload)
 
 
 @router.patch(
@@ -86,7 +87,30 @@ async def update_assessment(
     payload: AssessmentUpdateRequest,
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentRecord:
-    return service.update_assessment(current_user.uid, assessment_id, payload)
+    return await run_in_threadpool(
+        service.update_assessment,
+        current_user.uid,
+        assessment_id,
+        payload,
+    )
+
+
+@router.delete(
+    "/{assessment_id}",
+    status_code=204,
+    summary="Delete assessment",
+    description="Permanently deletes a recruiter-owned assessment template.",
+)
+async def delete_assessment(
+    current_user: Annotated[
+        AuthenticatedUser,
+        Depends(require_role(UserRole.RECRUITER)),
+    ],
+    service: Annotated[AssessmentService, Depends(get_assessment_service)],
+    assessment_id: str = Path(min_length=1),
+) -> Response:
+    await run_in_threadpool(service.delete_assessment, current_user.uid, assessment_id)
+    return Response(status_code=204)
 
 
 @router.post(
@@ -104,7 +128,12 @@ async def set_assessment_questions(
     payload: AssessmentQuestionAssignRequest,
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentRecord:
-    return service.set_assessment_questions(current_user.uid, assessment_id, payload)
+    return await run_in_threadpool(
+        service.set_assessment_questions,
+        current_user.uid,
+        assessment_id,
+        payload,
+    )
 
 
 @router.post(
@@ -122,7 +151,12 @@ async def create_slot(
     payload: AssessmentSlotCreateRequest,
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentSlotRecord:
-    return service.create_slot(current_user.uid, assessment_id, payload)
+    return await run_in_threadpool(
+        service.create_slot,
+        current_user.uid,
+        assessment_id,
+        payload,
+    )
 
 
 @router.patch(
@@ -140,7 +174,12 @@ async def update_slot(
     payload: AssessmentSlotUpdateRequest,
     slot_id: str = Path(min_length=1),
 ) -> AssessmentSlotRecord:
-    return service.update_slot(current_user.uid, slot_id, payload)
+    return await run_in_threadpool(
+        service.update_slot,
+        current_user.uid,
+        slot_id,
+        payload,
+    )
 
 
 @router.post(
@@ -158,7 +197,12 @@ async def control_slot(
     payload: AssessmentSlotActionRequest,
     slot_id: str = Path(min_length=1),
 ) -> AssessmentSlotRecord:
-    return service.control_slot(current_user.uid, slot_id, payload)
+    return await run_in_threadpool(
+        service.control_slot,
+        current_user.uid,
+        slot_id,
+        payload,
+    )
 
 
 @router.get(
@@ -175,7 +219,7 @@ async def list_slots(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentSlotListResponse:
-    return service.list_slots(current_user.uid, assessment_id)
+    return await run_in_threadpool(service.list_slots, current_user.uid, assessment_id)
 
 
 @router.post(
@@ -193,7 +237,12 @@ async def import_slot_candidates(
     payload: CandidateCSVImportRequest,
     slot_id: str = Path(min_length=1),
 ) -> CandidateImportResponse:
-    return service.import_slot_candidates(current_user.uid, slot_id, payload)
+    return await run_in_threadpool(
+        service.import_slot_candidates,
+        current_user.uid,
+        slot_id,
+        payload,
+    )
 
 
 @router.get(
@@ -210,7 +259,11 @@ async def list_slot_candidates(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     slot_id: str = Path(min_length=1),
 ) -> SlotCandidateListResponse:
-    return service.list_slot_candidates(current_user.uid, slot_id)
+    return await run_in_threadpool(
+        service.list_slot_candidates,
+        current_user.uid,
+        slot_id,
+    )
 
 
 @router.post(
@@ -232,7 +285,8 @@ async def backfill_assessment_evaluations(
     assessment_id: str = Path(min_length=1),
 ) -> EvaluationBackfillResponse:
     backfill_payload = payload or EvaluationBackfillRequest()
-    return service.backfill_evaluations(
+    return await run_in_threadpool(
+        service.backfill_evaluations,
         current_user.uid,
         assessment_id,
         backfill_payload,
@@ -253,7 +307,11 @@ async def get_evaluation_dashboard(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentEvaluationDashboard:
-    return service.get_evaluation_dashboard(current_user.uid, assessment_id)
+    return await run_in_threadpool(
+        service.get_evaluation_dashboard,
+        current_user.uid,
+        assessment_id,
+    )
 
 
 @router.post(
@@ -271,13 +329,19 @@ async def retry_evaluation_job(
     assessment_id: str = Path(min_length=1),
     job_id: str = Path(min_length=1),
 ) -> RetryEvaluationResponse:
-    return service.retry_evaluation_job(current_user.uid, assessment_id, job_id)
+    return await run_in_threadpool(
+        service.retry_evaluation_job,
+        current_user.uid,
+        assessment_id,
+        job_id,
+    )
 
 
 @router.get(
     "/{assessment_id}/evaluations/reports",
     response_model=AssessmentReportResponse,
     summary="Get assessment evaluation report data",
+    description="Returns report-ready assessment analytics and leaderboard data.",
 )
 async def get_evaluation_report(
     current_user: Annotated[
@@ -287,13 +351,18 @@ async def get_evaluation_report(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     assessment_id: str = Path(min_length=1),
 ) -> AssessmentReportResponse:
-    return service.get_evaluation_report(current_user.uid, assessment_id)
+    return await run_in_threadpool(
+        service.get_evaluation_report,
+        current_user.uid,
+        assessment_id,
+    )
 
 
 @router.get(
     "/{assessment_id}/evaluations/reports/download",
     response_class=Response,
     summary="Download assessment evaluation report PDF",
+    description="Downloads the recruiter-facing assessment report as a PDF.",
 )
 async def download_evaluation_report(
     current_user: Annotated[
@@ -303,7 +372,11 @@ async def download_evaluation_report(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     assessment_id: str = Path(min_length=1),
 ) -> Response:
-    report = service.download_evaluation_report(current_user.uid, assessment_id)
+    report = await run_in_threadpool(
+        service.download_evaluation_report,
+        current_user.uid,
+        assessment_id,
+    )
     return Response(
         content=report.content,
         media_type=report.media_type,
@@ -317,6 +390,7 @@ async def download_evaluation_report(
     "/{assessment_id}/evaluations/reports/candidates/{candidate_assessment_id}",
     response_model=CandidateReportResponse,
     summary="Get candidate evaluation scorecard",
+    description="Returns one candidate scorecard for a recruiter-owned assessment.",
 )
 async def get_candidate_evaluation_report(
     current_user: Annotated[
@@ -327,7 +401,8 @@ async def get_candidate_evaluation_report(
     assessment_id: str = Path(min_length=1),
     candidate_assessment_id: str = Path(min_length=1),
 ) -> CandidateReportResponse:
-    return service.get_candidate_evaluation_report(
+    return await run_in_threadpool(
+        service.get_candidate_evaluation_report,
         current_user.uid,
         assessment_id,
         candidate_assessment_id,
@@ -339,6 +414,7 @@ async def get_candidate_evaluation_report(
     "{candidate_assessment_id}/download",
     response_class=Response,
     summary="Download candidate scorecard PDF",
+    description="Downloads one candidate evaluation scorecard as a PDF.",
 )
 async def download_candidate_evaluation_report(
     current_user: Annotated[
@@ -349,7 +425,8 @@ async def download_candidate_evaluation_report(
     assessment_id: str = Path(min_length=1),
     candidate_assessment_id: str = Path(min_length=1),
 ) -> Response:
-    report = service.download_candidate_evaluation_report(
+    report = await run_in_threadpool(
+        service.download_candidate_evaluation_report,
         current_user.uid,
         assessment_id,
         candidate_assessment_id,
@@ -367,6 +444,7 @@ async def download_candidate_evaluation_report(
     "/{assessment_id}/evaluations/reports/tests/{slot_id}/download",
     response_class=Response,
     summary="Download scheduled test evaluation report PDF",
+    description="Downloads evaluation results for one scheduled assessment slot.",
 )
 async def download_test_evaluation_report(
     current_user: Annotated[
@@ -377,7 +455,8 @@ async def download_test_evaluation_report(
     assessment_id: str = Path(min_length=1),
     slot_id: str = Path(min_length=1),
 ) -> Response:
-    report = service.download_test_evaluation_report(
+    report = await run_in_threadpool(
+        service.download_test_evaluation_report,
         current_user.uid,
         assessment_id,
         slot_id,
@@ -407,7 +486,8 @@ async def send_slot_invites(
     slot_id: str = Path(min_length=1),
 ) -> InviteDispatchResponse:
     dispatch_payload = payload or InviteDispatchRequest()
-    return service.send_slot_invites(
+    return await run_in_threadpool(
+        service.send_slot_invites,
         current_user.uid,
         slot_id,
         candidate_assessment_ids=dispatch_payload.candidate_assessment_ids,
@@ -428,10 +508,13 @@ async def resend_candidate_invite(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     candidate_assessment_id: str = Path(min_length=1),
 ) -> InviteDispatchResponse:
-    assignment = service.get_candidate_assignment(
-        current_user.uid, candidate_assessment_id
+    assignment = await run_in_threadpool(
+        service.get_candidate_assignment,
+        current_user.uid,
+        candidate_assessment_id,
     )
-    return service.send_slot_invites(
+    return await run_in_threadpool(
+        service.send_slot_invites,
         current_user.uid,
         assignment.slot_id,
         candidate_assessment_id,
@@ -452,4 +535,4 @@ async def slot_monitoring(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
     slot_id: str = Path(min_length=1),
 ) -> MonitoringResponse:
-    return service.monitoring(current_user.uid, slot_id)
+    return await run_in_threadpool(service.monitoring, current_user.uid, slot_id)

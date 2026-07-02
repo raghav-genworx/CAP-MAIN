@@ -80,6 +80,22 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("GROQ_API_KEY"),
     )
+    groq_api_key_1: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY_1"),
+    )
+    groq_api_key_2: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY_2"),
+    )
+    groq_api_key_3: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY_3"),
+    )
+    groq_api_key_4: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY_4"),
+    )
     groq_base_url: str = Field(
         default="https://api.groq.com/openai/v1",
         validation_alias=AliasChoices("GROQ_BASE_URL", "VITE_GROQ_BASE_URL"),
@@ -88,9 +104,49 @@ class Settings(BaseSettings):
         default="llama-3.3-70b-versatile",
         validation_alias=AliasChoices("GROQ_MODEL", "VITE_GROQ_MODEL"),
     )
+    groq_qwen_model: str = Field(
+        default="qwen/qwen3-32b",
+        validation_alias=AliasChoices("GROQ_QWEN_MODEL"),
+    )
+    groq_gpt_oss_model: str = Field(
+        default="openai/gpt-oss-120b",
+        validation_alias=AliasChoices("GROQ_GPT_OSS_MODEL"),
+    )
     groq_retry_count: int = 3
     groq_retry_backoff_seconds: float = 0.5
     groq_request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
+    ollama_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("OLLAMA_ENABLED"),
+    )
+    ollama_base_url: str = Field(
+        default="http://localhost:11434/v1",
+        validation_alias=AliasChoices("OLLAMA_BASE_URL"),
+    )
+    ollama_model: str = Field(
+        default="llama3.3:70b",
+        validation_alias=AliasChoices("OLLAMA_MODEL"),
+    )
+    ollama_api_key: str = Field(
+        default="ollama",
+        validation_alias=AliasChoices("OLLAMA_API_KEY"),
+    )
+    langsmith_tracing: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("LANGSMITH_TRACING", "LANGCHAIN_TRACING"),
+    )
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        validation_alias=AliasChoices("LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT"),
+    )
+    langsmith_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
+    )
+    langsmith_project: str = Field(
+        default="CAP",
+        validation_alias=AliasChoices("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"),
+    )
     code_execution_api_base_url: str = Field(
         default="http://localhost:8003/api/v1",
         validation_alias=AliasChoices(
@@ -217,6 +273,55 @@ class Settings(BaseSettings):
             for origin in self.cors_allowed_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def groq_api_keys(self) -> list[str]:
+        """Return configured Groq key slots in failover order."""
+
+        return [api_key for _, api_key in self.groq_api_key_slots]
+
+    @property
+    def groq_api_key_slots(self) -> list[tuple[int, str]]:
+        """Return configured Groq key slots with stable slot numbers."""
+
+        first_slot = self.groq_api_key_1.strip() or self.groq_api_key.strip()
+        candidates = [
+            (1, first_slot),
+            (2, self.groq_api_key_2),
+            (3, self.groq_api_key_3),
+            (4, self.groq_api_key_4),
+        ]
+        keys: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for slot_number, candidate in candidates:
+            normalized = candidate.strip()
+            if normalized and normalized not in seen:
+                keys.append((slot_number, normalized))
+                seen.add(normalized)
+        return keys
+
+    @property
+    def groq_fallback_models(self) -> list[str]:
+        """Return Groq models in preferred failover order."""
+
+        models = [
+            self.groq_qwen_model.strip(),
+            self.groq_gpt_oss_model.strip(),
+        ]
+        active_models = [model for model in models if model]
+        if active_models:
+            return active_models
+        return [self.groq_model.strip()] if self.groq_model.strip() else []
+
+    @property
+    def ai_model_sequence_label(self) -> str:
+        """Return a human-readable AI failover sequence label."""
+
+        labels = [
+            *(f"groq:{model}" for model in self.groq_fallback_models),
+            *([f"ollama:{self.ollama_model.strip()}"] if self.ollama_enabled else []),
+        ]
+        return " -> ".join(labels)
 
     @property
     def firebase_web_config(self) -> FirebaseWebConfig:

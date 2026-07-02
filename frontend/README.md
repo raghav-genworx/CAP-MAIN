@@ -23,3 +23,4 @@ npm run lint
 ## Environment
 
 Copy `.env.example` to `.env` and fill the Firebase values before using recruiter login, signup, Google sign-in, or Microsoft sign-in.
+# CAP-Frontend

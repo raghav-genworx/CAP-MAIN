@@ -1,5 +1,5 @@
 export type DifficultyLevel = "easy" | "medium" | "hard";
-export type QuestionStatus = "draft" | "validated" | "archived";
+export type QuestionStatus = "draft" | "validated" | "blocked" | "archived";
 export type QuestionCreationMode = "manual" | "ai_assisted";
 export type QuestionGroupStatus = "draft" | "active" | "archived";
 export type MetadataStatus = "pending" | "classified" | "failed";
@@ -203,6 +203,7 @@ export interface QuestionAIDraftRequest {
     | "metadata";
   difficulty?: DifficultyLevel | "";
   reference_language: string;
+  target_language?: string;
   title_hint?: string;
   focus_tags: string[];
   current_draft?: QuestionCreatePayload;
@@ -218,12 +219,33 @@ export interface QuestionAIDraftResponse {
 }
 
 export interface QuestionAIDraftProgressEvent {
-  type: "start" | "edge" | "node_start" | "node_complete" | "complete" | "error";
+  type:
+    | "start"
+    | "edge"
+    | "node_start"
+    | "node_complete"
+    | "validation_case_start"
+    | "validation_case_result"
+    | "complete"
+    | "error";
   scope: QuestionAIDraftRequest["generation_scope"];
   message: string;
   current_node?: string | null;
   next_node?: string | null;
   progress: number;
+  validation_pass?: number;
+  test_bucket?: "sample" | "hidden";
+  test_index?: number;
+  bucket_total?: number;
+  overall_index?: number;
+  overall_total?: number;
+  test_language?: string;
+  test_input?: string;
+  expected_output?: string;
+  actual_output?: string;
+  error_message?: string;
+  test_outcome?: "running" | "passed" | "wrong" | "error";
+  test_status?: string;
   response?: QuestionAIDraftResponse;
 }
 

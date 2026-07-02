@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from core.exceptions.assessment import EvaluationAdapterError
+from core.exceptions.assessment import (
+    EvaluationAdapterError,
+    EvaluationResourceNotFoundError,
+)
 from core.services import evaluation_adapter_service
 from core.services.evaluation_adapter_service import EvaluationAdapterService
 
@@ -157,6 +160,32 @@ def test_create_job_raises_adapter_error_on_service_failure(
                 "hidden_results": [],
             }
         )
+
+
+def test_dashboard_404_is_reported_as_missing_evaluation_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request(
+        "GET",
+        "http://evaluation/api/v1/evaluations/assessment/assessment-1",
+    )
+    response = httpx.Response(404, request=request, text="missing")
+    fake_client = _FakeClient(response)
+    monkeypatch.setattr(
+        evaluation_adapter_service.httpx,
+        "Client",
+        lambda **_kwargs: fake_client,
+    )
+    service = EvaluationAdapterService(
+        SimpleNamespace(
+            code_evaluation_api_base_url="http://evaluation/api/v1",
+            code_evaluation_request_timeout_seconds=10.0,
+            internal_service_token="test-internal-service-token",
+        )
+    )
+
+    with pytest.raises(EvaluationResourceNotFoundError):
+        service.get_dashboard("assessment-1")
 
 
 def test_get_leaderboard_returns_scorecards(

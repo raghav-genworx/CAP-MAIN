@@ -9,6 +9,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+EVALUATION_SCHEMA = "evaluation"
+
 revision: str = "20260627_0002"
 down_revision: str | None = "20260627_0001"
 branch_labels: str | Sequence[str] | None = None
@@ -20,6 +22,7 @@ def upgrade() -> None:
         "uq_evaluation_jobs_candidate_assessment",
         "evaluation_jobs",
         ["candidate_assessment_id"],
+        schema=EVALUATION_SCHEMA,
     )
 
 
@@ -28,4 +31,5 @@ def downgrade() -> None:
         "uq_evaluation_jobs_candidate_assessment",
         "evaluation_jobs",
         type_="unique",
+        schema=EVALUATION_SCHEMA,
     )

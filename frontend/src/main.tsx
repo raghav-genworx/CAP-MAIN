@@ -1,11 +1,12 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
-import { App } from "./App";
+import { App } from "./app/App";
 import { AppProviders } from "./app/providers";
 import { AppErrorBoundary } from "./components/common/AppErrorBoundary";
+import "./lib/monaco";
 import "./styles/globals.css";
-import "./features/codeEvaluation/codeEvaluation.css";
+import "./features/codeEvaluation/styles/codeEvaluation.css";
 
 const rootElement = document.getElementById("root");
 

@@ -6,15 +6,18 @@ import logging
 
 from schemas.question_bank import (
     ReferenceSolutionArtifact,
+    SolutionValidationReport,
+    TestCase,
     ValidationStatus,
 )
 
 from ..prompts.multi_language_solution_prompt import (
     build_focused_language_solution_prompt,
 )
+from ..prompts.question_prompts import ADVERSARIAL_VALIDATION_ROUNDS
 from ..states.question_state import (
+    FocusedLanguageSolutionOutput,
     QuestionGenerationState,
-    SolutionOutput,
 )
 from ..tools.question_tools import QuestionAgentToolsMixin
 
@@ -51,7 +54,15 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
         )
         supported_languages = state.get("supported_languages", [primary_language])
         target_languages: list[str] = []
-        for language in supported_languages:
+        requested_target = self._normalize_solution_language(
+            state.get("target_language", ""),
+        )
+        requested_languages = (
+            [requested_target]
+            if state.get("target_language", "").strip()
+            else supported_languages
+        )
+        for language in requested_languages:
             normalized_language = self._normalize_solution_language(language)
             if (
                 normalized_language != primary_language
@@ -76,7 +87,6 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
                 source = self._generate_single_language_solution(
                     state=state,
                     target_language=normalized_language,
-                    primary_language=primary_language,
                 )
                 notes.append(
                     "Generated with an isolated per-language AI request.",
@@ -139,17 +149,17 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
                     )
                     continue
             try:
-                report = self._validate_source_against_tests(
-                    language=normalized_language,
-                    source_code=sanitized_source,
-                    sample_tests=sample_tests,
-                    hidden_tests=hidden_tests,
-                    rounds=[],
-                    time_limit_seconds=state.get("execution_time_limit_seconds"),
-                    memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+                sanitized_source, report, repair_notes = (
+                    self._validate_and_repair_language_solution(
+                        state=state,
+                        target_language=normalized_language,
+                        source_code=sanitized_source,
+                        sample_tests=sample_tests,
+                        hidden_tests=hidden_tests,
+                    )
                 )
                 validation_status = ValidationStatus(report.status)
-                notes.append(report.summary)
+                notes.extend(repair_notes)
             except Exception as exc:  # pragma: no cover - execution service dependent
                 LOGGER.warning(
                     "Validation failed for generated %s solution: %s",
@@ -186,12 +196,10 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
         *,
         state: QuestionGenerationState,
         target_language: str,
-        primary_language: str,
     ) -> str:
         system_prompt, user_prompt = build_focused_language_solution_prompt(
             state,
             target_language=target_language,
-            primary_language=primary_language,
             sample_cases=self._prompt_cases(state.get("sample_test_cases", [])),
             hidden_cases=self._prompt_cases(state.get("hidden_test_cases", [])),
             strict_contract_guidance=self._strict_solution_contract_guidance(
@@ -203,13 +211,13 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
         )
         model = self._structured_completion(
             schema_name=f"{target_language}_reference_solution",
-            schema_model=SolutionOutput,
+            schema_model=FocusedLanguageSolutionOutput,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
         return self._ensure_runnable_reference_solution(
             state=state,
-            candidate=model.reference_solution,
+            candidate=model.source_code,
             language=target_language,
             schema_name=f"{target_language}_focused_solution_contract_retry",
             rejection_context=(
@@ -217,6 +225,85 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
                 "runnable-code contract."
             ),
         )
+
+    def _validate_and_repair_language_solution(
+        self,
+        *,
+        state: QuestionGenerationState,
+        target_language: str,
+        source_code: str,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+    ) -> tuple[str, SolutionValidationReport, list[str]]:
+        """Validate a translated solution and repair only the translated source."""
+
+        time_limit_seconds = state.get("execution_time_limit_seconds")
+        memory_limit_kb = state.get("memory_limit_mb", 256) * 1024
+        notes: list[str] = []
+        current_source = source_code
+        report = self._validate_source_against_tests(
+            language=target_language,
+            source_code=current_source,
+            sample_tests=sample_tests,
+            hidden_tests=hidden_tests,
+            rounds=[],
+            time_limit_seconds=time_limit_seconds,
+            memory_limit_kb=memory_limit_kb,
+        )
+        notes.append(report.summary)
+
+        for round_number in range(1, ADVERSARIAL_VALIDATION_ROUNDS + 1):
+            if report.status == "passed":
+                return current_source, report, notes
+
+            repair_state: QuestionGenerationState = {
+                **state,
+                "reference_language": target_language,
+                "reference_solution": current_source,
+                "supported_languages": [target_language],
+            }
+            repaired_source = self._repair_reference_solution(
+                state=repair_state,
+                source_code=current_source,
+                validation_report=report,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+                round_number=round_number,
+            )
+            repaired_source = self._sanitize_reference_solution(repaired_source)
+            if not repaired_source.strip():
+                notes.append(
+                    (
+                        f"Repair round {round_number} produced no "
+                        f"{target_language} source."
+                    ),
+                )
+                return current_source, report, notes
+            if repaired_source.strip() == current_source.strip():
+                notes.append(
+                    (
+                        f"Repair round {round_number} did not change the "
+                        f"{target_language} source."
+                    ),
+                )
+                return current_source, report, notes
+
+            current_source = repaired_source
+            notes.append(
+                f"Repair round {round_number} updated the {target_language} source.",
+            )
+            report = self._validate_source_against_tests(
+                language=target_language,
+                source_code=current_source,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+                rounds=[],
+                time_limit_seconds=time_limit_seconds,
+                memory_limit_kb=memory_limit_kb,
+            )
+            notes.append(report.summary)
+
+        return current_source, report, notes
 
 
 __all__ = ["MultiLanguageSolutionNodeMixin"]

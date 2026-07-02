@@ -10,7 +10,7 @@ from core.exceptions.auth import AuthorizationError, RoleStoreUnavailableError
 from data.models.postgres.user_role import UserRoleModel
 from data.repositories.role_repository import RoleRepository
 from schemas.auth import AuthenticatedUser, FirebaseIdentity
-from schemas.roles import UserRole, UserRoleRecord
+from schemas.roles import SubscriptionStatus, UserRole, UserRoleRecord
 
 
 class RoleService:
@@ -34,6 +34,8 @@ class RoleService:
             picture=identity.picture,
             email_verified=identity.email_verified,
             role=role_record.role,
+            subscription_status=role_record.subscription_status,
+            trial_started_at=role_record.trial_started_at,
         )
 
     def get_role_for_uid(
@@ -74,6 +76,7 @@ class RoleService:
             role=UserRole.RECRUITER.value,
             is_active=True,
             email=email,
+            subscription_status=SubscriptionStatus.PENDING.value,
             created_at=now,
             updated_at=now,
         )
@@ -88,6 +91,32 @@ class RoleService:
 
         return self._record_from_model(role_model)
 
+    def start_free_trial(self, uid: str) -> UserRoleRecord:
+        """Activate the no-charge trial for a recruiter account."""
+
+        try:
+            role_model = self._repository.get(uid)
+        except SQLAlchemyError as exc:
+            raise RoleStoreUnavailableError("Unable to read role table") from exc
+        if role_model is None:
+            raise AuthorizationError("No platform role is assigned to this user")
+        if not role_model.is_active:
+            raise AuthorizationError("This platform role is inactive")
+
+        if role_model.subscription_status != SubscriptionStatus.FREE_TRIAL.value:
+            role_model.subscription_status = SubscriptionStatus.FREE_TRIAL.value
+            role_model.trial_started_at = datetime.now(UTC)
+            try:
+                self._repository.commit()
+                self._repository.refresh(role_model)
+            except SQLAlchemyError as exc:
+                self._repository.rollback()
+                raise RoleStoreUnavailableError(
+                    "Unable to activate the free trial"
+                ) from exc
+
+        return self._record_from_model(role_model)
+
     @staticmethod
     def _record_from_model(role_model: UserRoleModel) -> UserRoleRecord:
         """Build a role record from a database model."""
@@ -98,6 +127,10 @@ class RoleService:
                 role=UserRole(role_model.role),
                 is_active=role_model.is_active,
                 email=role_model.email,
+                subscription_status=SubscriptionStatus(
+                    role_model.subscription_status
+                ),
+                trial_started_at=role_model.trial_started_at,
                 created_at=role_model.created_at,
                 updated_at=role_model.updated_at,
             )

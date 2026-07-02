@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import (
     get_question_bank_service,
@@ -62,14 +63,16 @@ async def list_questions(
 ) -> QuestionListResponse:
     """Return all questions owned by the recruiter."""
 
-    return service.list_questions(
+    filters = QuestionFilters(
+        search=search,
+        difficulty=difficulty,
+        status=status,
+        tag=tag,
+    )
+    return await run_in_threadpool(
+        service.list_questions,
         current_user.uid,
-        QuestionFilters(
-            search=search,
-            difficulty=difficulty,
-            status=status,
-            tag=tag,
-        ),
+        filters,
     )
 
 
@@ -89,7 +92,7 @@ async def create_question(
 ) -> QuestionRecord:
     """Create a question owned by the recruiter."""
 
-    return service.create_question(current_user.uid, payload)
+    return await run_in_threadpool(service.create_question, current_user.uid, payload)
 
 
 @router.post(
@@ -108,7 +111,11 @@ async def bulk_import_questions(
 ) -> QuestionBulkImportResponse:
     """Create multiple recruiter-owned questions from CSV text."""
 
-    return service.bulk_import_questions(current_user.uid, payload)
+    return await run_in_threadpool(
+        service.bulk_import_questions,
+        current_user.uid,
+        payload,
+    )
 
 
 @router.post(
@@ -127,7 +134,11 @@ async def generate_ai_draft(
 ) -> QuestionAIDraftResponse:
     """Generate a draft recruiter can review before saving."""
 
-    return service.generate_ai_draft(current_user.uid, payload)
+    return await run_in_threadpool(
+        service.generate_ai_draft,
+        current_user.uid,
+        payload,
+    )
 
 
 @router.post(
@@ -176,7 +187,7 @@ async def validate_question_draft(
 ) -> QuestionDraftValidationResponse:
     """Run a draft reference solution against its test cases before saving."""
 
-    return service.validate_draft(payload)
+    return await run_in_threadpool(service.validate_draft, payload)
 
 
 @router.post(
@@ -198,7 +209,11 @@ async def refine_question_test_cases(
 ) -> QuestionDraftRefinementResponse:
     """Refine existing testcase outputs and return fresh execution evidence."""
 
-    return service.refine_draft_test_cases(current_user.uid, payload)
+    return await run_in_threadpool(
+        service.refine_draft_test_cases,
+        current_user.uid,
+        payload,
+    )
 
 
 @router.post(
@@ -220,7 +235,11 @@ async def refine_question_solution(
 ) -> QuestionDraftRefinementResponse:
     """Refine existing solution source and return fresh execution evidence."""
 
-    return service.refine_draft_solution(current_user.uid, payload)
+    return await run_in_threadpool(
+        service.refine_draft_solution,
+        current_user.uid,
+        payload,
+    )
 
 
 @router.patch(
@@ -240,7 +259,12 @@ async def update_question(
 ) -> QuestionRecord:
     """Update a question owned by the recruiter."""
 
-    return service.update_question(current_user.uid, question_id, payload)
+    return await run_in_threadpool(
+        service.update_question,
+        current_user.uid,
+        question_id,
+        payload,
+    )
 
 
 @router.delete(
@@ -258,7 +282,7 @@ async def delete_question(
 ) -> dict[str, str]:
     """Delete a question owned by the recruiter."""
 
-    service.delete_question(current_user.uid, question_id)
+    await run_in_threadpool(service.delete_question, current_user.uid, question_id)
     return {"status": "deleted"}
 
 
@@ -279,9 +303,11 @@ async def list_groups(
 ) -> QuestionGroupListResponse:
     """Return all reusable question groups owned by the recruiter."""
 
-    return service.list_groups(
+    filters = QuestionGroupFilters(search=search, status=status)
+    return await run_in_threadpool(
+        service.list_groups,
         current_user.uid,
-        QuestionGroupFilters(search=search, status=status),
+        filters,
     )
 
 
@@ -301,7 +327,7 @@ async def create_group(
 ) -> QuestionGroupRecord:
     """Create a reusable group from existing questions."""
 
-    return service.create_group(current_user.uid, payload)
+    return await run_in_threadpool(service.create_group, current_user.uid, payload)
 
 
 @router.patch(
@@ -321,7 +347,12 @@ async def update_group(
 ) -> QuestionGroupRecord:
     """Update an existing reusable group."""
 
-    return service.update_group(current_user.uid, group_id, payload)
+    return await run_in_threadpool(
+        service.update_group,
+        current_user.uid,
+        group_id,
+        payload,
+    )
 
 
 @router.delete(
@@ -339,5 +370,5 @@ async def delete_group(
 ) -> dict[str, str]:
     """Delete a reusable group."""
 
-    service.delete_group(current_user.uid, group_id)
+    await run_in_threadpool(service.delete_group, current_user.uid, group_id)
     return {"status": "deleted"}

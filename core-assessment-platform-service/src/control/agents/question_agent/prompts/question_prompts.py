@@ -11,11 +11,12 @@ SCOPE_NODE_SEQUENCE: dict[str, list[str]] = {
     "problem_field": ["problem_statement"],
     "constraints": ["constraints"],
     "constraints_formats": ["constraints"],
-    "examples": ["examples"],
-    "tests": ["examples", "hidden_tests"],
+    "examples": ["examples", "constraint_script"],
+    "tests": ["examples", "hidden_tests", "constraint_script"],
     "tests_solution": [
         "examples",
         "hidden_tests",
+        "constraint_script",
         "solution",
         "validation",
     ],
@@ -36,10 +37,10 @@ SCOPE_SUMMARIES: dict[str, str] = {
     "constraints_formats": (
         "Generated input/output formats, explanations, constraints, and limits."
     ),
-    "examples": "Generated sample test cases from the current problem.",
-    "tests": "Generated exact-count sample and hidden test cases.",
+    "examples": "Generated and constraint-checked sample test cases.",
+    "tests": "Generated and constraint-checked exact-count sample and hidden tests.",
     "tests_solution": (
-        "Generated exact-count test cases, a reference solution, and validation."
+        "Generated constraint-checked test cases, a reference solution, and validation."
     ),
     "solution": "Generated runnable primary reference solution code.",
     "other_languages": (

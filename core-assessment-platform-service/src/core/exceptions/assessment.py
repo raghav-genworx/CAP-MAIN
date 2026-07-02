@@ -52,6 +52,13 @@ class EvaluationAdapterError(COEApplicationError):
         super().__init__(message=message, status_code=502)
 
 
+class EvaluationResourceNotFoundError(EvaluationAdapterError):
+    """Raised when evaluation data is not available for a valid core resource."""
+
+    def __init__(self, message: str = "Evaluation data not found") -> None:
+        COEApplicationError.__init__(self, message=message, status_code=404)
+
+
 class EmailDeliveryError(COEApplicationError):
     """Raised when a transactional email cannot be sent."""
 

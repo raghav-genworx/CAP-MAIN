@@ -28,7 +28,10 @@ def create_app() -> FastAPI:
         description="COE-compliant FastAPI service.",
         version="0.1.0",
     )
-    app.state.limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["120/minute"],
+    )
     app.add_exception_handler(
         RateLimitExceeded,
         cast(Any, _rate_limit_exceeded_handler),

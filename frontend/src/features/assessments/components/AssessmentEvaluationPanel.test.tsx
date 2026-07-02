@@ -2,14 +2,14 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CandidateEvaluationSummary } from "../../codeEvaluation/types/EvaluationResult";
+import type { CandidateEvaluationSummary } from "../../codeEvaluation";
 import type { Assessment, AssessmentSlot } from "../types/Assessment";
 import { AssessmentEvaluationPanel } from "./AssessmentEvaluationPanel";
 import {
   downloadAssessmentEvaluationReport,
   downloadCandidateEvaluationReport,
   fetchAssessmentEvaluationDashboard,
-} from "../../codeEvaluation/services/codeEvaluationService";
+} from "../../codeEvaluation";
 
 const getIdToken = vi.fn(async () => "recruiter-id-token");
 
@@ -17,7 +17,7 @@ vi.mock("../../auth", () => ({
   useAuth: () => ({ currentUser: { getIdToken } }),
 }));
 
-vi.mock("../../codeEvaluation/services/codeEvaluationService", () => ({
+vi.mock("../../codeEvaluation", () => ({
   downloadAssessmentEvaluationReport: vi.fn(),
   downloadCandidateEvaluationReport: vi.fn(),
   fetchAssessmentEvaluationDashboard: vi.fn(),
@@ -44,8 +44,8 @@ const assessment: Assessment = {
   show_score_to_candidate: false,
   proctoring_mode: "basic",
   hidden_feedback_mode: "summary",
-  max_hidden_checks: 2,
-  hidden_check_cooldown_seconds: 30,
+  max_hidden_checks: 0,
+  hidden_check_cooldown_seconds: 5,
   supported_languages: ["python"],
   status: "live",
   questions: [],

@@ -20,6 +20,7 @@ class QuestionStatus(StrEnum):
 
     DRAFT = "draft"
     VALIDATED = "validated"
+    BLOCKED = "blocked"
     ARCHIVED = "archived"
 
 
@@ -145,7 +146,7 @@ class SolutionValidationRound(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    round_number: int = Field(ge=1, le=3)
+    round_number: int = Field(ge=1, le=4)
     status: Literal[
         "passed",
         "failed",
@@ -325,6 +326,7 @@ class QuestionAIDraftRequest(BaseModel):
     ] = "full"
     difficulty: DifficultyLevel | None = None
     reference_language: str = "python"
+    target_language: str | None = Field(default=None, min_length=1, max_length=30)
     title_hint: str | None = None
     focus_tags: list[str] = Field(default_factory=list)
     current_draft: QuestionAIDraftContext | None = None

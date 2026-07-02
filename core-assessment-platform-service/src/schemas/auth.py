@@ -1,8 +1,10 @@
 """Authentication and identity schemas."""
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
-from schemas.roles import UserRole
+from schemas.roles import SubscriptionStatus, UserRole
 
 
 class FirebaseIdentity(BaseModel):
@@ -19,6 +21,8 @@ class AuthenticatedUser(FirebaseIdentity):
     """Authenticated application user with an assigned platform role."""
 
     role: UserRole
+    subscription_status: SubscriptionStatus
+    trial_started_at: datetime | None = None
 
 
 class FirebaseWebConfig(BaseModel):

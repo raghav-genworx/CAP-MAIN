@@ -28,6 +28,7 @@ SERVICE_PURPOSES = {
 
 HOP_BY_HOP_HEADERS = {
     "connection",
+    "content-length",
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",

@@ -11,7 +11,10 @@ import httpx
 from pydantic import BaseModel, Field
 
 from config.settings import Settings
-from core.exceptions.assessment import EvaluationAdapterError
+from core.exceptions.assessment import (
+    EvaluationAdapterError,
+    EvaluationResourceNotFoundError,
+)
 from schemas.evaluation_reports import (
     AssessmentEvaluationDashboard,
     AssessmentReportResponse,
@@ -93,6 +96,16 @@ class EvaluationAdapterService:
                 headers=self._service_headers(),
             ) as client:
                 response = client.post(url, json=payload)
+                if response.status_code == 404:
+                    logger.info(
+                        "evaluation_service_job_not_found status_code=%s "
+                        "payload_shape=%s",
+                        response.status_code,
+                        self._payload_shape(payload),
+                    )
+                    raise EvaluationResourceNotFoundError(
+                        "Evaluation service resource not found"
+                    )
                 if response.is_error:
                     logger.error(
                         "evaluation_service_job_error status_code=%s "
@@ -120,6 +133,16 @@ class EvaluationAdapterService:
                 headers=self._service_headers(),
             ) as client:
                 response = client.get(url)
+                if response.status_code == 404:
+                    logger.info(
+                        "evaluation_service_leaderboard_not_found "
+                        "status_code=%s assessment_id=%s",
+                        response.status_code,
+                        assessment_id,
+                    )
+                    raise EvaluationResourceNotFoundError(
+                        "Evaluation leaderboard not found"
+                    )
                 if response.is_error:
                     logger.error(
                         "evaluation_service_leaderboard_error status_code=%s "
@@ -235,6 +258,17 @@ class EvaluationAdapterService:
                 if json_payload is not None:
                     request_kwargs["json"] = json_payload
                 response = client.request(method, url, **request_kwargs)
+                if response.status_code == 404:
+                    logger.info(
+                        "evaluation_service_not_found method=%s path=%s "
+                        "status_code=%s",
+                        method,
+                        path,
+                        response.status_code,
+                    )
+                    raise EvaluationResourceNotFoundError(
+                        "Evaluation data not found"
+                    )
                 if response.is_error:
                     logger.error(
                         "evaluation_service_request_error method=%s path=%s "

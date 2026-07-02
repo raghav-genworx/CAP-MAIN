@@ -320,7 +320,8 @@ class QuestionAgentUtilsMixin:
         base = [
             QuestionAgentUtilsMixin._normalize_solution_language(preferred_language),
         ]
-        for candidate in values + requested_languages:
+        language_source = requested_languages or values
+        for candidate in language_source:
             normalized = QuestionAgentUtilsMixin._normalize_solution_language(candidate)
             if normalized and normalized not in base:
                 base.append(normalized)

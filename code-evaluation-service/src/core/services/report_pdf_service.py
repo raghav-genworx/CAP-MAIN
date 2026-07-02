@@ -35,11 +35,15 @@ from reportlab.platypus import (  # type: ignore[import-untyped]
 from core.services.report_formatting import (
     assessment_summary,
     duration_label,
+    hidden_case_label,
     memory_label,
     numbered_code,
     question_analytics,
+    recruiter_recommendation,
     safe_report_slug,
+    safe_text,
     schedule_label,
+    score_breakdown_rows,
 )
 from schemas.evaluation import (
     AssessmentReportResponse,
@@ -206,7 +210,10 @@ class ReportPdfService:
             Spacer(1, 5 * mm),
             self._candidate_identity(candidate),
             Spacer(1, 6 * mm),
-            self._section_title("Score composition", "01"),
+            self._section_title("Recruiter recommendation", "01"),
+            self._recommendation_panel(candidate),
+            Spacer(1, 7 * mm),
+            self._section_title("Score composition", "02"),
             _metric_table(
                 [
                     ("Final score", f"{candidate.scores.final_score:.1f}%", NAVY),
@@ -224,18 +231,22 @@ class ReportPdfService:
                 ],
                 self._styles,
             ),
-            Spacer(1, 5 * mm),
+            Spacer(1, 4 * mm),
+            self._score_breakdown_table(candidate),
+            Spacer(1, 6 * mm),
+            self._section_title("Assessment summary", "03"),
             self._execution_facts(candidate),
+            Spacer(1, 5 * mm),
+            self._activity_timeline(candidate),
+            Spacer(1, 5 * mm),
+            self._integrity_signals(candidate),
+            Spacer(1, 5 * mm),
+            self._benchmark_context(report.benchmark),
             Spacer(1, 7 * mm),
-            self._section_title("Code quality review", "02"),
+            self._section_title("Code quality review", "04"),
             self._ai_review(candidate),
             Spacer(1, 7 * mm),
-            self._section_title("Question evidence", "03"),
-            Paragraph(
-                "Each section contains the submitted source and the hidden-case "
-                "evidence used for scoring.",
-                self._styles["bodyMuted"],
-            ),
+            self._section_title("Question-wise performance", "05"),
         ]
         for index, question in enumerate(candidate.question_breakdown, start=1):
             story.extend(
@@ -253,20 +264,28 @@ class ReportPdfService:
                                 GREEN if not question.mandatory_failed else RED,
                             ),
                             (
-                                "Points",
-                                f"{question.earned_points:.1f}/{question.total_points:.1f}",
+                                "Marks",
+                                f"{question.earned_marks:.1f}/{question.assigned_marks:.1f}",
                                 BLUE,
                             ),
-                            ("Language", question.language or candidate.language, TEAL),
                             (
-                                "Mandatory",
-                                "Failed" if question.mandatory_failed else "Passed",
-                                RED if question.mandatory_failed else GREEN,
+                                "Hidden / metrics / AI",
+                                f"{question.test_case_score:.0f}% / "
+                                f"{question.coding_score:.0f}% / "
+                                f"{question.ai_score:.0f}%",
+                                TEAL,
                             ),
+                            ("Language", question.language or candidate.language, TEAL),
                         ],
                         self._styles,
                     ),
                     Spacer(1, 5 * mm),
+                    self._question_context(question),
+                    Spacer(1, 5 * mm),
+                    self._question_ai_review(question),
+                    Spacer(1, 5 * mm),
+                    self._test_coverage_summary(question.test_cases),
+                    Spacer(1, 4 * mm),
                     Paragraph("Hidden test-case results", self._styles["h3"]),
                     Spacer(1, 2 * mm),
                     self._test_case_table(question.test_cases),
@@ -277,9 +296,18 @@ class ReportPdfService:
             if failures:
                 story.extend(
                     [
-                        Paragraph("Failure evidence", self._styles["h3"]),
+                        Paragraph("Failure diagnostics", self._styles["h3"]),
                         Spacer(1, 2 * mm),
                         self._failure_evidence(failures),
+                        Spacer(1, 5 * mm),
+                    ]
+                )
+            if question.suggested_solution or question.suggested_improvement_notes:
+                story.extend(
+                    [
+                        Paragraph("Suggested improvements", self._styles["h3"]),
+                        Spacer(1, 2 * mm),
+                        self._suggested_improvements(question),
                         Spacer(1, 5 * mm),
                     ]
                 )
@@ -553,7 +581,7 @@ class ReportPdfService:
         cells = [
             [
                 Paragraph(escape(label.upper()), self._styles["metaLabel"]),
-                Paragraph(escape(value), self._styles["metaValue"]),
+                _meta_paragraph(value, self._styles),
             ]
             for label, value in items
         ]
@@ -596,8 +624,200 @@ class ReportPdfService:
             ]
         )
 
+    def _recommendation_panel(self, candidate: CandidateEvaluationSummary) -> Table:
+        recommendation = recruiter_recommendation(candidate)
+        accent = {
+            "green": GREEN,
+            "red": RED,
+            "amber": AMBER,
+        }.get(recommendation["color"], BLUE)
+        pass_rate = (
+            candidate.hidden_passed / candidate.hidden_total * 100
+            if candidate.hidden_total
+            else 0
+        )
+        table = Table(
+            [
+                [
+                    Paragraph(recommendation["label"], self._styles["recommendation"]),
+                    Paragraph(
+                        escape(recommendation["explanation"]),
+                        self._styles["bodyLead"],
+                    ),
+                ],
+                [
+                    Paragraph("Decision signals", self._styles["metaLabel"]),
+                    Paragraph(
+                        "Final score "
+                        f"{candidate.scores.final_score:.1f}% | Hidden pass rate "
+                        f"{pass_rate:.1f}% | AI quality "
+                        f"{candidate.scores.ai_score:.1f}%",
+                        self._styles["tableBody"],
+                    ),
+                ],
+            ],
+            colWidths=[42 * mm, CONTENT_WIDTH - 42 * mm],
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), SOFT),
+                    ("BOX", (0, 0), (-1, -1), 0.8, accent),
+                    ("LINEBEFORE", (0, 0), (0, -1), 4, accent),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                    ("TOPPADDING", (0, 0), (-1, -1), 9),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ]
+            )
+        )
+        return table
+
+    def _score_breakdown_table(self, candidate: CandidateEvaluationSummary) -> Table:
+        rows: list[list[Any]] = [
+            ["Component", "Weight", "Raw score", "Weighted score"]
+        ]
+        for row in score_breakdown_rows(candidate.scores, candidate.weights):
+            rows.append(
+                [
+                    Paragraph(
+                        escape(row["component"]),
+                        self._styles["tableBodyStrong"],
+                    ),
+                    f"{row['weight']:.0f}%",
+                    f"{row['raw_score']:.1f}%",
+                    f"{row['weighted_score']:.1f}",
+                ]
+            )
+        rows.append(
+            [
+                Paragraph("Final score", self._styles["tableBodyStrong"]),
+                "100%",
+                "-",
+                f"{candidate.scores.final_score:.1f}",
+            ]
+        )
+        return _styled_table(
+            rows,
+            [CONTENT_WIDTH - 78 * mm, 22 * mm, 28 * mm, 28 * mm],
+            repeat_rows=1,
+        )
+
+    def _activity_timeline(self, candidate: CandidateEvaluationSummary) -> Table:
+        activity = candidate.activity
+        started_at = activity.started_at if activity else None
+        submitted_at = activity.submitted_at if activity else candidate.submitted_at
+        total_time = (
+            activity.total_time_seconds
+            if activity and activity.total_time_seconds is not None
+            else candidate.time_taken_seconds
+        )
+        return self._metadata_strip(
+            [
+                ("Started", _datetime_label(started_at)),
+                ("Submitted", _datetime_label(submitted_at)),
+                ("Total time", duration_label(total_time)),
+                ("Question time", "Not available"),
+            ]
+        )
+
+    def _integrity_signals(self, candidate: CandidateEvaluationSummary) -> Table:
+        integrity = candidate.integrity
+        if integrity is None:
+            return self._metadata_strip(
+                [
+                    ("Proctoring", "Not available"),
+                    ("Tab switches", "Not available"),
+                    ("Copy/paste", "Not available"),
+                    ("Similarity", "Not available"),
+                ]
+            )
+        similarity = (
+            f"{integrity.plagiarism_similarity_score:.1f}%"
+            if integrity.plagiarism_similarity_score is not None
+            else "Not available"
+        )
+        suspicious = (
+            "; ".join(integrity.suspicious_activity)
+            if integrity.suspicious_activity
+            else "No suspicious activity recorded"
+        )
+        return Table(
+            [
+                [
+                    self._metadata_strip(
+                        [
+                            ("Proctoring", safe_text(integrity.proctoring_mode)),
+                            (
+                                "Tab switches",
+                                safe_text(integrity.tab_switches),
+                            ),
+                            (
+                                "Copy/paste",
+                                safe_text(integrity.copy_paste_count),
+                            ),
+                            ("Similarity", similarity),
+                        ]
+                    )
+                ],
+                [
+                    Paragraph(
+                        f"<b>Integrity notes:</b> {escape(suspicious)}",
+                        self._styles["bodyMuted"],
+                    )
+                ],
+            ],
+            colWidths=[CONTENT_WIDTH],
+            style=TableStyle(
+                [
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+            ),
+        )
+
+    def _benchmark_context(self, benchmark: Any) -> Any:
+        if benchmark is None or not benchmark.total_candidates:
+            return self._empty_state("Benchmark unavailable.")
+        return self._metadata_strip(
+            [
+                (
+                    "Candidate rank",
+                    (
+                        f"#{benchmark.candidate_rank}/{benchmark.total_candidates}"
+                        if benchmark.candidate_rank
+                        else "Not ranked"
+                    ),
+                ),
+                (
+                    "Average score",
+                    (
+                        f"{benchmark.average_score:.1f}%"
+                        if benchmark.average_score is not None
+                        else "Not available"
+                    ),
+                ),
+                (
+                    "Average time",
+                    duration_label(benchmark.average_completion_time_seconds),
+                ),
+                (
+                    "Percentile",
+                    (
+                        f"{benchmark.percentile:.1f}"
+                        if benchmark.percentile is not None
+                        else "Not available"
+                    ),
+                ),
+            ]
+        )
+
     def _ai_review(self, candidate: CandidateEvaluationSummary) -> Table:
         quality = candidate.ai_quality
+        breakdown = self._ai_quality_breakdown(quality)
         narrative = Table(
             [
                 [
@@ -619,6 +839,13 @@ class ReportPdfService:
                     Paragraph(
                         f"Time: {escape(quality.time_complexity)} &nbsp;&nbsp; "
                         f"Space: {escape(quality.space_complexity)}",
+                        self._styles["tableBody"],
+                    ),
+                ],
+                [
+                    Paragraph("Quality score", self._styles["metaLabel"]),
+                    Paragraph(
+                        f"{quality.score:.1f}% {breakdown}",
                         self._styles["tableBody"],
                     ),
                 ],
@@ -708,65 +935,292 @@ class ReportPdfService:
         )
         return table
 
+    def _question_context(self, question: Any) -> Table:
+        tags = ", ".join(question.tags) if question.tags else "Not available"
+        summary = _summarize(question.problem_statement, 520)
+        rows: list[list[Any]] = [
+            [
+                Paragraph("Difficulty", self._styles["metaLabel"]),
+                Paragraph(safe_text(question.difficulty), self._styles["tableBody"]),
+                Paragraph("Tags", self._styles["metaLabel"]),
+                Paragraph(escape(tags), self._styles["tableBody"]),
+            ],
+            [
+                Paragraph("Problem summary", self._styles["metaLabel"]),
+                Paragraph(escape(summary), self._styles["tableBody"]),
+                Paragraph("Marks", self._styles["metaLabel"]),
+                Paragraph(
+                    f"{question.earned_marks:.1f}/{question.assigned_marks:.1f}",
+                    self._styles["tableBody"],
+                ),
+            ],
+            [
+                Paragraph("Input format", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(_summarize(question.input_format, 260)),
+                    self._styles["tableBody"],
+                ),
+                Paragraph("Output format", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(_summarize(question.output_format, 260)),
+                    self._styles["tableBody"],
+                ),
+            ],
+            [
+                Paragraph("Constraints", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(_summarize(question.constraints, 420)),
+                    self._styles["tableBody"],
+                ),
+                Paragraph("Language", self._styles["metaLabel"]),
+                Paragraph(safe_text(question.language), self._styles["tableBody"]),
+            ],
+        ]
+        table = Table(
+            rows,
+            colWidths=[
+                24 * mm,
+                (CONTENT_WIDTH - 48 * mm) / 2,
+                24 * mm,
+                (CONTENT_WIDTH - 48 * mm) / 2,
+            ],
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), SOFT),
+                    ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+                    ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        return table
+
+    def _question_ai_review(self, question: Any) -> Any:
+        quality = question.ai_quality
+        if quality is None:
+            return self._empty_state("AI code-quality review is not available.")
+        return Table(
+            [
+                [
+                    Paragraph("AI review summary", self._styles["metaLabel"]),
+                    Paragraph(
+                        escape(
+                            f"{quality.approach} Time {quality.time_complexity}; "
+                            f"space {quality.space_complexity}."
+                        ),
+                        self._styles["tableBody"],
+                    ),
+                ],
+                [
+                    Paragraph("Quality concerns", self._styles["metaLabel"]),
+                    Paragraph(
+                        escape(_join_or_fallback(quality.weaknesses)),
+                        self._styles["tableBody"],
+                    ),
+                ],
+                [
+                    Paragraph("Why AI score may differ", self._styles["metaLabel"]),
+                    Paragraph(
+                        escape(
+                            "AI quality scores include readability, maintainability, "
+                            "complexity, and input/error handling, so a submission can "
+                            "pass hidden tests but still lose quality marks."
+                        ),
+                        self._styles["tableBody"],
+                    ),
+                ],
+            ],
+            colWidths=[33 * mm, CONTENT_WIDTH - 33 * mm],
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (0, -1), SOFT),
+                    ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+                    ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            ),
+        )
+
+    def _test_coverage_summary(self, test_cases: list[Any]) -> Any:
+        if not test_cases:
+            return self._empty_state("Test coverage summary is not available.")
+        rows: list[list[Any]] = [["Coverage category", "Cases", "Passed"]]
+        grouped: dict[str, list[Any]] = {}
+        for case in test_cases:
+            category = (
+                case.case_category.strip()
+                if case.case_category
+                else "Confidential hidden validation case"
+            )
+            grouped.setdefault(category, []).append(case)
+        for category, cases in grouped.items():
+            rows.append(
+                [
+                    Paragraph(escape(category), self._styles["tableBodyStrong"]),
+                    str(len(cases)),
+                    f"{sum(1 for case in cases if case.passed)}/{len(cases)}",
+                ]
+            )
+        return _styled_table(
+            rows,
+            [CONTENT_WIDTH - 52 * mm, 22 * mm, 30 * mm],
+            repeat_rows=1,
+        )
+
     def _test_case_table(self, test_cases: list[Any]) -> Any:
         if not test_cases:
             return self._empty_state(
                 "No hidden-case rows were retained for this question."
             )
         rows: list[list[Any]] = [
-            ["Case", "Result", "Verdict", "Runtime", "Memory", "Points", "Required"]
+            [
+                "Case",
+                "Coverage",
+                "Result",
+                "Verdict",
+                "Runtime",
+                "Memory",
+                "Points",
+            ]
         ]
-        for case in test_cases:
+        for index, case in enumerate(test_cases, start=1):
             rows.append(
                 [
-                    Paragraph(escape(case.test_case_id), self._styles["tableBody"]),
+                    Paragraph(hidden_case_label(index), self._styles["tableBody"]),
+                    Paragraph(
+                        escape(
+                            case.case_category
+                            or "Confidential hidden validation case"
+                        ),
+                        self._styles["tableBody"],
+                    ),
                     _result_label(case.passed, self._styles),
                     case.verdict.value.replace("_", " ").title(),
                     f"{case.execution_time_ms or 0:.0f} ms",
                     memory_label(case.memory_kb or 0),
                     f"{case.points:g}",
-                    "Yes" if case.mandatory else "No",
                 ]
             )
         return _styled_table(
             rows,
             [
-                CONTENT_WIDTH - 103 * mm,
+                17 * mm,
+                CONTENT_WIDTH - 107 * mm,
                 16 * mm,
                 26 * mm,
                 17 * mm,
                 17 * mm,
-                12 * mm,
-                15 * mm,
+                14 * mm,
             ],
             repeat_rows=1,
             font_size=7.2,
         )
 
     def _failure_evidence(self, failures: list[Any]) -> LongTable:
-        rows: list[list[Any]] = [["Case", "Input", "Expected", "Actual / message"]]
-        for case in failures:
-            actual = case.actual_output or case.message or "No output"
+        rows: list[list[Any]] = [["Case", "Coverage", "Verdict", "Reviewer note"]]
+        for index, case in enumerate(failures, start=1):
+            note = case.message or "Failed hidden validation case."
             rows.append(
                 [
                     Paragraph(
-                        escape(case.test_case_id), self._styles["tableBodyStrong"]
+                        hidden_case_label(index),
+                        self._styles["tableBodyStrong"],
                     ),
-                    _mono_paragraph(case.input, self._styles),
-                    _mono_paragraph(case.expected_output, self._styles),
-                    _mono_paragraph(actual, self._styles),
+                    Paragraph(
+                        escape(
+                            case.case_category
+                            or "Confidential hidden validation case"
+                        ),
+                        self._styles["tableBody"],
+                    ),
+                    case.verdict.value.replace("_", " ").title(),
+                    Paragraph(escape(note), self._styles["tableBody"]),
                 ]
             )
         return _styled_table(
             rows,
             [
+                18 * mm,
+                CONTENT_WIDTH - 84 * mm,
                 28 * mm,
-                (CONTENT_WIDTH - 28 * mm) / 3,
-                (CONTENT_WIDTH - 28 * mm) / 3,
-                (CONTENT_WIDTH - 28 * mm) / 3,
+                38 * mm,
             ],
             repeat_rows=1,
             font_size=7,
+        )
+
+    def _suggested_improvements(self, question: Any) -> Any:
+        if question.suggested_solution:
+            return Table(
+                [
+                    [
+                        Paragraph("Cleaner solution", self._styles["metaLabel"]),
+                        _mono_paragraph(
+                            _summarize(question.suggested_solution, 3000),
+                            self._styles,
+                        ),
+                    ]
+                ],
+                colWidths=[28 * mm, CONTENT_WIDTH - 28 * mm],
+                style=TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (0, -1), SOFT),
+                        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+                        ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                ),
+            )
+        notes = question.suggested_improvement_notes or [
+            "No suggested improvement notes were supplied."
+        ]
+        return _bullet_panel(
+            "Suggested improvement notes",
+            notes,
+            PALE_BLUE,
+            self._styles,
+        )
+
+    @staticmethod
+    def _ai_quality_breakdown(quality: Any) -> str:
+        breakdown = getattr(quality, "score_breakdown", {}) or {}
+        if not breakdown:
+            return "(sub-score breakdown not available)"
+        ordered_keys = [
+            "correctness",
+            "readability",
+            "maintainability",
+            "complexity",
+            "error_handling",
+            "input_handling",
+        ]
+        labels = {
+            "error_handling": "error handling",
+            "input_handling": "input handling",
+        }
+        parts = [
+            f"{labels.get(key, key.replace('_', ' '))}: {breakdown[key]:.0f}%"
+            for key in ordered_keys
+            if key in breakdown
+        ]
+        return (
+            f"({'; '.join(parts)})"
+            if parts
+            else "(sub-score breakdown not available)"
         )
 
     def _code_panels(self, source_code: str) -> list[Any]:
@@ -1041,6 +1495,14 @@ def _report_styles() -> dict[str, ParagraphStyle]:
             leading=15,
             textColor=colors.white,
         ),
+        "recommendation": ParagraphStyle(
+            "Recommendation",
+            parent=base["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            leading=16,
+            textColor=NAVY,
+        ),
         "pill": ParagraphStyle(
             "Pill",
             parent=base["Normal"],
@@ -1259,3 +1721,30 @@ def _bullet_panel(
 def _mono_paragraph(value: str, styles: dict[str, ParagraphStyle]) -> Paragraph:
     safe = escape(value or "-").replace("\n", "<br/>")
     return Paragraph(safe, styles["mono"])
+
+
+def _meta_paragraph(value: str, styles: dict[str, ParagraphStyle]) -> Paragraph:
+    text = escape(safe_text(value))
+    if "@" in text and len(text) > 28:
+        text = text.replace("@", "<br/>@", 1)
+    return Paragraph(text, styles["metaValue"])
+
+
+def _datetime_label(value: datetime | None) -> str:
+    if value is None:
+        return "Not available"
+    return value.astimezone(UTC).strftime("%d %b %Y, %H:%M UTC")
+
+
+def _summarize(value: str, limit: int) -> str:
+    text = " ".join((value or "").split())
+    if not text:
+        return "Not available"
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(limit - 1, 1)].rstrip()}..."
+
+
+def _join_or_fallback(items: list[str], fallback: str = "Not available") -> str:
+    cleaned = [item.strip() for item in items if item.strip()]
+    return "; ".join(cleaned) if cleaned else fallback

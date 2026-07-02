@@ -39,11 +39,18 @@ export interface QuestionEvaluationBreakdown {
   question_title: string;
   language: string;
   submitted_code: string;
+  evaluation_status?: "evaluated" | "not_attempted";
   passed_count: number;
   total_count: number;
   earned_points: number;
   total_points: number;
   score: number;
+  assigned_marks?: number;
+  earned_marks?: number;
+  test_case_score?: number;
+  coding_score?: number;
+  ai_score?: number;
+  ai_quality?: AICodeQualitySignal | null;
   mandatory_failed: boolean;
   test_cases: QuestionTestCaseResult[];
 }

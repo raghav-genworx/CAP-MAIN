@@ -3,7 +3,9 @@
 from .adversarial_test_prompt import build_adversarial_test_prompt
 from .bruteforce_solution_prompt import build_bruteforce_solution_prompt
 from .constraint_prompt import build_constraint_prompt
+from .constraint_replacement_prompt import build_constraint_replacement_prompt
 from .constraint_review_prompt import build_constraint_review_prompt
+from .constraint_script_prompt import build_constraint_script_prompt
 from .duplicate_detection_prompt import build_duplicate_detection_prompt
 from .example_prompt import build_example_prompt
 from .guardrail_prompt import build_guarded_system_prompt
@@ -45,7 +47,9 @@ __all__ = [
     "build_adversarial_test_prompt",
     "build_bruteforce_solution_prompt",
     "build_constraint_prompt",
+    "build_constraint_replacement_prompt",
     "build_constraint_review_prompt",
+    "build_constraint_script_prompt",
     "build_duplicate_detection_prompt",
     "build_example_prompt",
     "build_focused_language_solution_prompt",

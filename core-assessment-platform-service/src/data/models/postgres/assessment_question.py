@@ -28,7 +28,6 @@ class AssessmentQuestionModel(Base):
     question_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
     question_order: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     marks: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
-    time_limit_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_mandatory: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

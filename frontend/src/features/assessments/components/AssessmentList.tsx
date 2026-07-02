@@ -3,7 +3,7 @@ import { Fragment, useState } from "react";
 import { StatusBadge } from "../../../components/common/StatusBadge";
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
-import { formatDateTime, statusTone } from "../recruiterAssessmentViewModel";
+import { formatDateTime, statusTone } from "../utils/recruiterAssessmentViewModel";
 import type { Assessment } from "../types/Assessment";
 
 interface AssessmentListProps {

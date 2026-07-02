@@ -39,12 +39,14 @@ class QuestionTestCaseResult(BaseModel):
     expected_output: str = ""
     actual_output: str = ""
     message: str = ""
+    case_category: str = ""
 
 
 class AICodeQualitySignal(BaseModel):
     """Structured AI code-quality review."""
 
     score: float
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     approach: str
     time_complexity: str
     space_complexity: str
@@ -62,13 +64,56 @@ class QuestionEvaluationBreakdown(BaseModel):
     question_title: str
     language: str = ""
     submitted_code: str = ""
+    evaluation_status: str = "evaluated"
     passed_count: int
     total_count: int
     earned_points: float
     total_points: float
     score: float
+    assigned_marks: float = 0
+    earned_marks: float = 0
+    test_case_score: float = 0
+    coding_score: float = 0
+    ai_score: float = 0
+    ai_quality: AICodeQualitySignal | None = None
+    difficulty: str = ""
+    tags: list[str] = Field(default_factory=list)
+    problem_statement: str = ""
+    input_format: str = ""
+    output_format: str = ""
+    constraints: str = ""
+    suggested_solution: str = ""
+    suggested_improvement_notes: list[str] = Field(default_factory=list)
     mandatory_failed: bool
     test_cases: list[QuestionTestCaseResult] = Field(default_factory=list)
+
+
+class ScoringWeights(BaseModel):
+    """Assessment score weights returned by the evaluation service."""
+
+    test_case_weight: float = 60
+    coding_weight: float = 20
+    ai_weight: float = 20
+
+
+class CandidateActivitySignal(BaseModel):
+    """Candidate timing context, when available."""
+
+    started_at: datetime | None = None
+    submitted_at: datetime | None = None
+    total_time_seconds: int | None = None
+    question_time_seconds: dict[str, int] = Field(default_factory=dict)
+
+
+class CandidateIntegritySignal(BaseModel):
+    """Optional proctoring and integrity signals."""
+
+    proctoring_mode: str = ""
+    tab_switches: int | None = None
+    copy_paste_count: int | None = None
+    fullscreen_exits: int | None = None
+    suspicious_activity: list[str] = Field(default_factory=list)
+    plagiarism_similarity_score: float | None = None
 
 
 class CandidateEvaluationSummary(BaseModel):
@@ -86,13 +131,26 @@ class CandidateEvaluationSummary(BaseModel):
     scores: EvaluationScores
     hidden_passed: int
     hidden_total: int
+    weights: ScoringWeights = Field(default_factory=ScoringWeights)
     total_execution_time_ms: float
     peak_memory_kb: int
     ai_quality: AICodeQualitySignal
     question_breakdown: list[QuestionEvaluationBreakdown]
+    activity: CandidateActivitySignal | None = None
+    integrity: CandidateIntegritySignal | None = None
     submitted_at: datetime
     evaluated_at: datetime | None = None
     time_taken_seconds: int | None = None
+
+
+class CandidateBenchmarkContext(BaseModel):
+    """Assessment-level context for one candidate report."""
+
+    candidate_rank: int | None = None
+    total_candidates: int = 0
+    average_score: float | None = None
+    average_completion_time_seconds: int | None = None
+    percentile: float | None = None
 
 
 class EvaluationJobResponse(BaseModel):
@@ -151,6 +209,7 @@ class CandidateReportResponse(BaseModel):
     assessment_id: str
     candidate_assessment_id: str
     candidate: CandidateEvaluationSummary
+    benchmark: CandidateBenchmarkContext | None = None
     generated_at: datetime
     download_label: str
 

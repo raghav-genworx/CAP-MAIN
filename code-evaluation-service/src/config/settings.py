@@ -29,10 +29,10 @@ class Settings(BaseSettings):
         description="Comma-separated list of allowed CORS origins.",
     )
     database_url: str = Field(
-        default=(
-            "postgresql+psycopg://cap_user:cap_password@localhost:55432/cap_evaluation"
+        default=("postgresql+psycopg://cap_user:cap_password@localhost:55432/cap_core"),
+        description=(
+            "SQLAlchemy URL for shared CAP storage; evaluation uses its own schema."
         ),
-        description="SQLAlchemy URL for migration-managed evaluation storage.",
     )
     evaluation_report_dir: str = Field(
         default="data/reports",

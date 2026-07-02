@@ -26,6 +26,7 @@ from schemas.evaluation import (
     EvaluationJobStatus,
     ExecutionVerdict,
     HiddenExecutionResult,
+    QuestionSubmission,
 )
 from schemas.evaluation import (
     TestReportRequest as ScheduledTestReportRequest,
@@ -97,6 +98,77 @@ def _request(
 
 
 class EvaluationServiceTest(unittest.TestCase):
+    def test_scores_each_question_by_marks_and_skips_empty_code(self) -> None:
+        class RecordingEvaluator:
+            def __init__(self) -> None:
+                self.sources: list[str] = []
+
+            def evaluate(
+                self, *, language: str, source_code: str
+            ) -> AICodeQualitySignal:
+                self.sources.append(source_code)
+                return AICodeQualitySignal(
+                    score=80,
+                    approach="Question-specific review.",
+                    time_complexity="O(n)",
+                    space_complexity="O(1)",
+                    readability="Clear.",
+                    maintainability="Maintainable.",
+                )
+
+        evaluator = RecordingEvaluator()
+        with TemporaryDirectory() as tmpdir:
+            service = EvaluationService(
+                _repository(tmpdir),
+                ReportPdfService(f"{tmpdir}/reports"),
+                code_quality_evaluator=evaluator,
+            )
+            request = _request("ca_per_question", "Per Question", 4, 10).model_copy(
+                update={
+                    "ai_quality": None,
+                    "hidden_results": [
+                        _result(case, True).model_copy(update={"points": 7.5})
+                        for case in range(1, 5)
+                    ],
+                    "question_submissions": [
+                        QuestionSubmission(
+                            question_id="q_1",
+                            question_title="Array Balancer",
+                            language="python",
+                            source_code="def solve():\n    return 1",
+                            marks=30,
+                        ),
+                        QuestionSubmission(
+                            question_id="q_2",
+                            question_title="Graph Paths",
+                            language="python",
+                            source_code="",
+                            marks=70,
+                        ),
+                    ],
+                }
+            )
+
+            job = service.create_job(request)
+
+            self.assertEqual(evaluator.sources, ["def solve():\n    return 1"])
+            answered = next(
+                item
+                for item in job.result.question_breakdown
+                if item.question_id == "q_1"
+            )
+            empty = next(
+                item
+                for item in job.result.question_breakdown
+                if item.question_id == "q_2"
+            )
+            self.assertEqual(answered.score, 96)
+            self.assertEqual(answered.earned_marks, 28.8)
+            self.assertEqual(empty.evaluation_status, "not_attempted")
+            self.assertEqual(empty.earned_marks, 0)
+            self.assertEqual(empty.test_cases, [])
+            self.assertEqual(job.result.scores.final_score, 28.8)
+
     def test_uses_ai_evaluator_when_request_has_no_quality_signal(self) -> None:
         class StubEvaluator:
             def evaluate(
@@ -284,6 +356,118 @@ class EvaluationServiceTest(unittest.TestCase):
             self.assertEqual(report.leaderboard[0].rank, 1)
             self.assertEqual(generated.filename, "test-slot-1-report.pdf")
             self.assertTrue(generated.path.read_bytes().startswith(b"%PDF-1.4"))
+
+    def test_candidate_pdf_handles_rich_question_evidence_and_fallbacks(self) -> None:
+        class StubEvaluator:
+            def evaluate(
+                self, *, language: str, source_code: str
+            ) -> AICodeQualitySignal:
+                return AICodeQualitySignal(
+                    score=68,
+                    score_breakdown={
+                        "correctness": 70,
+                        "readability": 75,
+                        "maintainability": 65,
+                        "complexity": 60,
+                        "error_handling": 55,
+                        "input_handling": 70,
+                    },
+                    approach="Uses direct iteration with clear state.",
+                    time_complexity="O(n)",
+                    space_complexity="O(1)",
+                    readability="Mostly readable.",
+                    maintainability="Could extract validation helpers.",
+                    strengths=["Simple control flow"],
+                    weaknesses=["Limited edge-case comments"],
+                    improvements=["Clarify boundary handling"],
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            service = EvaluationService(
+                _repository(tmpdir),
+                ReportPdfService(f"{tmpdir}/reports"),
+                seed_demo_data=False,
+                code_quality_evaluator=StubEvaluator(),
+            )
+            request = _request(
+                "ca_rich_pdf",
+                "Rich Candidate",
+                3,
+                80,
+            ).model_copy(
+                update={
+                    "candidate_email": (
+                        "very.long.recruiter.review.address@example-hiring-domain.com"
+                    ),
+                    "ai_quality": None,
+                    "question_submissions": [
+                        QuestionSubmission(
+                            question_id="q_1",
+                            question_title="Array Balancer",
+                            language="python",
+                            source_code=(
+                                "def solve(values):\n"
+                                "    total = 0\n"
+                                "    for value in values:\n"
+                                "        total += value\n"
+                                "    return total\n"
+                            )
+                            * 18,
+                            marks=40,
+                            difficulty="medium",
+                            tags=["arrays", "prefix-sum"],
+                            problem_statement=(
+                                "Given an array, compute the balancing score for "
+                                "each candidate split and return the best result."
+                            ),
+                            input_format="First line N, second line N integers.",
+                            output_format="A single integer score.",
+                            constraints="1 <= N <= 200000",
+                            suggested_improvement_notes=[
+                                "Use one pass after computing total sum."
+                            ],
+                        ),
+                        QuestionSubmission(
+                            question_id="q_2",
+                            question_title="Graph Paths",
+                            language="python",
+                            source_code="",
+                            marks=60,
+                            difficulty="hard",
+                            tags=["graphs"],
+                        ),
+                    ],
+                    "hidden_results": [
+                        _result(1, True).model_copy(
+                            update={
+                                "case_category": "Boundary size",
+                                "input": "SECRET_INPUT_SHOULD_NOT_RENDER",
+                                "expected_output": "SECRET_EXPECTED_SHOULD_NOT_RENDER",
+                            }
+                        ),
+                        _result(2, False).model_copy(
+                            update={
+                                "case_category": "Large values",
+                                "input": "SECRET_INPUT_SHOULD_NOT_RENDER",
+                                "expected_output": "SECRET_EXPECTED_SHOULD_NOT_RENDER",
+                                "message": "Wrong answer on confidential case",
+                            }
+                        ),
+                    ],
+                    "integrity": None,
+                }
+            )
+
+            service.create_job(request)
+            report = service.get_candidate_report("assessment_unit", "ca_rich_pdf")
+            generated = service.generate_candidate_report_pdf(
+                "assessment_unit",
+                "ca_rich_pdf",
+            )
+
+            self.assertEqual(report.benchmark.total_candidates, 1)
+            self.assertTrue(generated.path.read_bytes().startswith(b"%PDF-1.4"))
+            self.assertGreater(generated.path.stat().st_size, 1_000)
 
     def test_create_job_is_idempotent_per_candidate_assessment(self) -> None:
         with TemporaryDirectory() as tmpdir:

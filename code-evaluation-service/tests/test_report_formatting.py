@@ -6,16 +6,23 @@ from datetime import UTC, datetime
 from core.services.report_formatting import (
     assessment_summary,
     duration_label,
+    hidden_case_label,
     memory_label,
     numbered_code,
     question_analytics,
+    recruiter_recommendation,
     safe_report_slug,
+    safe_text,
     schedule_label,
+    score_breakdown_rows,
 )
 from schemas.evaluation import (
     AssessmentEvaluationOverview,
     CandidateEvaluationSummary,
+    CandidateIntegritySignal,
+    EvaluationScores,
     QuestionEvaluationBreakdown,
+    ScoringWeights,
 )
 
 
@@ -34,6 +41,23 @@ class ReportFormattingTest(unittest.TestCase):
             rendered.splitlines(),
             ["   1  alpha", "   2  12345", "      6789"],
         )
+
+    def test_safe_labels_and_score_breakdown_are_recruiter_ready(self) -> None:
+        rows = score_breakdown_rows(
+            EvaluationScores(
+                test_case_score=75,
+                coding_score=80,
+                ai_score=60,
+                final_score=73,
+                percentage=73,
+            ),
+            ScoringWeights(test_case_weight=60, coding_weight=20, ai_weight=20),
+        )
+
+        self.assertEqual(safe_text(""), "Not available")
+        self.assertEqual(hidden_case_label(2), "Case 2")
+        self.assertEqual(rows[0]["component"], "Hidden test correctness")
+        self.assertEqual(rows[0]["weighted_score"], 45)
 
     def test_schedule_duration_and_memory_labels_handle_boundaries(self) -> None:
         start = datetime(2026, 6, 27, 9, 30, tzinfo=UTC)
@@ -119,6 +143,53 @@ class ReportFormattingTest(unittest.TestCase):
         self.assertIn("3 of 4 candidates", summary)
         self.assertIn("78.2%", summary)
         self.assertIn("94.5%", summary)
+
+    def test_recruiter_recommendation_uses_score_and_integrity_signals(self) -> None:
+        strong = CandidateEvaluationSummary.model_construct(
+            scores=EvaluationScores(
+                test_case_score=95,
+                coding_score=90,
+                ai_score=85,
+                final_score=91,
+                percentage=91,
+            ),
+            hidden_passed=9,
+            hidden_total=10,
+            integrity=CandidateIntegritySignal(),
+        )
+        failed = CandidateEvaluationSummary.model_construct(
+            scores=EvaluationScores(
+                test_case_score=30,
+                coding_score=55,
+                ai_score=65,
+                final_score=37,
+                percentage=37,
+            ),
+            hidden_passed=3,
+            hidden_total=10,
+            integrity=CandidateIntegritySignal(),
+        )
+        flagged = CandidateEvaluationSummary.model_construct(
+            scores=EvaluationScores(
+                test_case_score=90,
+                coding_score=90,
+                ai_score=90,
+                final_score=90,
+                percentage=90,
+            ),
+            hidden_passed=9,
+            hidden_total=10,
+            integrity=CandidateIntegritySignal(
+                suspicious_activity=["Fullscreen exit detected"]
+            ),
+        )
+
+        self.assertEqual(recruiter_recommendation(strong)["label"], "Strong Hire")
+        self.assertEqual(recruiter_recommendation(failed)["label"], "Reject")
+        self.assertEqual(
+            recruiter_recommendation(flagged)["label"],
+            "Manual Review Required",
+        )
 
 
 if __name__ == "__main__":

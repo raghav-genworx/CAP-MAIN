@@ -30,12 +30,10 @@ class ConstraintNodeMixin(QuestionAgentToolsMixin):
         )
         return {
             "input_format": model.input_format.strip() or state.get("input_format", ""),
-            "input_explanation": model.input_explanation.strip()
-            or state.get("input_explanation", ""),
+            "input_explanation": "",
             "output_format": model.output_format.strip()
             or state.get("output_format", ""),
-            "output_explanation": model.output_explanation.strip()
-            or state.get("output_explanation", ""),
+            "output_explanation": "",
             "constraints": model.constraints.strip(),
             "candidate_solve_time_minutes": model.candidate_solve_time_minutes
             or model.time_limit_minutes

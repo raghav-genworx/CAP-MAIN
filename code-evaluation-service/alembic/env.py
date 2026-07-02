@@ -2,11 +2,12 @@
 
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 from config.settings import get_settings
 from data.models.postgres import Base
+from data.models.postgres.base import EVALUATION_SCHEMA
 
 config = context.config
 if config.config_file_name is not None:
@@ -14,6 +15,20 @@ if config.config_file_name is not None:
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
+
+
+def include_evaluation_objects(
+    name: str | None,
+    type_: str,
+    parent_names: dict[str, str | None],
+) -> bool:
+    """Keep autogeneration scoped to evaluation-owned database objects."""
+
+    if type_ == "schema":
+        return name == EVALUATION_SCHEMA
+    if type_ == "table":
+        return parent_names.get("schema_name") == EVALUATION_SCHEMA
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -25,7 +40,12 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_schemas=True,
+        include_name=include_evaluation_objects,
+        version_table="evaluation_alembic_version",
+        version_table_schema=EVALUATION_SCHEMA,
     )
+    context.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
     with context.begin_transaction():
         context.run_migrations()
 
@@ -39,10 +59,19 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                text(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+            )
+            connection.commit()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_schemas=True,
+            include_name=include_evaluation_objects,
+            version_table="evaluation_alembic_version",
+            version_table_schema=EVALUATION_SCHEMA,
         )
         with context.begin_transaction():
             context.run_migrations()

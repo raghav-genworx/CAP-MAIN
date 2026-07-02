@@ -60,22 +60,17 @@ The root `docker-compose.yml` is the single Compose entry point. It uses `docker
 ## Evaluation Persistence
 
 Evaluation jobs, source evidence, scorecards, and report metadata are stored in
-the dedicated `cap_evaluation` PostgreSQL database. The evaluation API runs
-Alembic migrations before starting, and its readiness endpoint returns `503`
-until PostgreSQL is reachable. The worker uses row locking and processing leases
-so multiple workers cannot evaluate the same pending job concurrently.
+the `evaluation` schema inside the shared `cap_core` PostgreSQL database. Core
+tables remain in the default `public` schema. Evaluation has its own Alembic
+version table, so both migration streams can safely use the same database. The
+evaluation API runs migrations before starting, and its readiness endpoint
+returns `503` until PostgreSQL is reachable. The worker uses row locking and
+processing leases so multiple workers cannot evaluate the same pending job
+concurrently.
 
 Completed and failed evaluation evidence is retained for 365 days by default.
 Override `EVALUATION_RETENTION_DAYS` and `EVALUATION_JOB_LEASE_SECONDS` in the
 root `.env` when deployment policy requires different values.
-
-For a PostgreSQL volume created before the evaluation database was introduced,
-initialize it once and run the migrations:
-
-```sh
-docker compose exec -T postgres /docker-entrypoint-initdb.d/02-create-evaluation-database.sh
-docker compose run --rm --no-deps code-evaluation-service alembic upgrade head
-```
 
 `INTERNAL_SERVICE_TOKEN` must be the same for core, execution, and evaluation.
 The documented local value is rejected whenever `APP_ENV` is not local,

@@ -68,6 +68,10 @@ def build_solution_prompt(
                 "Provide a concise general solution_approach and accurate Big-O "
                 "time_complexity and space_complexity."
             ),
+            (
+                "The reference solution must be the optimized intended solution, "
+                "not a brute-force oracle or teaching-only baseline."
+            ),
             "Use notes only for a material assumption.",
         ),
     )

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime
+from queue import Queue
+from threading import Thread
 from typing import Any, Literal, cast
 
 from langgraph.graph import END, START, StateGraph
+from langsmith.run_trees import RunTree
 
 from config.settings import Settings
 from core.services.ai_gateway_service import AIGatewayService
 from core.services.execution_adapter_service import ExecutionAdapterService
+from observability.tracing.langsmith import langsmith_run
 from schemas.question_bank import (
     DifficultyLevel,
     DifficultySource,
@@ -36,6 +40,7 @@ from ..nodes.question_nodes import QuestionAgentNodesMixin
 from ..prompts.bruteforce_solution_prompt import build_bruteforce_solution_prompt
 from ..prompts.question_prompts import SCOPE_NODE_SEQUENCE, SCOPE_SUMMARIES
 from ..states.question_state import QuestionGenerationState, SolutionOutput
+from ..tools.question_tools import validation_progress_events
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ FULL_NODE_SEQUENCE = [
     "constraints",
     "examples",
     "hidden_tests",
+    "constraint_script",
     "solution",
     "validation",
     "multi_language_solutions",
@@ -61,6 +67,7 @@ NODE_LABELS = {
     "constraints": "Building constraints and formats",
     "examples": "Creating sample tests",
     "hidden_tests": "Creating hidden and edge tests",
+    "constraint_script": "Checking testcase constraints",
     "solution": "Generating primary solution",
     "validation": "Running validation",
     "multi_language_solutions": "Generating language solutions",
@@ -102,11 +109,37 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 else "interactive"
             )
             state = self._build_initial_state(request, existing_questions)
-            if request.generation_scope == "full":
-                result = cast(QuestionGenerationState, self._graph.invoke(state))
-            else:
-                result = self._run_scoped_generation(state, request.generation_scope)
-            result = self._normalize_final_test_counts(result, request)
+            with langsmith_run(
+                self._settings,
+                self._langsmith_run_name(request),
+                inputs=self._langsmith_run_inputs(request, state),
+                tags=self._langsmith_tags(request),
+                metadata=self._langsmith_metadata(recruiter_uid, request),
+            ) as parent_run:
+                if request.generation_scope == "full":
+                    result = cast(
+                        QuestionGenerationState,
+                        self._graph.invoke(
+                            state,
+                            config=cast(
+                                Any,
+                                self._langsmith_graph_config(
+                                    recruiter_uid,
+                                    request,
+                                ),
+                            ),
+                        ),
+                    )
+                else:
+                    result = self._run_scoped_generation(
+                        state,
+                        request.generation_scope,
+                    )
+                result = self._normalize_final_test_counts(result, request)
+                if parent_run is not None:
+                    parent_run.end(
+                        outputs=self._langsmith_result_outputs(result, request),
+                    )
 
             return self._response_from_result(result, request)
         except Exception as exc:  # pragma: no cover
@@ -429,8 +462,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         """Return primary failures where the brute-force oracle validates expected."""
 
         oracle_results = {
-            (result.bucket, result.index): result
-            for result in oracle_report.results
+            (result.bucket, result.index): result for result in oracle_report.results
         }
         return [
             result
@@ -469,14 +501,10 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         """Return testcase rows that correspond to the supplied result list."""
 
         sample_indexes = {
-            result.index
-            for result in results
-            if result.bucket == "sample"
+            result.index for result in results if result.bucket == "sample"
         }
         hidden_indexes = {
-            result.index
-            for result in results
-            if result.bucket == "hidden"
+            result.index for result in results if result.bucket == "hidden"
         }
         return (
             [
@@ -590,6 +618,9 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 else "interactive"
             )
             state = self._build_initial_state(request, existing_questions)
+            run_inputs = self._langsmith_run_inputs(request, state)
+            run_tags = self._langsmith_tags(request)
+            run_metadata = self._langsmith_metadata(recruiter_uid, request)
             node_sequence = (
                 FULL_NODE_SEQUENCE
                 if request.generation_scope == "full"
@@ -608,42 +639,66 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 "next_node": node_sequence[0] if node_sequence else None,
                 "progress": 0,
             }
-            for index, node_name in enumerate(node_sequence, start=1):
-                previous_node = node_sequence[index - 2] if index > 1 else "START"
-                yield {
-                    "type": "edge",
-                    "scope": request.generation_scope,
-                    "message": f"{previous_node} -> {node_name}",
-                    "current_node": previous_node,
-                    "next_node": node_name,
-                    "progress": round(((index - 1) / total) * 100),
-                }
-                yield {
-                    "type": "node_start",
-                    "scope": request.generation_scope,
-                    "message": NODE_LABELS.get(
-                        node_name,
-                        node_name.replace("_", " ").title(),
-                    ),
-                    "current_node": node_name,
-                    "next_node": None,
-                    "progress": round(((index - 1) / total) * 100),
-                }
-                result = self._merge_state(result, self._node_runner(node_name)(result))
-                yield {
-                    "type": "node_complete",
-                    "scope": request.generation_scope,
-                    "message": f"{NODE_LABELS.get(node_name, node_name)} complete.",
-                    "current_node": node_name,
-                    "next_node": node_sequence[index] if index < total else "END",
-                    "progress": round((index / total) * 100),
-                }
+            with langsmith_run(
+                self._settings,
+                self._langsmith_run_name(request, streamed=True),
+                inputs=run_inputs,
+                tags=run_tags,
+                metadata=run_metadata,
+            ) as parent_run:
+                for index, node_name in enumerate(node_sequence, start=1):
+                    previous_node = node_sequence[index - 2] if index > 1 else "START"
+                    yield {
+                        "type": "edge",
+                        "scope": request.generation_scope,
+                        "message": f"{previous_node} -> {node_name}",
+                        "current_node": previous_node,
+                        "next_node": node_name,
+                        "progress": round(((index - 1) / total) * 100),
+                    }
+                    yield {
+                        "type": "node_start",
+                        "scope": request.generation_scope,
+                        "message": NODE_LABELS.get(
+                            node_name,
+                            node_name.replace("_", " ").title(),
+                        ),
+                        "current_node": node_name,
+                        "next_node": None,
+                        "progress": round(((index - 1) / total) * 100),
+                    }
+                    if node_name in {"validation", "multi_language_solutions"}:
+                        patch = yield from self._run_node_with_test_events(
+                            node_name,
+                            result,
+                            parent_run,
+                            scope=request.generation_scope,
+                            start_progress=round(((index - 1) / total) * 100),
+                            end_progress=round((index / total) * 100),
+                        )
+                    else:
+                        patch = self._run_traced_node(node_name, result, parent_run)
+                    result = self._merge_state(result, patch)
+                    yield {
+                        "type": "node_complete",
+                        "scope": request.generation_scope,
+                        "message": (
+                            f"{NODE_LABELS.get(node_name, node_name)} complete."
+                        ),
+                        "current_node": node_name,
+                        "next_node": node_sequence[index] if index < total else "END",
+                        "progress": round((index / total) * 100),
+                    }
 
-            result["summary"] = SCOPE_SUMMARIES.get(
-                request.generation_scope,
-                "Generated content from your description.",
-            )
-            result = self._normalize_final_test_counts(result, request)
+                result["summary"] = SCOPE_SUMMARIES.get(
+                    request.generation_scope,
+                    "Generated content from your description.",
+                )
+                result = self._normalize_final_test_counts(result, request)
+                if parent_run is not None:
+                    parent_run.end(
+                        outputs=self._langsmith_result_outputs(result, request),
+                    )
             yield {
                 "type": "complete",
                 "scope": request.generation_scope,
@@ -663,6 +718,61 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 "message": f"AI generation failed: {str(exc)}",
                 "progress": 100,
             }
+
+    def _run_node_with_test_events(
+        self,
+        node_name: str,
+        state: QuestionGenerationState,
+        parent_run: RunTree | None,
+        *,
+        scope: str,
+        start_progress: int,
+        end_progress: int,
+    ) -> Generator[dict[str, Any], None, QuestionGenerationState]:
+        """Run an execution-capable node while SSE publishes each test result."""
+
+        event_queue: Queue[tuple[str, Any]] = Queue()
+
+        def run_node() -> None:
+            try:
+                with validation_progress_events(
+                    lambda event: event_queue.put(("event", event)),
+                ):
+                    patch = self._run_traced_node(node_name, state, parent_run)
+                event_queue.put(("result", patch))
+            except BaseException as exc:
+                event_queue.put(("error", exc))
+
+        worker = Thread(
+            target=run_node,
+            name=f"question-{node_name}-progress",
+            daemon=True,
+        )
+        worker.start()
+        event_number = 0
+        span = max(end_progress - start_progress, 1)
+
+        while True:
+            event_type, payload = event_queue.get()
+            if event_type == "event":
+                event_number += 1
+                fraction = min(0.92, event_number / (event_number + 4))
+                progress = min(
+                    max(start_progress, end_progress - 1),
+                    round(start_progress + (span * fraction)),
+                )
+                yield {
+                    **cast(dict[str, Any], payload),
+                    "scope": scope,
+                    "current_node": node_name,
+                    "next_node": None,
+                    "progress": progress,
+                }
+                continue
+            worker.join(timeout=0.1)
+            if event_type == "error":
+                raise cast(BaseException, payload)
+            return cast(QuestionGenerationState, payload)
 
     def _build_initial_state(
         self,
@@ -692,6 +802,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 or (current_draft.reference_language if current_draft else "")
                 or "python"
             ),
+            "target_language": (request.target_language or "").strip(),
             "generation_settings": settings,
             "existing_question_titles": [
                 question.title.strip()
@@ -784,10 +895,15 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
     ) -> QuestionGenerationState:
         """Run only the agents needed for one builder section."""
 
-        result = self._merge_state(state, self._orchestrator_node(state))
+        result = self._merge_state(
+            state,
+            self._run_traced_node("orchestrator", state),
+        )
         for node_name in SCOPE_NODE_SEQUENCE.get(scope, []):
-            runner = self._node_runner(node_name)
-            result = self._merge_state(result, runner(result))
+            result = self._merge_state(
+                result,
+                self._run_traced_node(node_name, result),
+            )
 
         result["summary"] = SCOPE_SUMMARIES.get(
             scope,
@@ -806,6 +922,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             "constraints": self._constraint_node,
             "examples": self._example_node,
             "hidden_tests": self._hidden_test_node,
+            "constraint_script": self._constraint_script_node,
             "solution": self._solution_node,
             "validation": self._validation_node,
             "multi_language_solutions": self._multi_language_solution_node,
@@ -874,7 +991,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             case.model_copy(update={"is_sample": False})
             for case in self._complete_test_cases(result.get("hidden_test_cases", []))
         ]
-        if current_draft:
+        if current_draft is not None and "constraint_validation_script" not in result:
             sample_cases = self._merge_unique_test_cases(
                 sample_cases,
                 [
@@ -939,8 +1056,18 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             if request.difficulty
             else DifficultyLevel.MEDIUM.value
         )
-        supported_languages = (
-            result.get("supported_languages") or settings.supported_languages
+        reference_language = self._normalize_solution_language(
+            request.reference_language.strip() or result.get("reference_language", "")
+        )
+        supported_languages = self._normalize_languages(
+            result.get("supported_languages") or settings.supported_languages,
+            reference_language,
+            settings.supported_languages,
+        )
+        reference_solutions = self._prune_reference_solutions(
+            result.get("reference_solutions", {}),
+            supported_languages,
+            reference_language,
         )
         return QuestionCreateRequest(
             title=result.get("title") or request.title_hint or "Untitled Question",
@@ -963,7 +1090,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 for case in result.get("hidden_test_cases", [])
             ],
             reference_solution=result.get("reference_solution", ""),
-            reference_language=request.reference_language.strip() or "python",
+            reference_language=reference_language,
             supported_languages=supported_languages,
             candidate_solve_time_minutes=result.get(
                 "candidate_solve_time_minutes",
@@ -984,7 +1111,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             validation_status=ValidationStatus(
                 result.get("validation_status", ValidationStatus.NOT_RUN.value),
             ),
-            reference_solutions=result.get("reference_solutions", {}),
+            reference_solutions=reference_solutions,
             solution_approach=result.get("solution_approach", ""),
             time_complexity=result.get("time_complexity", ""),
             space_complexity=result.get("space_complexity", ""),
@@ -1001,6 +1128,178 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         merged.update(patch)
         return cast(QuestionGenerationState, merged)
 
+    @staticmethod
+    def _prune_reference_solutions(
+        reference_solutions: dict[str, ReferenceSolutionArtifact],
+        supported_languages: list[str],
+        reference_language: str,
+    ) -> dict[str, ReferenceSolutionArtifact]:
+        allowed_languages = {
+            QuestionGenerationWorkflow._normalize_solution_language(language)
+            for language in supported_languages
+        }
+        allowed_languages.add(
+            QuestionGenerationWorkflow._normalize_solution_language(reference_language),
+        )
+        pruned: dict[str, ReferenceSolutionArtifact] = {}
+        for language, artifact in reference_solutions.items():
+            normalizer = QuestionGenerationWorkflow._normalize_solution_language
+            normalized_language = normalizer(
+                language or artifact.language,
+            )
+            if normalized_language not in allowed_languages:
+                continue
+            pruned[normalized_language] = artifact.model_copy(
+                update={"language": normalized_language},
+            )
+        return pruned
+
+    def _run_traced_node(
+        self,
+        node_name: str,
+        state: QuestionGenerationState,
+        parent_run: RunTree | None = None,
+    ) -> QuestionGenerationState:
+        """Run one node with a compact LangSmith child span."""
+
+        node_label = NODE_LABELS.get(node_name, node_name.replace("_", " ").title())
+        with langsmith_run(
+            self._settings,
+            f"Question Agent Node: {node_label}",
+            inputs=self._langsmith_node_inputs(node_name, state),
+            tags=[
+                *self._langsmith_base_tags(state.get("generation_scope", "unknown")),
+                f"node:{node_name}",
+            ],
+            metadata={
+                "node_name": node_name,
+                "node_label": node_label,
+                "workflow_mode": self._current_workflow_mode,
+            },
+            parent=parent_run,
+        ) as run:
+            patch = self._node_runner(node_name)(state)
+            if run is not None:
+                run.end(outputs=self._langsmith_patch_outputs(patch))
+            return patch
+
+    def _langsmith_run_name(
+        self,
+        request: QuestionAIDraftRequest,
+        *,
+        streamed: bool = False,
+    ) -> str:
+        scope = request.generation_scope.replace("_", " ").title()
+        suffix = " Stream" if streamed else ""
+        return f"CAP Question Generation: {scope}{suffix}"
+
+    def _langsmith_graph_config(
+        self,
+        recruiter_uid: str,
+        request: QuestionAIDraftRequest,
+    ) -> dict[str, Any]:
+        return {
+            "run_name": "CAP Question Generation Graph",
+            "tags": self._langsmith_tags(request),
+            "metadata": self._langsmith_metadata(recruiter_uid, request),
+        }
+
+    def _langsmith_tags(self, request: QuestionAIDraftRequest) -> list[str]:
+        return self._langsmith_base_tags(request.generation_scope)
+
+    def _langsmith_base_tags(self, scope: str) -> list[str]:
+        return [
+            "cap",
+            "question-generation",
+            f"scope:{scope}",
+            f"mode:{self._current_workflow_mode}",
+        ]
+
+    def _langsmith_metadata(
+        self,
+        recruiter_uid: str,
+        request: QuestionAIDraftRequest,
+    ) -> dict[str, Any]:
+        settings = request.generation_settings
+        return {
+            "recruiter_uid": recruiter_uid,
+            "generation_scope": request.generation_scope,
+            "workflow_mode": self._current_workflow_mode,
+            "reference_language": request.reference_language,
+            "target_language": request.target_language or "",
+            "supported_languages": settings.supported_languages,
+            "sample_test_case_count": settings.sample_test_case_count,
+            "hidden_test_case_count": settings.hidden_test_case_count,
+            "model_sequence": self._settings.ai_model_sequence_label,
+        }
+
+    @staticmethod
+    def _langsmith_run_inputs(
+        request: QuestionAIDraftRequest,
+        state: QuestionGenerationState,
+    ) -> dict[str, Any]:
+        settings = request.generation_settings
+        return {
+            "generation_scope": request.generation_scope,
+            "reference_language": state.get("reference_language", ""),
+            "target_language": state.get("target_language", ""),
+            "title_hint": state.get("title_hint", ""),
+            "focus_tags": state.get("focus_tags", []),
+            "prompt_length": len(request.prompt),
+            "has_current_draft": request.current_draft is not None,
+            "requested_question_count": settings.question_count,
+            "requested_sample_tests": settings.sample_test_case_count,
+            "requested_hidden_tests": settings.hidden_test_case_count,
+        }
+
+    @staticmethod
+    def _langsmith_node_inputs(
+        node_name: str,
+        state: QuestionGenerationState,
+    ) -> dict[str, Any]:
+        return {
+            "node_name": node_name,
+            "generation_scope": state.get("generation_scope", ""),
+            "state_keys": sorted(state.keys()),
+            "sample_test_case_count": len(state.get("sample_test_cases", [])),
+            "hidden_test_case_count": len(state.get("hidden_test_cases", [])),
+            "has_problem_statement": bool(state.get("problem_statement", "").strip()),
+            "has_reference_solution": bool(state.get("reference_solution", "").strip()),
+            "reference_solution_languages": sorted(
+                state.get("reference_solutions", {}).keys(),
+            ),
+        }
+
+    @staticmethod
+    def _langsmith_patch_outputs(patch: QuestionGenerationState) -> dict[str, Any]:
+        return {
+            "updated_keys": sorted(patch.keys()),
+            "sample_test_case_count": len(patch.get("sample_test_cases", [])),
+            "hidden_test_case_count": len(patch.get("hidden_test_cases", [])),
+            "has_reference_solution": bool(patch.get("reference_solution", "").strip()),
+            "validation_status": patch.get("validation_status", ""),
+            "reference_solution_languages": sorted(
+                patch.get("reference_solutions", {}).keys(),
+            ),
+        }
+
+    @staticmethod
+    def _langsmith_result_outputs(
+        result: QuestionGenerationState,
+        request: QuestionAIDraftRequest,
+    ) -> dict[str, Any]:
+        return {
+            "generation_scope": request.generation_scope,
+            "title": result.get("title", ""),
+            "summary": result.get("summary", ""),
+            "validation_status": result.get("validation_status", ""),
+            "sample_test_case_count": len(result.get("sample_test_cases", [])),
+            "hidden_test_case_count": len(result.get("hidden_test_cases", [])),
+            "reference_solution_languages": sorted(
+                result.get("reference_solutions", {}).keys(),
+            ),
+        }
+
     def _build_graph(self) -> StateGraph[QuestionGenerationState]:
         graph: StateGraph[QuestionGenerationState] = StateGraph(QuestionGenerationState)
         graph.add_node("orchestrator", self._orchestrator_node)
@@ -1009,6 +1308,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         graph.add_node("constraints", self._constraint_node)
         graph.add_node("examples", self._example_node)
         graph.add_node("hidden_tests", self._hidden_test_node)
+        graph.add_node("constraint_script", self._constraint_script_node)
         graph.add_node("solution", self._solution_node)
         graph.add_node("validation", self._validation_node)
         graph.add_node("multi_language_solutions", self._multi_language_solution_node)
@@ -1020,7 +1320,8 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         graph.add_edge("problem_statement", "constraints")
         graph.add_edge("constraints", "examples")
         graph.add_edge("examples", "hidden_tests")
-        graph.add_edge("hidden_tests", "solution")
+        graph.add_edge("hidden_tests", "constraint_script")
+        graph.add_edge("constraint_script", "solution")
         graph.add_edge("solution", "validation")
         graph.add_edge("validation", "multi_language_solutions")
         graph.add_edge("multi_language_solutions", "metadata")

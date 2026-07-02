@@ -56,8 +56,10 @@ def build_problem_statement_prompt(
                 "and edge behavior."
             ),
             (
-                "Keep input_format and output_format syntactic; put meaning in "
-                "their explanations."
+                "Put the complete candidate-facing input/output descriptions "
+                "directly in input_format and output_format. Leave "
+                "input_explanation and output_explanation empty unless the "
+                "recruiter explicitly typed separate explanation text."
             ),
             (
                 "Use concise machine-checkable constraints and normalized "

@@ -3,7 +3,6 @@ import {
   FileQuestion,
   Gauge,
   LogOut,
-  BarChart3,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -16,7 +15,6 @@ const ICONS: Record<(typeof NAVIGATION_ITEMS)[number]["icon"], LucideIcon> = {
   assessments: ClipboardList,
   dashboard: Gauge,
   questions: FileQuestion,
-  results: BarChart3,
   settings: Settings,
 };
 

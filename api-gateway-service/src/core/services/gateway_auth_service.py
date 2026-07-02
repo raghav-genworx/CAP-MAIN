@@ -25,6 +25,11 @@ PUBLIC_CORE_ROUTES = {
     ("POST", "candidate/verify-invite"),
 }
 
+ONBOARDING_CORE_ROUTES = {
+    ("GET", "auth/me"),
+    ("POST", "auth/start-free-trial"),
+}
+
 
 class GatewayAuthService:
     """Authorize browser traffic before it reaches an upstream service."""
@@ -63,9 +68,21 @@ class GatewayAuthService:
             self._verify_candidate_session(token)
             return
 
-        await self._authorize_recruiter(authorization)
+        require_subscription = not (
+            service_name == "core"
+            and (normalized_method, normalized_path) in ONBOARDING_CORE_ROUTES
+        )
+        await self._authorize_recruiter(
+            authorization,
+            require_subscription=require_subscription,
+        )
 
-    async def _authorize_recruiter(self, authorization: str | None) -> None:
+    async def _authorize_recruiter(
+        self,
+        authorization: str | None,
+        *,
+        require_subscription: bool,
+    ) -> None:
         """Ask the core auth authority to verify Firebase identity and role."""
 
         self._bearer_token(authorization)
@@ -98,6 +115,10 @@ class GatewayAuthService:
             raise UpstreamServiceUnavailableError("core-auth") from exc
         if not isinstance(payload, dict) or payload.get("role") != "recruiter":
             raise GatewayAuthorizationError("Recruiter role is required")
+        if require_subscription and payload.get("subscription_status") != "free_trial":
+            raise GatewayAuthorizationError(
+                "Start your free trial to access recruiter tools"
+            )
 
     def _verify_candidate_session(self, token: str) -> None:
         """Verify the signature, algorithm, claims, and expiry of a candidate JWT."""

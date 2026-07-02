@@ -53,12 +53,20 @@ def build_constraint_prompt(state: QuestionGenerationState) -> tuple[str, str]:
                 "then the problem statement."
             ),
             (
-                "Describe exact token/line structure in input_format and exact "
-                "printed value(s) in output_format."
+                "Put the complete candidate-facing Input Format text in "
+                "input_format only, using concise bullet-style lines when there "
+                "are multiple lines."
             ),
             (
-                "Explain every field and use machine-checkable inclusive bounds "
-                "such as 1 <= n <= 100000."
+                "Put the complete candidate-facing Output Format text in "
+                "output_format only. Leave input_explanation and "
+                "output_explanation empty because the format text is already "
+                "the description."
+            ),
+            (
+                "Use constraints as concise bullet-style bounds only, for "
+                "example 1 <= T <= 5000. Explain every symbol in input_format, "
+                "not in a separate explanation field."
             ),
             (
                 "Keep candidate solve time in 1..180 minutes, execution time in "

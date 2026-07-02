@@ -65,6 +65,10 @@ def build_multi_language_solution_prompt(
                 "Preserve the validated algorithm and exact STDOUT behavior "
                 "across languages."
             ),
+            (
+                "Each translated solution must remain optimized for the declared "
+                "complexity and must not downgrade to a brute-force approach."
+            ),
             "Keep complexity fields consistent with the translated implementation.",
         ),
     )
@@ -75,57 +79,51 @@ def build_focused_language_solution_prompt(
     state: QuestionGenerationState,
     *,
     target_language: str,
-    primary_language: str,
     sample_cases: list[dict[str, Any]],
     hidden_cases: list[dict[str, Any]],
     strict_contract_guidance: str,
     language_contract_guidance: str,
 ) -> tuple[str, str]:
     system_prompt = build_task_system_prompt(
-        role="single-language reference-solution translator",
+        role=f"expert {target_language} competitive-programming engineer",
         objective=(
-            "Translate validated solution logic into one correct, efficient, "
-            "complete program in the target language."
+            f"Write one correct, efficient, complete {target_language} program "
+            "that solves the supplied problem contract."
         ),
         rules=(
-            "Preserve behavior, integer semantics, and exact output formatting.",
+            f"Generate {target_language} source code only.",
+            "Preserve integer semantics and exact output formatting.",
+            ("Use idiomatic input parsing that handles the full input contract."),
             (
-                "Use idiomatic target-language input parsing that handles the "
-                "full input contract."
+                "Derive the solution directly from the problem, constraints, "
+                "samples, and hidden validation cases."
             ),
-            "Do not change the algorithm unless required for equivalent correctness.",
+            "Keep the optimized intended algorithm; do not use brute force.",
         ),
     )
     user_prompt = build_task_user_prompt(
-        task="Translate the validated primary solution into the target language.",
+        task=f"Generate the complete runnable solution in {target_language} only.",
         context={
-            "problem_contract": {
-                "title": state.get("title", ""),
-                "problem_statement": state.get("problem_statement", ""),
-                "input_format": state.get("input_format", ""),
-                "output_format": state.get("output_format", ""),
-                "constraints": state.get("constraints", ""),
-            },
-            "testcases": {"sample": sample_cases, "hidden": hidden_cases},
-            "validated_primary": {
-                "language": primary_language,
-                "source_code": state.get("reference_solution", ""),
-            },
             "target_language": target_language,
+            "title": state.get("title", ""),
+            "problem_statement": state.get("problem_statement", ""),
+            "constraints": state.get("constraints", ""),
+            "input_format": state.get("input_format", ""),
+            "output_format": state.get("output_format", ""),
+            "sample_test_cases": sample_cases,
+            "hidden_test_cases": hidden_cases,
+            "recruiter_instruction": state.get("prompt", ""),
         },
         requirements=(
             strict_contract_guidance,
             language_contract_guidance,
-            "Set reference_solution to target-language source code only.",
+            "Set source_code to the complete target-language program only.",
             (
-                "Set supported_languages to only target_language and "
-                "reference_solutions to an empty object."
+                "The program must satisfy every sample and the full constrained "
+                "input domain, including edge cases."
             ),
-            (
-                "Preserve exact accepted behavior for all supplied tests and the "
-                "full constrained domain."
-            ),
-            "Keep solution_approach and complexity fields consistent with the source.",
+            "Do not return any fields other than source_code.",
+            f"Do not generate any language other than {target_language}.",
         ),
     )
     return system_prompt, user_prompt

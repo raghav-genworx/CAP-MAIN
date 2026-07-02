@@ -1,4 +1,4 @@
-"""Brevo transactional-email boundary contract tests."""
+"""Assessment invite email delivery boundary contract tests."""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -8,7 +8,7 @@ import pytest
 
 from config.settings import Settings
 from core.exceptions.assessment import EmailDeliveryError
-from core.services.brevo_email_service import BrevoEmailService
+from core.services.invite_mail_service import InviteMailService
 
 
 def _settings(**overrides: object) -> Settings:
@@ -22,7 +22,7 @@ def _settings(**overrides: object) -> Settings:
     return Settings(**values)
 
 
-def _send(service: BrevoEmailService) -> None:
+def _send(service: InviteMailService) -> None:
     start_at = datetime(2026, 6, 27, 9, 0, tzinfo=UTC)
     service.send_assessment_invite(
         to_email="candidate@example.com",
@@ -44,7 +44,7 @@ def test_invite_request_authenticates_and_escapes_html() -> None:
         requests.append(request)
         return httpx.Response(201, json={"messageId": "message-1"})
 
-    service = BrevoEmailService(
+    service = InviteMailService(
         _settings(),
         transport=httpx.MockTransport(handler),
     )
@@ -71,6 +71,10 @@ def test_invite_request_authenticates_and_escapes_html() -> None:
     assert "Asha &lt;img src=x onerror=alert(1)&gt;" in html
     assert "June &amp; July" in html
     assert "token&#x27; onclick=&#x27;alert(1)" in html
+    assert ">Go to Assessment</a>" in html
+    assert "27 Jun 2026, 02:30 PM IST" in html
+    assert "27 Jun 2026, 03:30 PM IST" in html
+    assert " UTC" not in html
 
 
 def test_provider_response_body_is_not_exposed_or_logged(
@@ -83,7 +87,7 @@ def test_provider_response_body_is_not_exposed_or_logged(
             headers={"x-request-id": "brevo-request-42"},
         )
     )
-    service = BrevoEmailService(_settings(), transport=transport)
+    service = InviteMailService(_settings(), transport=transport)
 
     with pytest.raises(EmailDeliveryError, match=r"status 400\.$") as raised:
         _send(service)
@@ -101,7 +105,7 @@ def test_missing_api_key_fails_before_network_call() -> None:
         called = True
         return httpx.Response(201)
 
-    service = BrevoEmailService(
+    service = InviteMailService(
         _settings(brevo_api_key=""),
         transport=httpx.MockTransport(handler),
     )

@@ -68,3 +68,23 @@ def test_schedule_rejects_unknown_zone_naive_instants_and_reversed_window() -> N
             end_at=start_at,
             timezone_name="Etc/UTC",
         )
+
+
+def test_schedule_rejects_past_start_and_window_shorter_than_test() -> None:
+    future_start = datetime.now(UTC) + timedelta(hours=2)
+    with pytest.raises(AssessmentValidationError, match="cannot be in the past"):
+        normalize_assessment_schedule(
+            start_at=datetime.now(UTC) - timedelta(minutes=1),
+            end_at=datetime.now(UTC) + timedelta(hours=1),
+            timezone_name="Etc/UTC",
+            duration_minutes=60,
+            reject_past_start=True,
+        )
+    with pytest.raises(AssessmentValidationError, match="at least 60 minutes"):
+        normalize_assessment_schedule(
+            start_at=future_start,
+            end_at=future_start + timedelta(minutes=59),
+            timezone_name="Etc/UTC",
+            duration_minutes=60,
+            reject_past_start=True,
+        )

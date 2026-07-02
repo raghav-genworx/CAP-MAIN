@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from data.models.postgres import Base
+from data.models.postgres.base import EVALUATION_SCHEMA
 
 
 def create_database_engine(database_url: str) -> Engine:
@@ -18,7 +19,10 @@ def create_database_engine(database_url: str) -> Engine:
     }
     if database_url.startswith("sqlite"):
         options["poolclass"] = NullPool
-    return create_engine(database_url, **options)
+    engine = create_engine(database_url, **options)
+    if database_url.startswith("sqlite"):
+        return engine.execution_options(schema_translate_map={EVALUATION_SCHEMA: None})
+    return engine
 
 
 def create_session_factory(database_url: str) -> sessionmaker[Session]:

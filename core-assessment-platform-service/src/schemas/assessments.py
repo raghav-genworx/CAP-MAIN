@@ -68,7 +68,6 @@ class AssessmentQuestionInput(BaseModel):
     question_id: str = Field(min_length=1)
     question_order: int = Field(ge=1)
     marks: int = Field(ge=1, le=1_000)
-    time_limit_minutes: int | None = Field(default=None, ge=1, le=360)
     is_mandatory: bool = True
 
 
@@ -85,12 +84,13 @@ class AssessmentCreateRequest(BaseModel):
     ai_score_weight: float = Field(default=20.0, ge=0.0, le=100.0)
     allow_resume: bool = True
     shuffle_questions: bool = False
-    question_count_per_candidate: int = Field(default=0, ge=0, le=200)
+    question_count_per_candidate: int = Field(default=0, ge=0, le=100)
+    difficulty_blueprint: list[DifficultyLevel] = Field(default_factory=list)
     show_score_to_candidate: bool = False
     proctoring_mode: str = Field(default="basic", min_length=3, max_length=30)
     hidden_feedback_mode: HiddenFeedbackMode = HiddenFeedbackMode.NONE
     max_hidden_checks: int = Field(default=0, ge=0, le=20)
-    hidden_check_cooldown_seconds: int = Field(default=30, ge=0, le=86_400)
+    hidden_check_cooldown_seconds: int = Field(default=5, ge=0, le=86_400)
     supported_languages: list[str] = Field(
         default_factory=lambda: ["python", "java", "cpp", "c"],
     )
@@ -110,7 +110,8 @@ class AssessmentUpdateRequest(BaseModel):
     ai_score_weight: float | None = Field(default=None, ge=0.0, le=100.0)
     allow_resume: bool | None = None
     shuffle_questions: bool | None = None
-    question_count_per_candidate: int | None = Field(default=None, ge=0, le=200)
+    question_count_per_candidate: int | None = Field(default=None, ge=0, le=100)
+    difficulty_blueprint: list[DifficultyLevel] | None = None
     show_score_to_candidate: bool | None = None
     proctoring_mode: str | None = Field(default=None, min_length=3, max_length=30)
     hidden_feedback_mode: HiddenFeedbackMode | None = None
@@ -129,7 +130,6 @@ class AssessmentQuestionRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     question_order: int
     marks: int
-    time_limit_minutes: int | None = None
     is_mandatory: bool
     supported_languages: list[str] = Field(default_factory=list)
 
@@ -141,6 +141,7 @@ class AssessmentSlotSummaryRecord(BaseModel):
     title: str
     start_at: datetime
     end_at: datetime
+    duration_minutes: int = 60
     timezone_name: str = "Asia/Kolkata"
     timezone_offset_minutes: int = 330
     status: SlotStatus
@@ -169,6 +170,7 @@ class AssessmentRecord(BaseModel):
     allow_resume: bool
     shuffle_questions: bool
     question_count_per_candidate: int
+    difficulty_blueprint: list[DifficultyLevel] = Field(default_factory=list)
     show_score_to_candidate: bool
     proctoring_mode: str
     hidden_feedback_mode: HiddenFeedbackMode
@@ -205,6 +207,7 @@ class AssessmentSlotCreateRequest(BaseModel):
     title: str = Field(min_length=3, max_length=180)
     start_at: datetime
     end_at: datetime
+    duration_minutes: int = Field(default=60, ge=15, le=360)
     timezone_name: str = Field(default="Asia/Kolkata", max_length=80)
     timezone_offset_minutes: int = Field(default=330, ge=-720, le=840)
     instructions_override: str = ""
@@ -217,6 +220,7 @@ class AssessmentSlotUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=3, max_length=180)
     start_at: datetime | None = None
     end_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=15, le=360)
     timezone_name: str | None = Field(default=None, max_length=80)
     timezone_offset_minutes: int | None = Field(default=None, ge=-720, le=840)
     instructions_override: str | None = None
@@ -242,6 +246,7 @@ class AssessmentSlotRecord(BaseModel):
     instructions_override: str
     start_at: datetime
     end_at: datetime
+    duration_minutes: int = 60
     timezone_name: str = "Asia/Kolkata"
     timezone_offset_minutes: int = 330
     status: SlotStatus
@@ -415,6 +420,16 @@ class SampleRunResponse(BaseModel):
     results: list[ExecutionCaseResult] = Field(default_factory=list)
 
 
+class HiddenExecutionCaseResult(BaseModel):
+    """Candidate-safe hidden case evidence without test data or output."""
+
+    index: int
+    status: str
+    passed: bool
+    execution_time: str = ""
+    error_type: str = ""
+
+
 class HiddenCheckResponse(BaseModel):
     """Safe summary of a hidden test check."""
 
@@ -423,6 +438,7 @@ class HiddenCheckResponse(BaseModel):
     total_count: int
     remaining_attempts: int | None
     cooldown_remaining_seconds: int
+    results: list[HiddenExecutionCaseResult] = Field(default_factory=list)
 
 
 class SubmissionExecutionSummary(BaseModel):

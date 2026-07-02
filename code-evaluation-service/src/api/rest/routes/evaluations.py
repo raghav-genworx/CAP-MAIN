@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import (
     evaluation_service_dependency,
@@ -46,7 +47,11 @@ async def create_evaluation_job(
 ) -> EvaluationJobResponse:
     """Create and process an evaluation job."""
 
-    return service.create_job(request, process_inline=process_inline)
+    return await run_in_threadpool(
+        service.create_job,
+        request,
+        process_inline=process_inline,
+    )
 
 
 @router.get(
@@ -64,7 +69,7 @@ async def get_evaluation_job(
 ) -> EvaluationJobResponse:
     """Return a single evaluation job."""
 
-    return service.get_job(job_id)
+    return await run_in_threadpool(service.get_job, job_id)
 
 
 @router.post(
@@ -82,7 +87,7 @@ async def retry_evaluation_job(
 ) -> RetryEvaluationResponse:
     """Retry a failed evaluation job."""
 
-    return service.retry_job(job_id)
+    return await run_in_threadpool(service.retry_job, job_id)
 
 
 @router.post(
@@ -100,7 +105,7 @@ async def process_evaluation_job(
 ) -> EvaluationJobResponse:
     """Process one evaluation job."""
 
-    return service.process_job(job_id)
+    return await run_in_threadpool(service.process_job, job_id)
 
 
 @router.post(
@@ -118,7 +123,7 @@ async def process_pending_evaluation_jobs(
 ) -> EvaluationWorkerRunResponse:
     """Process pending jobs for a worker or operational backfill."""
 
-    return service.process_pending_jobs(limit=limit)
+    return await run_in_threadpool(service.process_pending_jobs, limit=limit)
 
 
 @router.get(
@@ -136,7 +141,7 @@ async def get_assessment_evaluation_dashboard(
 ) -> AssessmentEvaluationDashboard:
     """Return the recruiter evaluation dashboard for an assessment."""
 
-    return service.get_assessment_dashboard(assessment_id)
+    return await run_in_threadpool(service.get_assessment_dashboard, assessment_id)
 
 
 @router.get(
@@ -154,7 +159,7 @@ async def get_assessment_leaderboard(
 ) -> list[CandidateEvaluationSummary]:
     """Return ranked candidate evaluations."""
 
-    return service.get_leaderboard(assessment_id)
+    return await run_in_threadpool(service.get_leaderboard, assessment_id)
 
 
 @router.get(
@@ -172,7 +177,7 @@ async def get_assessment_report(
 ) -> AssessmentReportResponse:
     """Return an assessment report payload."""
 
-    return service.get_assessment_report(assessment_id)
+    return await run_in_threadpool(service.get_assessment_report, assessment_id)
 
 
 @router.get(
@@ -190,7 +195,10 @@ async def download_assessment_report(
 ) -> FileResponse:
     """Download an assessment PDF report."""
 
-    report = service.generate_assessment_report_pdf(assessment_id)
+    report = await run_in_threadpool(
+        service.generate_assessment_report_pdf,
+        assessment_id,
+    )
     return FileResponse(
         path=report.path,
         filename=report.filename,
@@ -214,7 +222,11 @@ async def get_candidate_report(
 ) -> CandidateReportResponse:
     """Return one candidate report payload."""
 
-    return service.get_candidate_report(assessment_id, candidate_assessment_id)
+    return await run_in_threadpool(
+        service.get_candidate_report,
+        assessment_id,
+        candidate_assessment_id,
+    )
 
 
 @router.get(
@@ -233,7 +245,8 @@ async def download_candidate_report(
 ) -> FileResponse:
     """Download a candidate scorecard PDF."""
 
-    report = service.generate_candidate_report_pdf(
+    report = await run_in_threadpool(
+        service.generate_candidate_report_pdf,
         assessment_id,
         candidate_assessment_id,
     )
@@ -262,7 +275,11 @@ async def download_test_report(
     """Download a scheduled test-batch evaluation report."""
 
     normalized_request = request.model_copy(update={"test_id": test_id})
-    report = service.generate_test_report_pdf(assessment_id, normalized_request)
+    report = await run_in_threadpool(
+        service.generate_test_report_pdf,
+        assessment_id,
+        normalized_request,
+    )
     return FileResponse(
         path=report.path,
         filename=report.filename,

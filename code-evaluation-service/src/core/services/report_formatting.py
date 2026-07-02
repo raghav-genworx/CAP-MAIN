@@ -7,6 +7,8 @@ from typing import TypedDict
 from schemas.evaluation import (
     AssessmentEvaluationOverview,
     CandidateEvaluationSummary,
+    EvaluationScores,
+    ScoringWeights,
 )
 
 
@@ -17,6 +19,23 @@ class QuestionAnalyticsRow(TypedDict):
     candidates: int
     average_score: float
     pass_rate: float
+
+
+class Recommendation(TypedDict):
+    """Recruiter-facing recommendation label and explanation."""
+
+    label: str
+    explanation: str
+    color: str
+
+
+class ScoreBreakdownRow(TypedDict):
+    """Display row for transparent score composition."""
+
+    component: str
+    weight: float
+    raw_score: float
+    weighted_score: float
 
 
 def numbered_code(source_code: str, *, line_width: int = 94) -> str:
@@ -34,6 +53,119 @@ def numbered_code(source_code: str, *, line_width: int = 94) -> str:
         output.append(f"{line_number:>4}  {chunks[0]}")
         output.extend(f"      {chunk}" for chunk in chunks[1:])
     return "\n".join(output)
+
+
+def safe_text(value: object, fallback: str = "Not available") -> str:
+    """Return a clean report label for optional values."""
+
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return text or fallback
+
+
+def hidden_case_label(index: int) -> str:
+    """Format hidden cases without exposing internal identifiers."""
+
+    return f"Case {max(index, 1)}"
+
+
+def score_breakdown_rows(
+    scores: EvaluationScores,
+    weights: ScoringWeights,
+) -> list[ScoreBreakdownRow]:
+    """Format existing score math as raw and weighted display rows."""
+
+    components = [
+        ("Hidden test correctness", weights.test_case_weight, scores.test_case_score),
+        ("Coding/runtime metrics", weights.coding_weight, scores.coding_score),
+        ("AI code quality", weights.ai_weight, scores.ai_score),
+    ]
+    return [
+        {
+            "component": label,
+            "weight": weight,
+            "raw_score": raw_score,
+            "weighted_score": raw_score * weight / 100,
+        }
+        for label, weight, raw_score in components
+    ]
+
+
+def recruiter_recommendation(
+    candidate: CandidateEvaluationSummary,
+) -> Recommendation:
+    """Derive a decision-ready recommendation from stored score signals."""
+
+    final_score = candidate.scores.final_score
+    hidden_rate = (
+        candidate.hidden_passed / candidate.hidden_total * 100
+        if candidate.hidden_total
+        else 0
+    )
+    ai_score = candidate.scores.ai_score
+    integrity = candidate.integrity
+    suspicious_count = (
+        len(integrity.suspicious_activity)
+        if integrity is not None and integrity.suspicious_activity
+        else 0
+    )
+    similarity = (
+        integrity.plagiarism_similarity_score
+        if integrity is not None
+        else None
+    )
+    if not candidate.hidden_total or suspicious_count or (
+        similarity is not None and similarity >= 70
+    ):
+        return {
+            "label": "Manual Review Required",
+            "color": "amber",
+            "explanation": (
+                "The automated score needs recruiter validation before a hiring "
+                "decision. This is due to missing hidden-test evidence or integrity "
+                "signals that should be reviewed manually."
+            ),
+        }
+    if final_score >= 85 and hidden_rate >= 85 and ai_score >= 75:
+        return {
+            "label": "Strong Hire",
+            "color": "green",
+            "explanation": (
+                "The candidate demonstrates strong correctness, stable execution, "
+                "and healthy code-quality signals. The score is reliable because "
+                "hidden tests and AI review are both strongly aligned."
+            ),
+        }
+    if final_score >= 70 and hidden_rate >= 70 and ai_score >= 60:
+        return {
+            "label": "Hire",
+            "color": "green",
+            "explanation": (
+                "The candidate solved most of the assessed requirements and shows "
+                "acceptable implementation quality. Minor review may still be useful "
+                "for edge cases or maintainability."
+            ),
+        }
+    if final_score < 40 or hidden_rate < 40:
+        return {
+            "label": "Reject",
+            "color": "red",
+            "explanation": (
+                "The submission did not meet the expected correctness threshold. "
+                "Hidden test failures indicate the solution is not reliable enough "
+                "to move forward without a materially stronger follow-up."
+            ),
+        }
+    return {
+        "label": "Further Review",
+        "color": "amber",
+        "explanation": (
+            "The candidate has partial evidence of fit, but the score profile is "
+            "mixed. Review the question evidence and code-quality notes before "
+            "deciding whether to continue."
+        ),
+    }
 
 
 def question_analytics(

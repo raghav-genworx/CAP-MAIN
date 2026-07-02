@@ -1,9 +1,68 @@
+import { cpSync, createReadStream, existsSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+
+const workspaceRoot = fileURLToPath(new URL(".", import.meta.url));
+const monacoSourceDir = path.join(
+  workspaceRoot,
+  "node_modules",
+  "monaco-editor",
+  "min",
+  "vs",
+);
+
+function contentTypeFor(filePath: string) {
+  if (filePath.endsWith(".js")) {
+    return "application/javascript";
+  }
+  if (filePath.endsWith(".css")) {
+    return "text/css";
+  }
+  if (filePath.endsWith(".json")) {
+    return "application/json";
+  }
+  if (filePath.endsWith(".ttf")) {
+    return "font/ttf";
+  }
+  return "application/octet-stream";
+}
+
+function localMonacoAssets(): Plugin {
+  return {
+    name: "local-monaco-assets",
+    configureServer(server) {
+      server.middlewares.use("/monaco/vs", (request, response, next) => {
+        const requestPath = decodeURIComponent(
+          request.url?.split("?")[0] ?? "",
+        );
+        const filePath = path.normalize(path.join(monacoSourceDir, requestPath));
+        if (
+          !filePath.startsWith(monacoSourceDir) ||
+          !existsSync(filePath) ||
+          !statSync(filePath).isFile()
+        ) {
+          next();
+          return;
+        }
+
+        response.setHeader("Content-Type", contentTypeFor(filePath));
+        createReadStream(filePath).pipe(response);
+      });
+    },
+    closeBundle() {
+      cpSync(monacoSourceDir, path.join(workspaceRoot, "dist", "monaco", "vs"), {
+        recursive: true,
+      });
+    },
+  };
+}
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), localMonacoAssets()],
   build: {
     rollupOptions: {
       output: {

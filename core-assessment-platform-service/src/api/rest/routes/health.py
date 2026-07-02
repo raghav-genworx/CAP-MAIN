@@ -4,6 +4,7 @@ from importlib import metadata
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
+from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import settings_dependency
 from config.settings import Settings
@@ -34,7 +35,7 @@ async def health(
 ) -> HealthResponse:
     """Return health status for this service."""
 
-    ready = database_is_ready(settings)
+    ready = await run_in_threadpool(database_is_ready, settings)
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return HealthResponse(

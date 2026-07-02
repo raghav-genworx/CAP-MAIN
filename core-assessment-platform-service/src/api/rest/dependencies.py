@@ -17,7 +17,7 @@ from core.services.role_service import RoleService
 from data.database import session_dependency
 from schemas.auth import AuthenticatedUser
 from schemas.candidate_portal import CandidateSessionClaims
-from schemas.roles import UserRole
+from schemas.roles import SubscriptionStatus, UserRole
 
 security = HTTPBearer(auto_error=False)
 
@@ -102,6 +102,11 @@ def require_role(
     ) -> AuthenticatedUser:
         if current_user.role != required_role:
             raise AuthorizationError("Insufficient platform role")
+        if (
+            required_role == UserRole.RECRUITER
+            and current_user.subscription_status != SubscriptionStatus.FREE_TRIAL
+        ):
+            raise AuthorizationError("Start your free trial to access recruiter tools")
 
         return current_user
 

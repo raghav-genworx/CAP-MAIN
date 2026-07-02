@@ -19,6 +19,7 @@ from core.exceptions.assessment import (
     AssessmentValidationError,
     CandidateInviteError,
     EvaluationAdapterError,
+    EvaluationResourceNotFoundError,
     ExecutionAdapterError,
 )
 from core.services.assessment_lifecycle import (
@@ -29,7 +30,6 @@ from core.services.assessment_lifecycle import (
     submitted_assignment_count,
 )
 from core.services.assessment_schedule import normalize_assessment_schedule
-from core.services.brevo_email_service import BrevoEmailService
 from core.services.candidate_csv_import import parse_candidate_csv
 from core.services.candidate_session_service import CandidateSessionService
 from core.services.evaluation_adapter_service import (
@@ -38,6 +38,7 @@ from core.services.evaluation_adapter_service import (
 )
 from core.services.evaluation_payload_builder import build_evaluation_payload
 from core.services.execution_adapter_service import ExecutionAdapterService
+from core.services.invite_mail_service import InviteMailService
 from data.models.postgres.assessment_question import AssessmentQuestionModel
 from data.models.postgres.assessment_slot import AssessmentSlotModel
 from data.models.postgres.assessment_template import AssessmentTemplateModel
@@ -67,6 +68,7 @@ from schemas.assessments import (
     EvaluationBackfillResponse,
     ExecutionCaseResult,
     HiddenCheckResponse,
+    HiddenExecutionCaseResult,
     HiddenFeedbackMode,
     InviteDispatchResponse,
     InviteEmailStatus,
@@ -94,11 +96,16 @@ from schemas.candidate_portal import (
 )
 from schemas.evaluation_reports import (
     AssessmentEvaluationDashboard,
+    AssessmentEvaluationOverview,
     AssessmentReportResponse,
+    CandidateEvaluationSummary,
     CandidateReportResponse,
+    EvaluationJobResponse,
     RetryEvaluationResponse,
 )
 from schemas.question_bank import DifficultyLevel, QuestionStatus, TestCase
+
+HIDDEN_CHECK_COOLDOWN_SECONDS = 5
 
 
 @dataclass
@@ -114,6 +121,16 @@ class CandidateAssessmentContext:
     submissions: dict[str, SubmissionModel]
 
 
+@dataclass(frozen=True)
+class DeliveredQuestionMapping:
+    """Candidate-specific view of a pool mapping with template-slot marks."""
+
+    question_id: str
+    question_order: int
+    marks: int
+    is_mandatory: bool
+
+
 class AssessmentService:
     """Manage recruiter assessments and candidate test sessions."""
 
@@ -123,7 +140,7 @@ class AssessmentService:
         self._candidate_session_service = CandidateSessionService(self._settings)
         self._execution_adapter = ExecutionAdapterService(self._settings)
         self._evaluation_adapter = EvaluationAdapterService(self._settings)
-        self._email_service = BrevoEmailService(self._settings)
+        self._invite_mail_service = InviteMailService(self._settings)
 
     def list_assessments(self, recruiter_uid: str) -> AssessmentListResponse:
         """Return recruiter-owned assessment templates."""
@@ -162,11 +179,12 @@ class AssessmentService:
             allow_resume=payload.allow_resume,
             shuffle_questions=payload.shuffle_questions,
             question_count_per_candidate=payload.question_count_per_candidate,
+            difficulty_blueprint=[item.value for item in payload.difficulty_blueprint],
             show_score_to_candidate=payload.show_score_to_candidate,
             proctoring_mode=payload.proctoring_mode.strip().lower(),
             hidden_feedback_mode=payload.hidden_feedback_mode.value,
-            max_hidden_checks=payload.max_hidden_checks,
-            hidden_check_cooldown_seconds=payload.hidden_check_cooldown_seconds,
+            max_hidden_checks=0,
+            hidden_check_cooldown_seconds=HIDDEN_CHECK_COOLDOWN_SECONDS,
             supported_languages=self._normalize_languages(payload.supported_languages),
             status=(
                 AssessmentStatus.ARCHIVED.value
@@ -220,16 +238,18 @@ class AssessmentService:
             model.shuffle_questions = payload.shuffle_questions
         if payload.question_count_per_candidate is not None:
             model.question_count_per_candidate = payload.question_count_per_candidate
+        if payload.difficulty_blueprint is not None:
+            model.difficulty_blueprint = [
+                item.value for item in payload.difficulty_blueprint
+            ]
         if payload.show_score_to_candidate is not None:
             model.show_score_to_candidate = payload.show_score_to_candidate
         if payload.proctoring_mode is not None:
             model.proctoring_mode = payload.proctoring_mode.strip().lower()
         if payload.hidden_feedback_mode is not None:
             model.hidden_feedback_mode = payload.hidden_feedback_mode.value
-        if payload.max_hidden_checks is not None:
-            model.max_hidden_checks = payload.max_hidden_checks
-        if payload.hidden_check_cooldown_seconds is not None:
-            model.hidden_check_cooldown_seconds = payload.hidden_check_cooldown_seconds
+        model.max_hidden_checks = 0
+        model.hidden_check_cooldown_seconds = HIDDEN_CHECK_COOLDOWN_SECONDS
         if payload.supported_languages is not None:
             model.supported_languages = self._normalize_languages(
                 payload.supported_languages
@@ -256,6 +276,22 @@ class AssessmentService:
             ) from exc
         return self._assessment_record_from_model(model, recruiter_uid)
 
+    def delete_assessment(self, recruiter_uid: str, assessment_id: str) -> None:
+        """Permanently delete a recruiter-owned assessment template."""
+
+        model = self._get_assessment(recruiter_uid, assessment_id)
+        if model is None:
+            raise AssessmentNotFoundError()
+
+        try:
+            self._repository.delete(model)
+            self._repository.commit()
+        except SQLAlchemyError as exc:
+            self._repository.rollback()
+            raise AssessmentStoreUnavailableError(
+                "Unable to delete assessment"
+            ) from exc
+
     def set_assessment_questions(
         self,
         recruiter_uid: str,
@@ -269,7 +305,7 @@ class AssessmentService:
             raise AssessmentNotFoundError()
 
         normalized = self._validate_assessment_questions(
-            recruiter_uid, payload.questions
+            recruiter_uid, assessment, payload.questions
         )
 
         try:
@@ -281,7 +317,6 @@ class AssessmentService:
                         question_id=normalized_item["question_id"],
                         question_order=normalized_item["question_order"],
                         marks=normalized_item["marks"],
-                        time_limit_minutes=normalized_item["time_limit_minutes"],
                         is_mandatory=normalized_item["is_mandatory"],
                     )
                     for normalized_item in normalized
@@ -312,6 +347,8 @@ class AssessmentService:
             start_at=payload.start_at,
             end_at=payload.end_at,
             timezone_name=payload.timezone_name,
+            duration_minutes=payload.duration_minutes,
+            reject_past_start=True,
         )
 
         model = AssessmentSlotModel(
@@ -321,6 +358,7 @@ class AssessmentService:
             instructions_override=payload.instructions_override.strip(),
             start_at=schedule.start_at,
             end_at=schedule.end_at,
+            duration_minutes=payload.duration_minutes,
             timezone_name=schedule.timezone_name,
             timezone_offset_minutes=schedule.timezone_offset_minutes,
             status=payload.status.value,
@@ -356,12 +394,20 @@ class AssessmentService:
                 if payload.timezone_name is not None
                 else slot.timezone_name
             ),
+            duration_minutes=(
+                payload.duration_minutes
+                if payload.duration_minutes is not None
+                else slot.duration_minutes
+            ),
+            reject_past_start=True,
         )
 
         if payload.title is not None:
             slot.title = payload.title.strip()
         slot.start_at = schedule.start_at
         slot.end_at = schedule.end_at
+        if payload.duration_minutes is not None:
+            slot.duration_minutes = payload.duration_minutes
         slot.timezone_name = schedule.timezone_name
         slot.timezone_offset_minutes = schedule.timezone_offset_minutes
         if payload.instructions_override is not None:
@@ -641,8 +687,11 @@ class AssessmentService:
     ) -> AssessmentEvaluationDashboard:
         """Return evaluation analytics after verifying recruiter ownership."""
 
-        self._require_owned_assessment(recruiter_uid, assessment_id)
-        return self._evaluation_adapter.get_dashboard(assessment_id)
+        assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
+        try:
+            return self._evaluation_adapter.get_dashboard(assessment_id)
+        except EvaluationResourceNotFoundError:
+            return self._stored_evaluation_dashboard(recruiter_uid, assessment)
 
     def get_evaluation_report(
         self,
@@ -651,8 +700,17 @@ class AssessmentService:
     ) -> AssessmentReportResponse:
         """Return assessment report data after verifying ownership."""
 
-        self._require_owned_assessment(recruiter_uid, assessment_id)
-        return self._evaluation_adapter.get_assessment_report(assessment_id)
+        assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
+        try:
+            return self._evaluation_adapter.get_assessment_report(assessment_id)
+        except EvaluationResourceNotFoundError:
+            dashboard = self._stored_evaluation_dashboard(recruiter_uid, assessment)
+            return AssessmentReportResponse(
+                overview=dashboard.overview,
+                leaderboard=dashboard.leaderboard,
+                generated_at=dashboard.overview.generated_at,
+                download_label=f"{assessment.title} evaluation report",
+            )
 
     def get_candidate_evaluation_report(
         self,
@@ -662,11 +720,27 @@ class AssessmentService:
     ) -> CandidateReportResponse:
         """Return one candidate scorecard after verifying assessment ownership."""
 
-        self._require_owned_assessment(recruiter_uid, assessment_id)
-        return self._evaluation_adapter.get_candidate_report(
-            assessment_id,
-            candidate_assessment_id,
-        )
+        assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
+        try:
+            return self._evaluation_adapter.get_candidate_report(
+                assessment_id,
+                candidate_assessment_id,
+            )
+        except EvaluationResourceNotFoundError:
+            candidate = self._stored_candidate_evaluation_summary_by_id(
+                recruiter_uid=recruiter_uid,
+                assessment=assessment,
+                candidate_assessment_id=candidate_assessment_id,
+            )
+            if candidate is None:
+                raise
+            return CandidateReportResponse(
+                assessment_id=assessment_id,
+                candidate_assessment_id=candidate_assessment_id,
+                candidate=candidate,
+                generated_at=datetime.now(UTC),
+                download_label=f"{candidate.candidate_name} scorecard",
+            )
 
     def retry_evaluation_job(
         self,
@@ -790,6 +864,366 @@ class AssessmentService:
             assignment.percentage = scorecard.scores.percentage
             assignment.rank = scorecard.rank
 
+    @staticmethod
+    def _empty_evaluation_dashboard(
+        assessment: AssessmentTemplateModel,
+        *,
+        total_candidates: int = 0,
+    ) -> AssessmentEvaluationDashboard:
+        """Return a stable empty-state dashboard before evaluation jobs exist."""
+
+        return AssessmentEvaluationDashboard(
+            overview=AssessmentEvaluationOverview(
+                assessment_id=assessment.id,
+                title=assessment.title,
+                total_candidates=total_candidates,
+                completed_candidates=0,
+                pending_jobs=0,
+                failed_jobs=0,
+                average_score=0,
+                average_test_case_score=0,
+                average_coding_score=0,
+                average_ai_score=0,
+                pass_rate=0,
+                highest_score=0,
+                report_status="pending",
+                generated_at=datetime.now(UTC),
+            ),
+            leaderboard=[],
+            jobs=[],
+        )
+
+    def _stored_evaluation_dashboard(
+        self,
+        recruiter_uid: str,
+        assessment: AssessmentTemplateModel,
+    ) -> AssessmentEvaluationDashboard:
+        """Build result cards from core-stored score metadata as a fallback."""
+
+        try:
+            assignments = self._repository.list_submitted_assignments_for_assessment(
+                recruiter_uid=recruiter_uid,
+                assessment_id=assessment.id,
+                candidate_assessment_ids=None,
+            )
+        except SQLAlchemyError as exc:
+            raise AssessmentStoreUnavailableError(
+                "Unable to read submitted candidate assessments"
+            ) from exc
+
+        summaries: list[CandidateEvaluationSummary] = []
+        jobs_by_candidate: dict[str, EvaluationJobResponse] = {}
+        for assignment in assignments:
+            try:
+                context = self._load_candidate_context_by_assignment(assignment)
+            except (AssessmentStoreUnavailableError, CandidateInviteError):
+                continue
+            summary, job = self._stored_candidate_evaluation_from_context(context)
+            if summary is None or job is None:
+                continue
+            summaries.append(summary)
+            jobs_by_candidate[summary.candidate_assessment_id] = job
+
+        if not summaries:
+            return self._empty_evaluation_dashboard(
+                assessment,
+                total_candidates=len(assignments),
+            )
+
+        leaderboard = self._rank_evaluation_summaries(summaries)
+        leaderboard_by_candidate = {
+            item.candidate_assessment_id: item for item in leaderboard
+        }
+        jobs = [
+            job.model_copy(
+                update={
+                    "result": leaderboard_by_candidate.get(
+                        job.candidate_assessment_id,
+                        job.result,
+                    )
+                }
+            )
+            for job in jobs_by_candidate.values()
+        ]
+        overview = self._stored_evaluation_overview(
+            assessment=assessment,
+            total_candidates=len(assignments),
+            leaderboard=leaderboard,
+            jobs=jobs,
+        )
+        return AssessmentEvaluationDashboard(
+            overview=overview,
+            leaderboard=leaderboard,
+            jobs=sorted(jobs, key=lambda item: item.updated_at, reverse=True),
+        )
+
+    def _stored_candidate_evaluation_summary_by_id(
+        self,
+        *,
+        recruiter_uid: str,
+        assessment: AssessmentTemplateModel,
+        candidate_assessment_id: str,
+    ) -> CandidateEvaluationSummary | None:
+        try:
+            assignment = self._repository.get_candidate_assignment(
+                recruiter_uid=recruiter_uid,
+                candidate_assessment_id=candidate_assessment_id,
+            )
+        except SQLAlchemyError as exc:
+            raise AssessmentStoreUnavailableError(
+                "Unable to read candidate assessment"
+            ) from exc
+        if assignment is None or assignment.assessment_id != assessment.id:
+            return None
+        context = self._load_candidate_context_by_assignment(assignment)
+        summary, _job = self._stored_candidate_evaluation_from_context(context)
+        return summary
+
+    def _stored_candidate_evaluation_from_context(
+        self,
+        context: CandidateAssessmentContext,
+    ) -> tuple[CandidateEvaluationSummary | None, EvaluationJobResponse | None]:
+        job_payload = self._stored_evaluation_job_payload(context)
+        if job_payload is None:
+            return None, None
+
+        assignment = context.candidate_assessment
+        result_payload = dict(job_payload.get("result") or {})
+        submitted_at = assignment.submitted_at or datetime.now(UTC)
+        updated_at = assignment.updated_at or submitted_at
+        language = self._stored_submission_language(context)
+        result_payload["question_breakdown"] = self._stored_question_breakdown(
+            context,
+            result_payload,
+            language,
+        )
+        summary = CandidateEvaluationSummary.model_validate(
+            {
+                **result_payload,
+                "assessment_id": context.assessment.id,
+                "candidate_assessment_id": assignment.id,
+                "candidate_id": context.candidate.id,
+                "candidate_name": context.candidate.full_name,
+                "candidate_email": context.candidate.email,
+                "submission_id": assignment.id,
+                "language": language,
+                "status": job_payload.get("status") or "completed",
+                "rank": assignment.rank or result_payload.get("rank"),
+                "submitted_at": submitted_at,
+                "evaluated_at": job_payload.get("updated_at") or updated_at,
+                "time_taken_seconds": self._stored_time_taken_seconds(assignment),
+            }
+        )
+        job = EvaluationJobResponse.model_validate(
+            {
+                "job_id": job_payload.get("job_id") or f"stored_{assignment.id}",
+                "assessment_id": context.assessment.id,
+                "candidate_assessment_id": assignment.id,
+                "status": job_payload.get("status") or "completed",
+                "attempt_count": job_payload.get("attempt_count") or 1,
+                "created_at": job_payload.get("created_at") or submitted_at,
+                "updated_at": job_payload.get("updated_at") or updated_at,
+                "error_message": job_payload.get("error_message"),
+                "result": summary,
+            }
+        )
+        return summary, job
+
+    @staticmethod
+    def _stored_evaluation_job_payload(
+        context: CandidateAssessmentContext,
+    ) -> dict[str, Any] | None:
+        for submission in context.submissions.values():
+            result = dict(submission.final_hidden_result or {})
+            evaluation_job = result.get("evaluation_job")
+            if isinstance(evaluation_job, dict) and evaluation_job.get("result"):
+                return evaluation_job
+        return None
+
+    @staticmethod
+    def _stored_submission_language(context: CandidateAssessmentContext) -> str:
+        for submission in context.submissions.values():
+            if (submission.final_code or submission.draft_code).strip():
+                return submission.source_language or "python"
+        return "python"
+
+    def _stored_question_breakdown(
+        self,
+        context: CandidateAssessmentContext,
+        result_payload: dict[str, Any],
+        language: str,
+    ) -> list[dict[str, Any]]:
+        breakdowns: list[dict[str, Any]] = []
+        raw_breakdowns = result_payload.get("question_breakdown") or []
+        if not isinstance(raw_breakdowns, list):
+            return breakdowns
+        for item in raw_breakdowns:
+            if not isinstance(item, dict):
+                continue
+            question_id = str(item.get("question_id") or "")
+            submission = context.submissions.get(question_id)
+            enriched = dict(item)
+            enriched["language"] = enriched.get("language") or (
+                submission.source_language if submission is not None else language
+            )
+            enriched["submitted_code"] = enriched.get("submitted_code") or (
+                (submission.final_code or submission.draft_code).strip()
+                if submission is not None
+                else ""
+            )
+            if not enriched.get("test_cases") and submission is not None:
+                enriched["test_cases"] = self._stored_test_case_results(submission)
+            breakdowns.append(enriched)
+        return breakdowns
+
+    @staticmethod
+    def _stored_test_case_results(
+        submission: SubmissionModel,
+    ) -> list[dict[str, Any]]:
+        final_hidden = dict(submission.final_hidden_result or {})
+        raw_results = final_hidden.get("results") or []
+        if not isinstance(raw_results, list):
+            return []
+        test_cases: list[dict[str, Any]] = []
+        for index, result in enumerate(raw_results, start=1):
+            if not isinstance(result, dict):
+                continue
+            case_index = result.get("index") or index
+            status = str(result.get("status") or "")
+            test_cases.append(
+                {
+                    "test_case_id": f"{submission.question_id}:{case_index}",
+                    "passed": bool(result.get("passed")),
+                    "verdict": AssessmentService._stored_verdict(status),
+                    "execution_time_ms": AssessmentService._stored_execution_time_ms(
+                        result.get("execution_time"),
+                    ),
+                    "memory_kb": result.get("memory_kb"),
+                    "points": 1,
+                    "mandatory": False,
+                    "input": result.get("input") or "",
+                    "expected_output": result.get("expected_output") or "",
+                    "actual_output": result.get("actual_output") or "",
+                    "message": (
+                        result.get("message")
+                        or result.get("stderr")
+                        or result.get("compile_output")
+                        or ""
+                    ),
+                }
+            )
+        return test_cases
+
+    @staticmethod
+    def _stored_verdict(status: str) -> str:
+        normalized = status.strip().lower().replace(" ", "_")
+        if "accepted" in normalized:
+            return "accepted"
+        if "compile" in normalized:
+            return "compile_error"
+        if "runtime" in normalized:
+            return "runtime_error"
+        if "time" in normalized or "timeout" in normalized:
+            return "time_limit_exceeded"
+        if "memory" in normalized:
+            return "memory_limit_exceeded"
+        return "wrong_answer"
+
+    @staticmethod
+    def _stored_execution_time_ms(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed * 1000 if parsed < 100 else parsed
+
+    @staticmethod
+    def _stored_time_taken_seconds(
+        assignment: CandidateAssessmentModel,
+    ) -> int | None:
+        if assignment.started_at is None or assignment.submitted_at is None:
+            return None
+        return max(
+            0,
+            int(
+                (
+                    assignment.submitted_at.astimezone(UTC)
+                    - assignment.started_at.astimezone(UTC)
+                ).total_seconds()
+            ),
+        )
+
+    @staticmethod
+    def _rank_evaluation_summaries(
+        summaries: list[CandidateEvaluationSummary],
+    ) -> list[CandidateEvaluationSummary]:
+        ranked = sorted(
+            summaries,
+            key=lambda item: (
+                -item.scores.final_score,
+                -item.scores.test_case_score,
+                -item.scores.coding_score,
+                item.total_execution_time_ms,
+                item.peak_memory_kb,
+                item.time_taken_seconds or 0,
+                item.submitted_at,
+            ),
+        )
+        return [
+            item.model_copy(update={"rank": index + 1})
+            for index, item in enumerate(ranked)
+        ]
+
+    @staticmethod
+    def _stored_evaluation_overview(
+        *,
+        assessment: AssessmentTemplateModel,
+        total_candidates: int,
+        leaderboard: list[CandidateEvaluationSummary],
+        jobs: list[EvaluationJobResponse],
+    ) -> AssessmentEvaluationOverview:
+        scores = [item.scores for item in leaderboard]
+
+        def average(values: list[float]) -> float:
+            return sum(values) / len(values) if values else 0
+
+        return AssessmentEvaluationOverview(
+            assessment_id=assessment.id,
+            title=assessment.title,
+            total_candidates=total_candidates,
+            completed_candidates=len(leaderboard),
+            pending_jobs=max(total_candidates - len(leaderboard), 0),
+            failed_jobs=sum(1 for job in jobs if job.status == "failed"),
+            average_score=round(average([score.final_score for score in scores]), 2),
+            average_test_case_score=round(
+                average([score.test_case_score for score in scores]),
+                2,
+            ),
+            average_coding_score=round(
+                average([score.coding_score for score in scores]),
+                2,
+            ),
+            average_ai_score=round(average([score.ai_score for score in scores]), 2),
+            pass_rate=round(
+                (
+                    sum(1 for score in scores if score.final_score >= 40)
+                    / len(scores)
+                    * 100
+                )
+                if scores
+                else 0,
+                2,
+            ),
+            highest_score=round(
+                max((score.final_score for score in scores), default=0),
+                2,
+            ),
+            report_status="ready" if leaderboard else "pending",
+            generated_at=datetime.now(UTC),
+        )
+
     def count_dispatch_targets(
         self,
         recruiter_uid: str,
@@ -896,7 +1330,7 @@ class AssessmentService:
             instructions = slot.instructions_override.strip() or assessment.instructions
 
             try:
-                self._email_service.send_assessment_invite(
+                self._invite_mail_service.send_assessment_invite(
                     to_email=candidate.email,
                     to_name=candidate.full_name,
                     assessment_title=assessment.title,
@@ -904,7 +1338,9 @@ class AssessmentService:
                     invite_url=invite_url,
                     start_at=slot.start_at,
                     end_at=slot.end_at,
-                    duration_minutes=assessment.duration_minutes,
+                    duration_minutes=(
+                        slot.duration_minutes or assessment.duration_minutes
+                    ),
                     instructions=instructions,
                 )
                 assignment.email_status = InviteEmailStatus.SENT.value
@@ -988,7 +1424,10 @@ class AssessmentService:
             slot_title=context.slot.title,
             instructions=context.slot.instructions_override.strip()
             or context.assessment.instructions,
-            duration_minutes=context.assessment.duration_minutes,
+            duration_minutes=(
+                getattr(context.slot, "duration_minutes", None)
+                or context.assessment.duration_minutes
+            ),
             start_at=context.slot.start_at,
             end_at=context.slot.end_at,
             allow_resume=context.assessment.allow_resume,
@@ -1022,12 +1461,24 @@ class AssessmentService:
             assignment.started_at = now
             assignment.deadline_at = min(
                 context.slot.end_at.astimezone(UTC),
-                now + timedelta(minutes=assessment.duration_minutes),
+                now
+                + timedelta(
+                    minutes=(
+                        getattr(context.slot, "duration_minutes", None)
+                        or assessment.duration_minutes
+                    )
+                ),
             )
         if assignment.deadline_at is None:
             assignment.deadline_at = min(
                 context.slot.end_at.astimezone(UTC),
-                now + timedelta(minutes=assessment.duration_minutes),
+                now
+                + timedelta(
+                    minutes=(
+                        getattr(context.slot, "duration_minutes", None)
+                        or assessment.duration_minutes
+                    )
+                ),
             )
         if assignment.deadline_at.astimezone(UTC) <= now:
             raise CandidateInviteError(
@@ -1096,13 +1547,17 @@ class AssessmentService:
             slot_id=context.slot.id,
             slot_title=context.slot.title,
             instructions=instructions,
-            duration_minutes=context.assessment.duration_minutes,
+            duration_minutes=(
+                getattr(context.slot, "duration_minutes", None)
+                or context.assessment.duration_minutes
+            ),
             allow_resume=context.assessment.allow_resume,
+            proctoring_mode=context.assessment.proctoring_mode,
             hidden_feedback_mode=HiddenFeedbackMode(
                 context.assessment.hidden_feedback_mode
             ),
-            max_hidden_checks=context.assessment.max_hidden_checks,
-            hidden_check_cooldown_seconds=context.assessment.hidden_check_cooldown_seconds,
+            max_hidden_checks=0,
+            hidden_check_cooldown_seconds=HIDDEN_CHECK_COOLDOWN_SECONDS,
             started_at=context.candidate_assessment.started_at,
             deadline_at=context.candidate_assessment.deadline_at,
             submitted_at=context.candidate_assessment.submitted_at,
@@ -1207,10 +1662,6 @@ class AssessmentService:
 
         context = self._load_candidate_context_by_claims(claims)
         self._assert_candidate_can_edit(context)
-        if context.assessment.hidden_feedback_mode != HiddenFeedbackMode.SUMMARY.value:
-            raise AssessmentValidationError(
-                "Hidden feedback is disabled for this assessment"
-            )
         question = self._question_by_id(context, payload.question_id)
         self._validate_question_language(context, payload.question_id, payload.language)
 
@@ -1224,15 +1675,6 @@ class AssessmentService:
                 "Hidden check cooldown is active for another "
                 f"{cooldown_remaining} seconds"
             )
-        has_hidden_check_limit = context.assessment.max_hidden_checks > 0
-        if (
-            has_hidden_check_limit
-            and assignment.hidden_checks_used >= context.assessment.max_hidden_checks
-        ):
-            raise AssessmentValidationError(
-                "Hidden check limit has been reached for this assessment"
-            )
-
         hidden_tests = self._complete_test_cases(question.hidden_test_cases)
         results, passed_count, total_count = self._execution_adapter.execute_batch(
             source_code=payload.source_code,
@@ -1249,14 +1691,18 @@ class AssessmentService:
         submission.hidden_check_result = {
             "passed_count": passed_count,
             "total_count": total_count,
+            "results": [
+                {
+                    "index": item.index,
+                    "status": item.status,
+                    "passed": item.passed,
+                    "execution_time": item.execution_time,
+                    "error_type": self._hidden_error_type(item),
+                }
+                for item in results
+            ],
         }
         submission.last_saved_at = now
-        remaining_attempts = (
-            max(0, context.assessment.max_hidden_checks - assignment.hidden_checks_used)
-            if has_hidden_check_limit
-            else None
-        )
-
         try:
             self._repository.commit()
         except SQLAlchemyError as exc:
@@ -1269,11 +1715,18 @@ class AssessmentService:
             question_id=payload.question_id,
             passed_count=passed_count,
             total_count=total_count,
-            remaining_attempts=remaining_attempts,
-            cooldown_remaining_seconds=max(
-                0,
-                context.assessment.hidden_check_cooldown_seconds,
-            ),
+            remaining_attempts=None,
+            cooldown_remaining_seconds=HIDDEN_CHECK_COOLDOWN_SECONDS,
+            results=[
+                HiddenExecutionCaseResult(
+                    index=item.index,
+                    status=item.status,
+                    passed=item.passed,
+                    execution_time=item.execution_time,
+                    error_type=self._hidden_error_type(item),
+                )
+                for item in results
+            ],
         )
 
     def submit_assessment(
@@ -1327,14 +1780,22 @@ class AssessmentService:
             if not source_code:
                 source_code = submission.final_code.strip()
             hidden_tests = self._complete_test_cases(question.hidden_test_cases)
-            if not self._can_execute_final_submission(
-                source_code,
-                submission.source_language,
-                hidden_tests,
-            ):
-                results = self._not_attempted_results(hidden_tests)
+            if not source_code:
+                submission.final_code = ""
+                submission.status = SubmissionStatus.SKIPPED_EVALUATION.value
+                submission.final_hidden_result = {
+                    "skipped": True,
+                    "reason": "empty_submission",
+                    "passed_count": 0,
+                    "total_count": 0,
+                    "results": [],
+                }
+                submission.submitted_at = now
+                continue
+            if not hidden_tests:
+                results: list[ExecutionCaseResult] = []
                 passed_count = 0
-                total_count = len(hidden_tests)
+                total_count = 0
             else:
                 try:
                     (
@@ -1352,6 +1813,7 @@ class AssessmentService:
                     passed_count = 0
                     total_count = len(hidden_tests)
             submission.final_code = source_code
+            submission.status = SubmissionStatus.PENDING_EVALUATION.value
             submission.final_hidden_result = {
                 "passed_count": passed_count,
                 "total_count": total_count,
@@ -1372,7 +1834,11 @@ class AssessmentService:
             or 1
         )
         earned_score = 0.0
-        for mapping, summary in zip(delivered_mappings, summaries, strict=False):
+        summary_by_question = {summary.question_id: summary for summary in summaries}
+        for mapping in delivered_mappings:
+            summary = summary_by_question.get(mapping.question_id)
+            if summary is None:
+                continue
             pass_ratio = (
                 summary.passed_count / summary.total_count
                 if summary.total_count > 0
@@ -1427,7 +1893,11 @@ class AssessmentService:
         )
         for question in delivered_questions:
             submission = self._get_submission_for_question(context, question.id)
-            submission.status = submission_status
+            submission.status = (
+                submission_status
+                if (submission.final_code or submission.draft_code).strip()
+                else SubmissionStatus.SKIPPED_EVALUATION.value
+            )
 
         should_auto_submit = auto_submit or payload.auto_submit
         context.candidate_assessment.status = (
@@ -1561,7 +2031,11 @@ class AssessmentService:
             evaluation_job=evaluation_job,
         )
         for submission in delivered_submissions:
-            submission.status = SubmissionStatus.PENDING_EVALUATION.value
+            submission.status = (
+                SubmissionStatus.PENDING_EVALUATION.value
+                if (submission.final_code or submission.draft_code).strip()
+                else SubmissionStatus.SKIPPED_EVALUATION.value
+            )
 
         return EvaluationBackfillCandidateResult(
             candidate_assessment_id=assignment.id,
@@ -1592,6 +2066,8 @@ class AssessmentService:
             submission = submissions_by_question.get(question.id)
             if submission is None:
                 continue
+            if not (submission.final_code or submission.draft_code).strip():
+                continue
             generated_summaries.append(
                 self._execute_final_hidden_for_backfill(
                     question=question,
@@ -1610,6 +2086,8 @@ class AssessmentService:
         submitted_at: datetime,
     ) -> SubmissionExecutionSummary:
         source_code = (submission.final_code or submission.draft_code).strip()
+        if not source_code:
+            raise ValueError("Empty submissions must not be evaluated.")
         hidden_tests = self._complete_test_cases(question.hidden_test_cases)
         if not self._can_execute_final_submission(
             source_code,
@@ -1653,6 +2131,8 @@ class AssessmentService:
     @staticmethod
     def _has_evaluation_job_metadata(submissions: list[SubmissionModel]) -> bool:
         for submission in submissions:
+            if not (submission.final_code or submission.draft_code).strip():
+                continue
             final_hidden_result = submission.final_hidden_result or {}
             if isinstance(final_hidden_result, dict) and final_hidden_result.get(
                 "evaluation_job"
@@ -1697,7 +2177,7 @@ class AssessmentService:
         self,
         *,
         context: CandidateAssessmentContext,
-        mappings: list[AssessmentQuestionModel],
+        mappings: list[AssessmentQuestionModel | DeliveredQuestionMapping],
         questions: list[QuestionBankQuestionModel],
         submissions: list[SubmissionModel],
         summaries: list[SubmissionExecutionSummary],
@@ -1797,7 +2277,6 @@ class AssessmentService:
                 tags=list(question_by_id[mapping.question_id].tags or []),
                 question_order=mapping.question_order,
                 marks=mapping.marks,
-                time_limit_minutes=mapping.time_limit_minutes,
                 is_mandatory=mapping.is_mandatory,
                 supported_languages=list(
                     question_by_id[mapping.question_id].supported_languages or []
@@ -1852,11 +2331,14 @@ class AssessmentService:
             allow_resume=model.allow_resume,
             shuffle_questions=model.shuffle_questions,
             question_count_per_candidate=model.question_count_per_candidate,
+            difficulty_blueprint=[
+                DifficultyLevel(item) for item in (model.difficulty_blueprint or [])
+            ],
             show_score_to_candidate=model.show_score_to_candidate,
             proctoring_mode=model.proctoring_mode,
             hidden_feedback_mode=HiddenFeedbackMode(model.hidden_feedback_mode),
-            max_hidden_checks=model.max_hidden_checks,
-            hidden_check_cooldown_seconds=model.hidden_check_cooldown_seconds,
+            max_hidden_checks=0,
+            hidden_check_cooldown_seconds=HIDDEN_CHECK_COOLDOWN_SECONDS,
             supported_languages=list(model.supported_languages or []),
             status=assessment_status_from_slots(model, slot_records),
             questions=records,
@@ -1880,6 +2362,7 @@ class AssessmentService:
     def _validate_assessment_questions(
         self,
         recruiter_uid: str,
+        assessment: AssessmentTemplateModel,
         questions: list[Any],
     ) -> list[dict[str, Any]]:
         if not questions:
@@ -1901,7 +2384,6 @@ class AssessmentService:
                     "question_id": question_id,
                     "question_order": item.question_order,
                     "marks": item.marks,
-                    "time_limit_minutes": item.time_limit_minutes,
                     "is_mandatory": item.is_mandatory,
                 }
             )
@@ -1921,11 +2403,76 @@ class AssessmentService:
             raise AssessmentValidationError(
                 "Only validated questions can be added to an assessment"
             )
-        marks_by_question_id = self._difficulty_weighted_marks(
-            [record_by_id[question_id] for question_id in question_ids]
-        )
-        for item in normalized:
-            item["marks"] = marks_by_question_id[item["question_id"]]
+        question_count = int(assessment.question_count_per_candidate or 0)
+        blueprint = list(assessment.difficulty_blueprint or [])
+        if question_count <= 0:
+            question_count = len(blueprint) or len(normalized)
+        if len(blueprint) != question_count:
+            raise AssessmentValidationError(
+                "Difficulty template must contain one entry for every "
+                "delivered question"
+            )
+        if assessment.shuffle_questions:
+            if len(normalized) < question_count:
+                raise AssessmentValidationError(
+                    "Randomized assessments require a pool at least as large "
+                    "as the question count"
+                )
+            available = {
+                difficulty: sum(
+                    1
+                    for question_id in question_ids
+                    if record_by_id[question_id].difficulty == difficulty
+                )
+                for difficulty in {item.value for item in DifficultyLevel}
+            }
+            required = {
+                difficulty: blueprint.count(difficulty)
+                for difficulty in {item.value for item in DifficultyLevel}
+            }
+            if any(available[item] < required[item] for item in required):
+                raise AssessmentValidationError(
+                    "Randomized question pool cannot satisfy the difficulty template"
+                )
+            unsupported = sorted(
+                {
+                    record_by_id[question_id].difficulty
+                    for question_id in question_ids
+                    if record_by_id[question_id].difficulty not in blueprint
+                }
+            )
+            if unsupported:
+                raise AssessmentValidationError(
+                    "Question pool contains difficulties outside the template: "
+                    + ", ".join(unsupported)
+                )
+        else:
+            if len(normalized) != question_count:
+                raise AssessmentValidationError(
+                    f"Same-set assessments require exactly {question_count} questions"
+                )
+            ordered = sorted(normalized, key=lambda item: item["question_order"])
+            if any(
+                record_by_id[item["question_id"]].difficulty != blueprint[index]
+                for index, item in enumerate(ordered)
+            ):
+                raise AssessmentValidationError(
+                    "Selected question order must match the difficulty template"
+                )
+        template_marks = self._template_marks(blueprint)
+        if assessment.shuffle_questions:
+            marks_by_difficulty = {
+                difficulty: template_marks[blueprint.index(difficulty)]
+                for difficulty in set(blueprint)
+            }
+            for item in normalized:
+                difficulty = record_by_id[item["question_id"]].difficulty
+                item["marks"] = marks_by_difficulty[difficulty]
+        else:
+            for index, item in enumerate(
+                sorted(normalized, key=lambda value: value["question_order"])
+            ):
+                item["marks"] = template_marks[index]
         return sorted(normalized, key=lambda item: item["question_order"])
 
     @staticmethod
@@ -1936,11 +2483,10 @@ class AssessmentService:
             return 3
         return 2
 
-    def _difficulty_weighted_marks(
-        self,
-        questions: list[QuestionBankQuestionModel],
-    ) -> dict[str, int]:
-        ratios = [self._difficulty_ratio(item.difficulty) for item in questions]
+    def _template_marks(self, blueprint: list[str]) -> list[int]:
+        """Allocate exactly 100 marks across delivered template slots."""
+
+        ratios = [self._difficulty_ratio(difficulty) for difficulty in blueprint]
         total_ratio = sum(ratios) or 1
         raw_marks = [(ratio / total_ratio) * 100 for ratio in ratios]
         marks = [int(item) for item in raw_marks]
@@ -1952,10 +2498,7 @@ class AssessmentService:
         )
         for index in ranked_remainders[:remainder]:
             marks[index] += 1
-        return {
-            question.id: max(1, mark)
-            for question, mark in zip(questions, marks, strict=False)
-        }
+        return marks
 
     def _question_bank_records(
         self,
@@ -2265,26 +2808,70 @@ class AssessmentService:
     def _candidate_question_mappings(
         self,
         context: CandidateAssessmentContext,
-    ) -> list[AssessmentQuestionModel]:
+    ) -> list[AssessmentQuestionModel | DeliveredQuestionMapping]:
         ordered_mappings = sorted(
             context.mappings,
             key=lambda item: getattr(item, "question_order", 0),
         )
+        typed_ordered_mappings: list[
+            AssessmentQuestionModel | DeliveredQuestionMapping
+        ] = list(ordered_mappings)
         question_limit = int(
             getattr(context.assessment, "question_count_per_candidate", 0) or 0
         )
         should_randomize = bool(getattr(context.assessment, "shuffle_questions", False))
-        if question_limit <= 0 or question_limit >= len(ordered_mappings):
-            if not should_randomize:
-                return ordered_mappings
-            shuffled_mappings = list(ordered_mappings)
-            Random(context.candidate_assessment.id).shuffle(shuffled_mappings)
-            return shuffled_mappings
+        if question_limit <= 0:
+            return typed_ordered_mappings
+        blueprint = list(getattr(context.assessment, "difficulty_blueprint", []) or [])
+        if len(blueprint) != question_limit:
+            raise AssessmentValidationError(
+                "Assessment difficulty template is incomplete"
+            )
+        template_marks = self._template_marks(blueprint)
         if not should_randomize:
-            return ordered_mappings[:question_limit]
-        shuffled_mappings = list(ordered_mappings)
-        Random(context.candidate_assessment.id).shuffle(shuffled_mappings)
-        return shuffled_mappings[:question_limit]
+            return [
+                self._delivered_mapping(mapping, index + 1, template_marks[index])
+                for index, mapping in enumerate(ordered_mappings[:question_limit])
+            ]
+        question_by_id = {question.id: question for question in context.questions}
+        buckets: dict[str, list[AssessmentQuestionModel]] = {
+            item.value: [] for item in DifficultyLevel
+        }
+        for mapping in ordered_mappings:
+            question = question_by_id.get(mapping.question_id)
+            if question is not None:
+                buckets.setdefault(question.difficulty, []).append(mapping)
+        randomizer = Random(context.candidate_assessment.id)
+        for bucket in buckets.values():
+            randomizer.shuffle(bucket)
+        selected: list[AssessmentQuestionModel | DeliveredQuestionMapping] = []
+        for index, difficulty in enumerate(blueprint):
+            bucket = buckets.get(difficulty, [])
+            if not bucket:
+                raise AssessmentValidationError(
+                    "Question pool cannot satisfy the difficulty template"
+                )
+            selected.append(
+                self._delivered_mapping(
+                    bucket.pop(),
+                    index + 1,
+                    template_marks[index],
+                )
+            )
+        return selected
+
+    @staticmethod
+    def _delivered_mapping(
+        mapping: AssessmentQuestionModel,
+        question_order: int,
+        marks: int,
+    ) -> DeliveredQuestionMapping:
+        return DeliveredQuestionMapping(
+            question_id=mapping.question_id,
+            question_order=question_order,
+            marks=marks,
+            is_mandatory=mapping.is_mandatory,
+        )
 
     def _assert_candidate_can_edit(self, context: CandidateAssessmentContext) -> None:
         self._auto_submit_if_expired(context)
@@ -2351,15 +2938,12 @@ class AssessmentService:
         assignment: CandidateAssessmentModel,
         now: datetime,
     ) -> int:
-        if (
-            not assignment.last_hidden_check_at
-            or assessment.hidden_check_cooldown_seconds <= 0
-        ):
+        if not assignment.last_hidden_check_at or HIDDEN_CHECK_COOLDOWN_SECONDS <= 0:
             return 0
         elapsed = int(
             (now - assignment.last_hidden_check_at.astimezone(UTC)).total_seconds()
         )
-        return max(0, assessment.hidden_check_cooldown_seconds - elapsed)
+        return max(0, HIDDEN_CHECK_COOLDOWN_SECONDS - elapsed)
 
     def _auto_submit_if_expired(self, context: CandidateAssessmentContext) -> None:
         deadline = context.candidate_assessment.deadline_at
@@ -2468,6 +3052,26 @@ class AssessmentService:
         ]
 
     @staticmethod
+    def _hidden_error_type(result: ExecutionCaseResult) -> str:
+        """Return useful failure classification without leaking hidden test data."""
+
+        if result.passed:
+            return ""
+        status = result.status.strip() or "Execution failed"
+        normalized = status.lower()
+        if "compile" in normalized:
+            return "Compilation error"
+        if "time" in normalized and "limit" in normalized:
+            return "Time limit exceeded"
+        if "memory" in normalized:
+            return "Memory limit exceeded"
+        if "runtime" in normalized or result.stderr.strip():
+            return "Runtime error"
+        if "wrong" in normalized or normalized in {"failed", "rejected"}:
+            return "Wrong answer"
+        return status
+
+    @staticmethod
     def _time_remaining_seconds(deadline_at: datetime | None) -> int | None:
         if deadline_at is None:
             return None
@@ -2484,7 +3088,7 @@ def dispatch_slot_invites_background(
     slot_id: str,
     candidate_assessment_id: str | None = None,
 ) -> None:
-    """Background-task entrypoint for Brevo invite delivery."""
+    """Background-task entrypoint for assessment invite delivery."""
 
     from data.database import create_session_factory
 

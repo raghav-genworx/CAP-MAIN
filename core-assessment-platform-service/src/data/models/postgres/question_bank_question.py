@@ -53,10 +53,6 @@ class QuestionBankQuestionModel(Base):
         nullable=False,
         default=list,
     )
-    candidate_solve_time_minutes: Mapped[int] = mapped_column(
-        nullable=False,
-        default=45,
-    )
     execution_time_limit_seconds: Mapped[int] = mapped_column(
         nullable=False,
         default=2,

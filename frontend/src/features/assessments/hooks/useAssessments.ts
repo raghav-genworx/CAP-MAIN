@@ -6,6 +6,7 @@ import {
   createAssessment,
   createAssessmentSlot,
   controlAssessmentSlot,
+  deleteAssessment,
   fetchAssessments,
   fetchAssessmentSlots,
   fetchSlotCandidates,
@@ -66,6 +67,19 @@ export function useUpdateAssessment(user: User | null) {
     }) => updateAssessment(await getRequiredIdToken(user), assessmentId, payload),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["assessments"] });
+    },
+  });
+}
+
+export function useDeleteAssessment(user: User | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (assessmentId: string) =>
+      deleteAssessment(await getRequiredIdToken(user), assessmentId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["assessments"] });
+      await queryClient.invalidateQueries({ queryKey: ["assessment-slots"] });
+      await queryClient.invalidateQueries({ queryKey: ["slot-monitoring"] });
     },
   });
 }

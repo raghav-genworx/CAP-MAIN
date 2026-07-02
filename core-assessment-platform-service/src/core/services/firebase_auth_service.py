@@ -58,6 +58,10 @@ class FirebaseAuthService:
         uid = decoded_token.get("user_id") or decoded_token.get("sub")
         if not uid or not isinstance(uid, str):
             raise AuthenticationError("Firebase token is missing a user ID")
+        if not bool(decoded_token.get("email_verified", False)):
+            raise AuthenticationError(
+                "Verify your email address before accessing the recruiter portal"
+            )
 
         return FirebaseIdentity(
             uid=uid,

@@ -79,7 +79,6 @@ BULK_IMPORT_TEMPLATE_HEADERS = [
     "reference_solution",
     "reference_language",
     "supported_languages",
-    "candidate_solve_time_minutes",
     "execution_time_limit_seconds",
     "memory_limit_mb",
     "solution_approach",
@@ -182,7 +181,6 @@ class QuestionBankService:
             reference_solution=payload.reference_solution.strip(),
             reference_language=payload.reference_language.strip() or "python",
             supported_languages=supported_languages,
-            candidate_solve_time_minutes=payload.candidate_solve_time_minutes,
             execution_time_limit_seconds=payload.execution_time_limit_seconds,
             memory_limit_mb=payload.memory_limit_mb,
             metadata_status=payload.metadata_status.value,
@@ -322,7 +320,6 @@ class QuestionBankService:
         model.reference_solution = payload.reference_solution.strip()
         model.reference_language = payload.reference_language.strip() or "python"
         model.supported_languages = supported_languages
-        model.candidate_solve_time_minutes = payload.candidate_solve_time_minutes
         model.execution_time_limit_seconds = payload.execution_time_limit_seconds
         model.memory_limit_mb = payload.memory_limit_mb
         model.metadata_status = payload.metadata_status.value
@@ -588,10 +585,6 @@ class QuestionBankService:
                 self._csv_value(row, header_map, "supported_languages"),
             )
             or [reference_language],
-            candidate_solve_time_minutes=self._parse_optional_int(
-                self._csv_value(row, header_map, "candidate_solve_time_minutes"),
-                45,
-            ),
             execution_time_limit_seconds=self._parse_optional_int(
                 self._csv_value(row, header_map, "execution_time_limit_seconds"),
                 2,
@@ -1108,12 +1101,6 @@ class QuestionBankService:
             reference_solution=model.reference_solution,
             reference_language=model.reference_language,
             supported_languages=list(model.supported_languages or []),
-            candidate_solve_time_minutes=getattr(
-                model,
-                "candidate_solve_time_minutes",
-                45,
-            )
-            or 45,
             execution_time_limit_seconds=getattr(
                 model,
                 "execution_time_limit_seconds",

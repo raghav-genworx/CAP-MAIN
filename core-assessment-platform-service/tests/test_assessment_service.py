@@ -6,17 +6,220 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core.exceptions.assessment import AssessmentNotFoundError
+from core.exceptions.assessment import (
+    AssessmentNotFoundError,
+    AssessmentValidationError,
+    EvaluationResourceNotFoundError,
+)
 from core.services.assessment_service import AssessmentService
 from core.services.evaluation_adapter_service import EvaluationJobResult
 from data.models.postgres.assessment_template import AssessmentTemplateModel
 from schemas.assessments import (
     AssessmentCreateRequest,
+    AssessmentQuestionInput,
     AssessmentStatus,
     EvaluationBackfillRequest,
     ExecutionCaseResult,
+    HiddenCheckResponse,
 )
 from schemas.candidate_portal import CandidateSessionClaims, CandidateSubmitRequest
+
+
+def test_question_selection_enforces_same_set_count_and_randomized_blueprint() -> None:
+    service = AssessmentService(MagicMock())
+    records = [
+        SimpleNamespace(
+            id="easy-1", title="Easy", difficulty="easy", status="validated"
+        ),
+        SimpleNamespace(
+            id="easy-2", title="Easy 2", difficulty="easy", status="validated"
+        ),
+        SimpleNamespace(
+            id="hard-1", title="Hard", difficulty="hard", status="validated"
+        ),
+        SimpleNamespace(
+            id="medium-1",
+            title="Medium",
+            difficulty="medium",
+            status="validated",
+        ),
+    ]
+    service._question_bank_records = MagicMock(
+        side_effect=lambda _uid, ids: [item for item in records if item.id in ids]
+    )
+    same_set = SimpleNamespace(
+        question_count_per_candidate=3,
+        difficulty_blueprint=["easy", "hard", "medium"],
+        shuffle_questions=False,
+    )
+    four_questions = [
+        AssessmentQuestionInput(
+            question_id=item.id,
+            question_order=index,
+            marks=10,
+        )
+        for index, item in enumerate(records, start=1)
+    ]
+    with pytest.raises(AssessmentValidationError, match="exactly 3"):
+        service._validate_assessment_questions("recruiter", same_set, four_questions)
+
+    randomized = SimpleNamespace(
+        question_count_per_candidate=3,
+        difficulty_blueprint=["easy", "hard", "hard"],
+        shuffle_questions=True,
+    )
+    with pytest.raises(AssessmentValidationError, match="cannot satisfy"):
+        service._validate_assessment_questions(
+            "recruiter",
+            randomized,
+            four_questions,
+        )
+
+
+def test_randomized_pool_marks_follow_template_not_pool_size() -> None:
+    service = AssessmentService(MagicMock())
+    records = [
+        SimpleNamespace(
+            id="easy-1", title="Easy 1", difficulty="easy", status="validated"
+        ),
+        SimpleNamespace(
+            id="easy-2", title="Easy 2", difficulty="easy", status="validated"
+        ),
+        SimpleNamespace(
+            id="medium-1", title="Medium 1", difficulty="medium", status="validated"
+        ),
+        SimpleNamespace(
+            id="medium-2", title="Medium 2", difficulty="medium", status="validated"
+        ),
+        SimpleNamespace(
+            id="medium-3", title="Medium 3", difficulty="medium", status="validated"
+        ),
+    ]
+    service._question_bank_records = MagicMock(return_value=records)
+    assessment = SimpleNamespace(
+        question_count_per_candidate=3,
+        difficulty_blueprint=["easy", "medium", "medium"],
+        shuffle_questions=True,
+    )
+    questions = [
+        AssessmentQuestionInput(
+            question_id=item.id,
+            question_order=index,
+            marks=1,
+        )
+        for index, item in enumerate(records, start=1)
+    ]
+
+    normalized = service._validate_assessment_questions(
+        "recruiter", assessment, questions
+    )
+
+    marks = {item["question_id"]: item["marks"] for item in normalized}
+    assert marks["easy-1"] == marks["easy-2"] == 20
+    assert marks["medium-1"] == marks["medium-2"] == marks["medium-3"] == 40
+    assert service._template_marks(assessment.difficulty_blueprint) == [20, 40, 40]
+
+    context = SimpleNamespace(
+        assessment=assessment,
+        candidate_assessment=SimpleNamespace(id="candidate-assessment-1"),
+        questions=records,
+        mappings=[
+            SimpleNamespace(
+                question_id=item.id,
+                question_order=index,
+                marks=marks[item.id],
+                is_mandatory=True,
+            )
+            for index, item in enumerate(records, start=1)
+        ],
+    )
+    delivered = service._candidate_question_mappings(context)
+    difficulty_by_id = {item.id: item.difficulty for item in records}
+
+    assert [difficulty_by_id[item.question_id] for item in delivered] == [
+        "easy",
+        "medium",
+        "medium",
+    ]
+    assert [item.marks for item in delivered] == [20, 40, 40]
+    assert sum(item.marks for item in delivered) == 100
+
+
+def test_randomized_pool_rejects_difficulty_outside_template() -> None:
+    service = AssessmentService(MagicMock())
+    records = [
+        SimpleNamespace(
+            id="easy-1", title="Easy", difficulty="easy", status="validated"
+        ),
+        SimpleNamespace(
+            id="medium-1", title="Medium", difficulty="medium", status="validated"
+        ),
+        SimpleNamespace(
+            id="hard-1", title="Hard", difficulty="hard", status="validated"
+        ),
+    ]
+    service._question_bank_records = MagicMock(return_value=records)
+    assessment = SimpleNamespace(
+        question_count_per_candidate=2,
+        difficulty_blueprint=["easy", "medium"],
+        shuffle_questions=True,
+    )
+
+    with pytest.raises(AssessmentValidationError, match="outside the template: hard"):
+        service._validate_assessment_questions(
+            "recruiter",
+            assessment,
+            [
+                AssessmentQuestionInput(
+                    question_id=item.id,
+                    question_order=index,
+                    marks=1,
+                )
+                for index, item in enumerate(records, start=1)
+            ],
+        )
+
+
+def test_hidden_check_evidence_is_useful_without_leaking_test_data() -> None:
+    """Candidate hidden feedback must contain verdict evidence, not test content."""
+
+    failed_result = ExecutionCaseResult(
+        index=1,
+        input="secret input",
+        expected_output="secret output",
+        status="Runtime Error (NZEC)",
+        passed=False,
+        stderr="private runtime details",
+        execution_time="0.04",
+    )
+    response = HiddenCheckResponse(
+        question_id="question-1",
+        passed_count=0,
+        total_count=1,
+        remaining_attempts=None,
+        cooldown_remaining_seconds=5,
+        results=[
+            {
+                "index": failed_result.index,
+                "status": failed_result.status,
+                "passed": failed_result.passed,
+                "execution_time": failed_result.execution_time,
+                "error_type": AssessmentService._hidden_error_type(failed_result),
+            }
+        ],
+    )
+
+    payload = response.model_dump(mode="json")
+    assert payload["results"][0] == {
+        "index": 1,
+        "status": "Runtime Error (NZEC)",
+        "passed": False,
+        "execution_time": "0.04",
+        "error_type": "Runtime error",
+    }
+    assert "input" not in payload["results"][0]
+    assert "expected_output" not in payload["results"][0]
+    assert "stderr" not in payload["results"][0]
 
 
 def test_evaluation_dashboard_requires_recruiter_owned_assessment() -> None:
@@ -34,6 +237,147 @@ def test_evaluation_dashboard_requires_recruiter_owned_assessment() -> None:
         service.get_evaluation_dashboard("recruiter-1", "assessment-other")
 
     service._evaluation_adapter.get_dashboard.assert_not_called()
+
+
+def test_evaluation_dashboard_returns_empty_state_when_no_jobs_exist() -> None:
+    """A valid assessment with no evaluation rows should not become a 502."""
+
+    service = AssessmentService(MagicMock())
+    service._repository = SimpleNamespace(
+        get_assessment=MagicMock(
+            return_value=SimpleNamespace(
+                id="assessment-1",
+                title="Backend Round",
+            )
+        ),
+        list_submitted_assignments_for_assessment=MagicMock(return_value=[]),
+    )
+    service._evaluation_adapter = SimpleNamespace(
+        get_dashboard=MagicMock(
+            side_effect=EvaluationResourceNotFoundError("No evaluation jobs")
+        ),
+    )
+
+    dashboard = service.get_evaluation_dashboard("recruiter-1", "assessment-1")
+
+    assert dashboard.overview.assessment_id == "assessment-1"
+    assert dashboard.overview.title == "Backend Round"
+    assert dashboard.overview.report_status == "pending"
+    assert dashboard.overview.completed_candidates == 0
+    assert dashboard.leaderboard == []
+    assert dashboard.jobs == []
+
+
+def test_evaluation_dashboard_falls_back_to_stored_scorecards() -> None:
+    """Stored core evaluation metadata should still render recruiter results."""
+
+    submitted_at = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
+    assessment = SimpleNamespace(id="assessment-1", title="Backend Round")
+    assignment = SimpleNamespace(
+        id="candidate-assessment-1",
+        assessment_id="assessment-1",
+        candidate_id="candidate-1",
+        started_at=datetime(2026, 6, 1, 9, 45, tzinfo=UTC),
+        submitted_at=submitted_at,
+        updated_at=submitted_at,
+        rank=None,
+    )
+    evaluation_job = {
+        "job_id": "eval-1",
+        "status": "completed",
+        "attempt_count": 1,
+        "assessment_id": "assessment-1",
+        "candidate_assessment_id": "candidate-assessment-1",
+        "result": {
+            "scores": {
+                "test_case_score": 100,
+                "coding_score": 96,
+                "ai_score": 88,
+                "final_score": 96.8,
+                "percentage": 96.8,
+            },
+            "hidden_passed": 4,
+            "hidden_total": 4,
+            "total_execution_time_ms": 340,
+            "peak_memory_kb": 32000,
+            "ai_quality": {
+                "score": 88,
+                "approach": "Fallback review.",
+                "time_complexity": "O(n)",
+                "space_complexity": "O(1)",
+                "readability": "Readable.",
+                "maintainability": "Maintainable.",
+                "strengths": [],
+                "weaknesses": [],
+                "improvements": [],
+            },
+            "question_breakdown": [
+                {
+                    "question_id": "question-1",
+                    "question_title": "Question One",
+                    "passed_count": 4,
+                    "total_count": 4,
+                    "earned_points": 10,
+                    "total_points": 10,
+                    "score": 100,
+                    "mandatory_failed": False,
+                }
+            ],
+        },
+    }
+    submission = SimpleNamespace(
+        question_id="question-1",
+        source_language="python",
+        final_code="print(1)",
+        draft_code="",
+        final_hidden_result={
+            "evaluation_job": evaluation_job,
+            "results": [
+                {
+                    "index": 1,
+                    "passed": True,
+                    "status": "Accepted",
+                    "input": "1\n",
+                    "expected_output": "1\n",
+                    "actual_output": "1\n",
+                    "execution_time": "0.01",
+                    "memory_kb": 1024,
+                }
+            ],
+        },
+    )
+    context = SimpleNamespace(
+        assessment=assessment,
+        candidate=SimpleNamespace(
+            id="candidate-1",
+            full_name="Candidate One",
+            email="candidate@example.com",
+        ),
+        candidate_assessment=assignment,
+        submissions={"question-1": submission},
+    )
+    service = AssessmentService(MagicMock())
+    service._repository = SimpleNamespace(
+        get_assessment=MagicMock(return_value=assessment),
+        list_submitted_assignments_for_assessment=MagicMock(
+            return_value=[assignment],
+        ),
+    )
+    service._evaluation_adapter = SimpleNamespace(
+        get_dashboard=MagicMock(
+            side_effect=EvaluationResourceNotFoundError("No evaluation jobs")
+        ),
+    )
+    service._load_candidate_context_by_assignment = MagicMock(return_value=context)
+
+    dashboard = service.get_evaluation_dashboard("recruiter-1", "assessment-1")
+
+    assert dashboard.overview.completed_candidates == 1
+    assert dashboard.overview.average_score == 96.8
+    assert dashboard.leaderboard[0].candidate_name == "Candidate One"
+    assert dashboard.leaderboard[0].question_breakdown[0].submitted_code == "print(1)"
+    assert dashboard.leaderboard[0].question_breakdown[0].test_cases[0].passed is True
+    assert dashboard.jobs[0].result == dashboard.leaderboard[0]
 
 
 def test_create_assessment_persists_through_repository() -> None:
@@ -64,6 +408,8 @@ def test_create_assessment_persists_through_repository() -> None:
             title="Backend Engineer Round",
             description="Python and API assessment",
             instructions="Solve all questions.",
+            max_hidden_checks=20,
+            hidden_check_cooldown_seconds=90,
             status=AssessmentStatus.AVAILABLE,
         ),
     )
@@ -82,6 +428,8 @@ def test_create_assessment_persists_through_repository() -> None:
     assert isinstance(persisted_model, AssessmentTemplateModel)
     assert persisted_model.recruiter_uid == "recruiter-1"
     assert persisted_model.title == "Backend Engineer Round"
+    assert persisted_model.max_hidden_checks == 0
+    assert persisted_model.hidden_check_cooldown_seconds == 5
     assert record.id == "assessment-1"
     assert record.question_count == 0
 
@@ -148,11 +496,11 @@ def test_auto_submit_marks_empty_answer_not_attempted_without_execution() -> Non
     assert response.status == "auto_submitted"
     assert "summaries" not in response.model_dump()
     assert submission.final_hidden_result["passed_count"] == 0
-    assert submission.final_hidden_result["total_count"] == 1
-    stored_result = submission.final_hidden_result["results"][0]
-    assert stored_result["status"] == "not_attempted"
-    assert stored_result["input"] == "1 2\n"
-    assert stored_result["expected_output"] == "3\n"
+    assert submission.final_hidden_result["total_count"] == 0
+    assert submission.final_hidden_result["results"] == []
+    assert submission.final_hidden_result["skipped"] is True
+    assert submission.final_hidden_result["reason"] == "empty_submission"
+    assert submission.status == "skipped_evaluation"
 
 
 def test_submit_assessment_retry_returns_existing_acknowledgement() -> None:

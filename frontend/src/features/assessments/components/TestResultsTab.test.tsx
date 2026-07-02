@@ -5,8 +5,8 @@ import {
   downloadCandidateEvaluationReport,
   downloadTestEvaluationReport,
   fetchCandidateEvaluationReport,
-} from "../../codeEvaluation/services/codeEvaluationService";
-import type { CandidateEvaluationSummary } from "../../codeEvaluation/types/EvaluationResult";
+} from "../../codeEvaluation";
+import type { CandidateEvaluationSummary } from "../../codeEvaluation";
 import type { SlotCandidate } from "../types/Assessment";
 import { TestResultsTab } from "./TestResultsTab";
 
@@ -16,7 +16,7 @@ vi.mock("../../auth", () => ({
   useAuth: () => ({ currentUser: { getIdToken } }),
 }));
 
-vi.mock("../../codeEvaluation/services/codeEvaluationService", () => ({
+vi.mock("../../codeEvaluation", () => ({
   downloadCandidateEvaluationReport: vi.fn(),
   downloadTestEvaluationReport: vi.fn(),
   fetchCandidateEvaluationReport: vi.fn(),

@@ -22,6 +22,7 @@ from schemas.evaluation import (
     AssessmentEvaluationDashboard,
     AssessmentEvaluationOverview,
     AssessmentReportResponse,
+    CandidateBenchmarkContext,
     CandidateEvaluationSummary,
     CandidateReportResponse,
     EvaluationJobCreateRequest,
@@ -32,6 +33,7 @@ from schemas.evaluation import (
     ExecutionVerdict,
     HiddenExecutionResult,
     QuestionEvaluationBreakdown,
+    QuestionSubmission,
     QuestionTestCaseResult,
     RetryEvaluationResponse,
     ScoringWeights,
@@ -259,10 +261,15 @@ class EvaluationService:
         )
         if candidate is None:
             raise EvaluationJobNotFoundError(candidate_assessment_id)
+        benchmark = self._candidate_benchmark(
+            candidate,
+            self.get_leaderboard(assessment_id),
+        )
         return CandidateReportResponse(
             assessment_id=assessment_id,
             candidate_assessment_id=candidate_assessment_id,
             candidate=candidate,
+            benchmark=benchmark,
             generated_at=datetime.now(UTC),
             download_label=f"{candidate.candidate_name} scorecard",
         )
@@ -380,38 +387,52 @@ class EvaluationService:
         self,
         request: EvaluationJobCreateRequest,
     ) -> CandidateEvaluationSummary:
+        question_submissions = self._question_submissions(request)
         question_breakdown = self._build_question_breakdown(
-            request.hidden_results,
-            request.source_code,
-            request.language,
+            request,
+            question_submissions,
         )
-        hidden_passed = sum(1 for item in request.hidden_results if item.passed)
-        hidden_total = len(request.hidden_results)
+        evaluated_question_ids = {
+            item.question_id
+            for item in question_breakdown
+            if item.evaluation_status == "evaluated"
+        }
+        evaluated_results = [
+            item
+            for item in request.hidden_results
+            if item.question_id in evaluated_question_ids
+        ]
+        hidden_passed = sum(1 for item in evaluated_results if item.passed)
+        hidden_total = len(evaluated_results)
         total_time = round(
-            sum(item.execution_time_ms or 0 for item in request.hidden_results),
+            sum(item.execution_time_ms or 0 for item in evaluated_results),
             2,
         )
         peak_memory = max(
-            (item.memory_kb or 0 for item in request.hidden_results),
+            (item.memory_kb or 0 for item in evaluated_results),
             default=0,
         )
-        test_case_score = self._test_case_score(request.hidden_results)
-        coding_score = self._coding_score(request.hidden_results)
-        ai_quality = self._resolve_ai_quality(
-            request,
-            test_case_score,
-            coding_score,
+        total_marks = sum(item.assigned_marks for item in question_breakdown)
+        test_case_score = self._marks_weighted_question_score(
+            question_breakdown, "test_case_score", total_marks
         )
-        final_score = self._weighted_score(
-            test_case_score,
-            coding_score,
-            ai_quality.score,
-            request.weights,
+        coding_score = self._marks_weighted_question_score(
+            question_breakdown, "coding_score", total_marks
         )
+        ai_score = self._marks_weighted_question_score(
+            question_breakdown, "ai_score", total_marks
+        )
+        final_score = (
+            sum(item.score * item.assigned_marks for item in question_breakdown)
+            / total_marks
+            if total_marks
+            else 0
+        )
+        ai_quality = self._aggregate_ai_quality(question_breakdown, ai_score)
         scores = EvaluationScores(
             test_case_score=round(test_case_score, 2),
             coding_score=round(coding_score, 2),
-            ai_score=round(ai_quality.score, 2),
+            ai_score=round(ai_score, 2),
             final_score=round(final_score, 2),
             percentage=round(final_score, 2),
         )
@@ -427,42 +448,135 @@ class EvaluationService:
             scores=scores,
             hidden_passed=hidden_passed,
             hidden_total=hidden_total,
+            weights=request.weights,
             total_execution_time_ms=total_time,
             peak_memory_kb=peak_memory,
             ai_quality=ai_quality,
             question_breakdown=question_breakdown,
+            activity=request.activity,
+            integrity=request.integrity,
             submitted_at=request.submitted_at,
             evaluated_at=datetime.now(UTC),
             time_taken_seconds=request.time_taken_seconds,
         )
 
+    def _question_submissions(
+        self,
+        request: EvaluationJobCreateRequest,
+    ) -> list[QuestionSubmission]:
+        if request.question_submissions:
+            return request.question_submissions
+
+        grouped: dict[str, list[HiddenExecutionResult]] = defaultdict(list)
+        for result in request.hidden_results:
+            grouped[result.question_id].append(result)
+        code_by_question = self._split_source_by_question(request.source_code)
+        only_question_id = next(iter(grouped)) if len(grouped) == 1 else None
+        return [
+            QuestionSubmission(
+                question_id=question_id,
+                question_title=items[0].question_title,
+                language=request.language,
+                source_code=code_by_question.get(
+                    question_id,
+                    request.source_code if question_id == only_question_id else "",
+                ),
+                marks=sum(item.points for item in items),
+            )
+            for question_id, items in grouped.items()
+        ]
+
     def _build_question_breakdown(
         self,
-        results: list[HiddenExecutionResult],
-        source_code: str,
-        language: str,
+        request: EvaluationJobCreateRequest,
+        submissions: list[QuestionSubmission],
     ) -> list[QuestionEvaluationBreakdown]:
         grouped: dict[str, list[HiddenExecutionResult]] = defaultdict(list)
-        for result in results:
+        for result in request.hidden_results:
             grouped[result.question_id].append(result)
-        code_by_question = self._split_source_by_question(source_code)
 
         breakdown: list[QuestionEvaluationBreakdown] = []
-        for question_id, items in grouped.items():
+        answered_count = sum(1 for item in submissions if item.source_code.strip())
+        for submission in submissions:
+            question_id = submission.question_id
+            items = grouped.get(question_id, [])
+            if not submission.source_code.strip():
+                breakdown.append(
+                    QuestionEvaluationBreakdown(
+                        question_id=question_id,
+                        question_title=submission.question_title,
+                        language=submission.language,
+                        submitted_code="",
+                        evaluation_status="not_attempted",
+                        passed_count=0,
+                        total_count=0,
+                        earned_points=0,
+                        total_points=submission.marks,
+                        score=0,
+                        assigned_marks=submission.marks,
+                        earned_marks=0,
+                        test_case_score=0,
+                        coding_score=0,
+                        ai_score=0,
+                        ai_quality=None,
+                        difficulty=submission.difficulty,
+                        tags=submission.tags,
+                        problem_statement=submission.problem_statement,
+                        input_format=submission.input_format,
+                        output_format=submission.output_format,
+                        constraints=submission.constraints,
+                        suggested_solution=submission.suggested_solution,
+                        suggested_improvement_notes=submission.suggested_improvement_notes,
+                        mandatory_failed=False,
+                        test_cases=[],
+                    )
+                )
+                continue
+
             total_points = sum(item.points for item in items)
             earned_points = sum(item.points for item in items if item.passed)
-            score = (earned_points / total_points) * 100 if total_points else 0
+            test_case_score = self._test_case_score(items)
+            coding_score = self._coding_score(items)
+            ai_quality = self._resolve_question_ai_quality(
+                request=request,
+                submission=submission,
+                test_case_score=test_case_score,
+                coding_score=coding_score,
+                use_request_quality=answered_count == 1,
+            )
+            score = self._weighted_score(
+                test_case_score,
+                coding_score,
+                ai_quality.score,
+                request.weights,
+            )
+            earned_marks = submission.marks * score / 100
             breakdown.append(
                 QuestionEvaluationBreakdown(
                     question_id=question_id,
-                    question_title=items[0].question_title,
-                    language=language,
-                    submitted_code=code_by_question.get(question_id, source_code),
+                    question_title=submission.question_title,
+                    language=submission.language,
+                    submitted_code=submission.source_code,
+                    evaluation_status="evaluated",
                     passed_count=sum(1 for item in items if item.passed),
                     total_count=len(items),
                     earned_points=round(earned_points, 2),
-                    total_points=round(total_points, 2),
+                    total_points=round(total_points or submission.marks, 2),
                     score=round(score, 2),
+                    assigned_marks=round(submission.marks, 2),
+                    earned_marks=round(earned_marks, 2),
+                    test_case_score=round(test_case_score, 2),
+                    coding_score=round(coding_score, 2),
+                    ai_score=round(ai_quality.score, 2),
+                    ai_quality=ai_quality,
+                    difficulty=submission.difficulty,
+                    tags=submission.tags,
+                    problem_statement=submission.problem_statement,
+                    input_format=submission.input_format,
+                    output_format=submission.output_format,
+                    constraints=submission.constraints,
+                    suggested_solution=submission.suggested_solution,
+                    suggested_improvement_notes=submission.suggested_improvement_notes,
                     mandatory_failed=any(
                         item.mandatory and not item.passed for item in items
                     ),
@@ -479,6 +593,7 @@ class EvaluationService:
                             expected_output=item.expected_output,
                             actual_output=item.actual_output,
                             message=item.message,
+                            case_category=item.case_category,
                         )
                         for item in sorted(
                             items,
@@ -488,6 +603,18 @@ class EvaluationService:
                 )
             )
         return sorted(breakdown, key=lambda item: item.question_title.lower())
+
+    @staticmethod
+    def _marks_weighted_question_score(
+        breakdown: list[QuestionEvaluationBreakdown],
+        field: str,
+        total_marks: float,
+    ) -> float:
+        if total_marks <= 0:
+            return 0
+        return sum(
+            float(getattr(item, field)) * item.assigned_marks for item in breakdown
+        ) / total_marks
 
     @staticmethod
     def _split_source_by_question(source_code: str) -> dict[str, str]:
@@ -566,19 +693,22 @@ class EvaluationService:
             + ai_score * weights.ai_weight
         ) / 100
 
-    def _resolve_ai_quality(
+    def _resolve_question_ai_quality(
         self,
+        *,
         request: EvaluationJobCreateRequest,
+        submission: QuestionSubmission,
         test_case_score: float,
         coding_score: float,
+        use_request_quality: bool,
     ) -> AICodeQualitySignal:
-        if request.ai_quality is not None:
+        if use_request_quality and request.ai_quality is not None:
             return request.ai_quality
         if self._code_quality_evaluator is not None:
             try:
                 return self._code_quality_evaluator.evaluate(
-                    language=request.language,
-                    source_code=request.source_code,
+                    language=submission.language,
+                    source_code=submission.source_code,
                 )
             except Exception as exc:
                 LOGGER.warning(
@@ -588,9 +718,50 @@ class EvaluationService:
                     type(exc).__name__,
                 )
         return self._heuristic_ai_quality(
-            request.source_code,
+            submission.source_code,
             test_case_score,
             coding_score,
+        )
+
+    @staticmethod
+    def _aggregate_ai_quality(
+        breakdown: list[QuestionEvaluationBreakdown],
+        score: float,
+    ) -> AICodeQualitySignal:
+        qualities = [
+            item.ai_quality for item in breakdown if item.ai_quality is not None
+        ]
+        if not qualities:
+            return AICodeQualitySignal(
+                score=0,
+                approach="No answered questions were available for AI code review.",
+                time_complexity="Not evaluated",
+                space_complexity="Not evaluated",
+                readability="Not evaluated",
+                maintainability="Not evaluated",
+                strengths=[],
+                weaknesses=[],
+                improvements=[],
+            )
+
+        def unique_values(attribute: str) -> list[str]:
+            values: list[str] = []
+            for quality in qualities:
+                for value in getattr(quality, attribute):
+                    if value not in values:
+                        values.append(value)
+            return values[:6]
+
+        return AICodeQualitySignal(
+            score=round(score, 2),
+            approach=f"Aggregated from {len(qualities)} question-level code reviews.",
+            time_complexity="See each question's code-quality review.",
+            space_complexity="See each question's code-quality review.",
+            readability="Aggregated across answered questions.",
+            maintainability="Aggregated across answered questions.",
+            strengths=unique_values("strengths"),
+            weaknesses=unique_values("weaknesses"),
+            improvements=unique_values("improvements"),
         )
 
     @staticmethod
@@ -648,9 +819,7 @@ class EvaluationService:
             weaknesses=[
                 "AI review was unavailable; this result uses heuristic analysis."
             ],
-            improvements=[
-                "Re-run the evaluation when the AI reviewer is available."
-            ],
+            improvements=["Re-run the evaluation when the AI reviewer is available."],
         )
 
     def _build_overview(
@@ -701,6 +870,43 @@ class EvaluationService:
             ),
             report_status="ready" if completed else "pending",
             generated_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _candidate_benchmark(
+        candidate: CandidateEvaluationSummary,
+        leaderboard: list[CandidateEvaluationSummary],
+    ) -> CandidateBenchmarkContext:
+        total = len(leaderboard)
+        completion_times = [
+            item.time_taken_seconds
+            for item in leaderboard
+            if item.time_taken_seconds is not None
+        ]
+        average_completion = (
+            round(sum(completion_times) / len(completion_times))
+            if completion_times
+            else None
+        )
+        percentile = None
+        if total:
+            lower_or_equal = sum(
+                1
+                for item in leaderboard
+                if item.scores.final_score <= candidate.scores.final_score
+            )
+            percentile = round(lower_or_equal / total * 100, 1)
+        return CandidateBenchmarkContext(
+            candidate_rank=candidate.rank,
+            total_candidates=total,
+            average_score=round(
+                _average([item.scores.final_score for item in leaderboard]),
+                2,
+            )
+            if leaderboard
+            else None,
+            average_completion_time_seconds=average_completion,
+            percentile=percentile,
         )
 
     def _refresh_ranks(self, assessment_id: str) -> None:
@@ -837,7 +1043,7 @@ def _average(values: list[float | int | None]) -> float:
 @lru_cache
 def get_evaluation_service(
     database_url: str = (
-        "postgresql+psycopg://cap_user:cap_password@localhost:55432/cap_evaluation"
+        "postgresql+psycopg://cap_user:cap_password@localhost:55432/cap_core"
     ),
     report_dir: str = "data/reports",
     seed_demo_data: bool = False,

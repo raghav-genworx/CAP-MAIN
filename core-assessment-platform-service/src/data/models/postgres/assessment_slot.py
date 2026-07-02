@@ -30,6 +30,12 @@ class AssessmentSlotModel(Base):
     instructions_override: Mapped[str] = mapped_column(Text, nullable=False, default="")
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_minutes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=60,
+        server_default="60",
+    )
     timezone_name: Mapped[str] = mapped_column(
         String(80),
         nullable=False,

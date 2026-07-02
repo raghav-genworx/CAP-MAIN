@@ -77,7 +77,6 @@ class CandidateQuestionRecord(BaseModel):
     supported_languages: list[str] = Field(default_factory=list)
     question_order: int
     marks: int
-    time_limit_minutes: int | None = None
     is_mandatory: bool
 
 
@@ -108,6 +107,7 @@ class CandidateAssessmentPortalResponse(BaseModel):
     instructions: str
     duration_minutes: int
     allow_resume: bool
+    proctoring_mode: str
     hidden_feedback_mode: HiddenFeedbackMode
     max_hidden_checks: int
     hidden_check_cooldown_seconds: int

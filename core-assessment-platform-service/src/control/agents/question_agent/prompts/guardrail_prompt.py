@@ -140,6 +140,7 @@ DUPLICATE_QUALITY_GUARDRAILS: tuple[str, ...] = (
 EXACT_SCHEMA_GUARDRAILS: dict[str, tuple[str, ...]] = {
     "problem_statement": PROBLEM_SPEC_GUARDRAILS,
     "constraints": CONSTRAINT_GUARDRAILS,
+    "constraint_validation_script": CONSTRAINT_GUARDRAILS + TEST_CASE_GUARDRAILS,
     "examples": TEST_CASE_GUARDRAILS,
     "hidden_tests": TEST_CASE_GUARDRAILS,
     "solution": SOLUTION_GUARDRAILS,
@@ -157,6 +158,8 @@ def _schema_guardrails(schema_name: str) -> tuple[str, ...]:
         return EXACT_SCHEMA_GUARDRAILS[normalized]
     if normalized.startswith("adversarial_tests_round_"):
         return TEST_CASE_GUARDRAILS
+    if normalized.startswith("constraint_replacement_round_"):
+        return TEST_CASE_GUARDRAILS + CONSTRAINT_GUARDRAILS
     if normalized.startswith("testcase_repair_round_"):
         return TEST_CASE_GUARDRAILS + REPAIR_DECISION_GUARDRAILS
     if normalized.startswith("repair_decision_round_"):

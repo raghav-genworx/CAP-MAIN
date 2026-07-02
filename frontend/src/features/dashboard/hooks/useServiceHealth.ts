@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchCodeExecutionHealth,
   fetchCoreHealth,
-} from "../../../services/healthService";
+} from "../services/healthService";
 import { useAuth } from "../../auth";
 
 export function useServiceHealth() {

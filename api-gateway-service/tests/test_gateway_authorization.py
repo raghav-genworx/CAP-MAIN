@@ -10,9 +10,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+from api.rest.routes.proxy import _proxy_headers, _proxy_media_type
 from config.settings import Settings
 from core.exceptions.gateway import (
     GatewayAuthenticationError,
+    GatewayAuthorizationError,
     UnknownUpstreamServiceError,
 )
 from core.services.gateway_auth_service import GatewayAuthService
@@ -118,7 +120,14 @@ def test_candidate_route_rejects_expired_session() -> None:
 def test_recruiter_route_requires_core_authorized_role() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer firebase-token"
-        return httpx.Response(200, json={"uid": "user-1", "role": "recruiter"})
+        return httpx.Response(
+            200,
+            json={
+                "uid": "user-1",
+                "role": "recruiter",
+                "subscription_status": "free_trial",
+            },
+        )
 
     service = GatewayAuthService(
         _settings(),
@@ -134,6 +143,58 @@ def test_recruiter_route_requires_core_authorized_role() -> None:
         )
     )
 
+
+def test_pending_recruiter_is_sent_to_subscription_on_protected_route() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "uid": "user-1",
+                "role": "recruiter",
+                "subscription_status": "pending",
+            },
+        )
+
+    service = GatewayAuthService(
+        _settings(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GatewayAuthorizationError, match="free trial"):
+        asyncio.run(
+            service.authorize(
+                service_name="core",
+                path="assessments",
+                method="GET",
+                authorization="Bearer firebase-token",
+            )
+        )
+
+
+def test_pending_recruiter_can_activate_subscription() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "uid": "user-1",
+                "role": "recruiter",
+                "subscription_status": "pending",
+            },
+        )
+
+    service = GatewayAuthService(
+        _settings(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    asyncio.run(
+        service.authorize(
+            service_name="core",
+            path="auth/start-free-trial",
+            method="POST",
+            authorization="Bearer firebase-token",
+        )
+    )
 
 def test_proxy_replaces_browser_internal_token() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -163,3 +224,30 @@ def test_proxy_replaces_browser_internal_token() -> None:
         await service.close_proxy_response(client, response)
 
     asyncio.run(exercise())
+
+
+def test_proxy_preserves_event_stream_contract() -> None:
+    service = GatewayService(_settings())
+    upstream_headers = httpx.Headers(
+        {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "private",
+            "x-accel-buffering": "yes",
+            "content-length": "999",
+        }
+    )
+
+    headers = _proxy_headers(
+        service,
+        upstream_headers.get("content-type"),
+        upstream_headers,
+    )
+
+    assert (
+        _proxy_media_type(upstream_headers.get("content-type"))
+        == "text/event-stream"
+    )
+    assert headers["content-type"] == "text/event-stream; charset=utf-8"
+    assert headers["Cache-Control"] == "no-cache, no-transform"
+    assert headers["X-Accel-Buffering"] == "no"
+    assert "content-length" not in {key.lower() for key in headers}

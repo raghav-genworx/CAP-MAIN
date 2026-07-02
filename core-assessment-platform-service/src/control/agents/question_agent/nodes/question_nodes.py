@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .constraint_node import ConstraintNodeMixin
+from .constraint_script_node import ConstraintScriptNodeMixin
 from .duplicate_detection_node import DuplicateDetectionNodeMixin
 from .example_node import ExampleNodeMixin
 from .hidden_test_node import HiddenTestNodeMixin
@@ -21,6 +22,7 @@ class QuestionAgentNodesMixin(
     ConstraintNodeMixin,
     ExampleNodeMixin,
     HiddenTestNodeMixin,
+    ConstraintScriptNodeMixin,
     SolutionNodeMixin,
     ValidationNodeMixin,
     MultiLanguageSolutionNodeMixin,

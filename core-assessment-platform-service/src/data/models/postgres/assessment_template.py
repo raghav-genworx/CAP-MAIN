@@ -47,6 +47,12 @@ class AssessmentTemplateModel(Base):
         default=0,
         server_default="0",
     )
+    difficulty_blueprint: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     show_score_to_candidate: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
@@ -64,7 +70,7 @@ class AssessmentTemplateModel(Base):
     hidden_check_cooldown_seconds: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=30,
+        default=5,
     )
     supported_languages: Mapped[list[str]] = mapped_column(
         JSONB,

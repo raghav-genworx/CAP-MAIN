@@ -105,6 +105,22 @@ class TestCaseConstraintReviewOutput(BaseModel):
     invalid_notes: list[str] = Field(default_factory=list)
 
 
+class ConstraintValidationScriptOutput(BaseModel):
+    """Structured output for executable testcase constraint checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    python_script: str = Field(
+        min_length=20,
+        description=(
+            "Python source code defining validate_testcase(stdin: str, bucket: "
+            "str) -> tuple[bool, str]. The script must not perform file IO, "
+            "network IO, imports, subprocess calls, or top-level work."
+        ),
+    )
+    notes: list[str] = Field(default_factory=list)
+
+
 class SolutionOutput(BaseModel):
     """Structured output for the solution agent."""
 
@@ -135,6 +151,20 @@ class SolutionOutput(BaseModel):
         ),
     )
     notes: list[str] = Field(default_factory=list)
+
+
+class FocusedLanguageSolutionOutput(BaseModel):
+    """Minimal output contract for one non-primary language solution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_code: str = Field(
+        min_length=1,
+        description=(
+            "Complete runnable source code in the single requested language. "
+            "Do not include markdown fences, prose, or pseudocode."
+        ),
+    )
 
 
 class RepairDecisionOutput(BaseModel):
@@ -193,6 +223,7 @@ class QuestionGenerationState(TypedDict, total=False):
     title_hint: str
     focus_tags: list[str]
     reference_language: str
+    target_language: str
     generation_settings: QuestionGenerationSettings
     existing_question_titles: list[str]
     existing_question_tags: list[str]
@@ -216,6 +247,8 @@ class QuestionGenerationState(TypedDict, total=False):
     difficulty_source: str
     sample_test_cases: list[TestCase]
     hidden_test_cases: list[TestCase]
+    constraint_validation_script: str
+    constraint_validation_warnings: list[str]
     reference_solution: str
     reference_solutions: dict[str, ReferenceSolutionArtifact]
     supported_languages: list[str]
@@ -237,8 +270,10 @@ class QuestionGenerationState(TypedDict, total=False):
 
 __all__ = [
     "ConstraintOutput",
+    "ConstraintValidationScriptOutput",
     "DuplicateOutput",
     "ExampleOutput",
+    "FocusedLanguageSolutionOutput",
     "HiddenTestOutput",
     "MetadataOutput",
     "ProblemStatementOutput",

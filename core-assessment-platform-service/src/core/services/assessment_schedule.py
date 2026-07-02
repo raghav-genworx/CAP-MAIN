@@ -1,7 +1,7 @@
 """Server-authoritative normalization for assessment test schedules."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.exceptions.assessment import AssessmentValidationError
@@ -24,6 +24,8 @@ def normalize_assessment_schedule(
     start_at: datetime,
     end_at: datetime,
     timezone_name: str,
+    duration_minutes: int = 1,
+    reject_past_start: bool = False,
 ) -> NormalizedAssessmentSchedule:
     """Validate and normalize an assessment slot schedule."""
 
@@ -31,8 +33,15 @@ def normalize_assessment_schedule(
     _require_aware_datetime(end_at, "end_at")
     start_utc = start_at.astimezone(UTC)
     end_utc = end_at.astimezone(UTC)
-    if end_utc <= start_utc:
-        raise AssessmentValidationError("Slot end time must be after the start time")
+    now = datetime.now(UTC)
+    if reject_past_start and start_utc < now:
+        raise AssessmentValidationError("Test start time cannot be in the past")
+    minimum_end = start_utc + timedelta(minutes=duration_minutes)
+    if end_utc < minimum_end:
+        raise AssessmentValidationError(
+            f"Test end time must be at least {duration_minutes} minutes "
+            "after the start time"
+        )
 
     normalized_timezone_name = timezone_name.strip() or DEFAULT_TIMEZONE_NAME
     try:

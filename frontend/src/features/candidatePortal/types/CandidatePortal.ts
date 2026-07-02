@@ -33,7 +33,6 @@ export interface CandidateQuestion {
   supported_languages: string[];
   question_order: number;
   marks: number;
-  time_limit_minutes: number | null;
   is_mandatory: boolean;
 }
 
@@ -58,6 +57,7 @@ export interface CandidateAssessmentPortal {
   instructions: string;
   duration_minutes: number;
   allow_resume: boolean;
+  proctoring_mode: "none" | "basic" | "strict";
   hidden_feedback_mode: "none" | "summary";
   max_hidden_checks: number;
   hidden_check_cooldown_seconds: number;
@@ -119,6 +119,13 @@ export interface CandidateHiddenCheckResponse {
   total_count: number;
   remaining_attempts: number | null;
   cooldown_remaining_seconds: number;
+  results: Array<{
+    index: number;
+    status: string;
+    passed: boolean;
+    execution_time: string;
+    error_type: string;
+  }>;
 }
 
 export interface CandidateSubmitPayload {

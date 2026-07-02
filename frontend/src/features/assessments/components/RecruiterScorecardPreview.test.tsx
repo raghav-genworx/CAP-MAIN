@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { CandidateEvaluationSummary } from "../../codeEvaluation/types/EvaluationResult";
+import type { CandidateEvaluationSummary } from "../../codeEvaluation";
 import { RecruiterScorecardPreview } from "./RecruiterScorecardPreview";
 
 const candidate: CandidateEvaluationSummary = {

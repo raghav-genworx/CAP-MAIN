@@ -52,6 +52,8 @@ def slot_record_from_model(
 
     current = _utc_instant(now)
     status = effective_slot_status(model, now=current)
+    if not getattr(model, "duration_minutes", None):
+        model.duration_minutes = 60
     record = AssessmentSlotRecord.model_validate(model)
     return record.model_copy(
         update={
@@ -83,6 +85,7 @@ def slot_summary_from_model(
         title=model.title,
         start_at=model.start_at,
         end_at=model.end_at,
+        duration_minutes=model.duration_minutes or 60,
         timezone_name=model.timezone_name,
         timezone_offset_minutes=model.timezone_offset_minutes,
         status=SlotStatus(model.status),

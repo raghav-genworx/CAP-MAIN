@@ -16,7 +16,6 @@ export interface AssessmentQuestionRecord {
   tags: string[];
   question_order: number;
   marks: number;
-  time_limit_minutes: number | null;
   is_mandatory: boolean;
   supported_languages: string[];
 }
@@ -35,6 +34,7 @@ export interface Assessment {
   allow_resume: boolean;
   shuffle_questions: boolean;
   question_count_per_candidate: number;
+  difficulty_blueprint?: Array<"easy" | "medium" | "hard">;
   show_score_to_candidate: boolean;
   proctoring_mode: string;
   hidden_feedback_mode: HiddenFeedbackMode;
@@ -69,6 +69,7 @@ export interface AssessmentCreatePayload {
   allow_resume: boolean;
   shuffle_questions: boolean;
   question_count_per_candidate: number;
+  difficulty_blueprint: Array<"easy" | "medium" | "hard">;
   show_score_to_candidate: boolean;
   proctoring_mode: string;
   hidden_feedback_mode: HiddenFeedbackMode;
@@ -82,7 +83,6 @@ export interface AssessmentQuestionAssignment {
   question_id: string;
   question_order: number;
   marks: number;
-  time_limit_minutes: number | null;
   is_mandatory: boolean;
 }
 
@@ -98,6 +98,7 @@ export interface AssessmentSlot {
   instructions_override: string;
   start_at: string;
   end_at: string;
+  duration_minutes?: number;
   timezone_name: string;
   timezone_offset_minutes: number;
   status: SlotStatus;
@@ -122,6 +123,7 @@ export interface AssessmentSlotCreatePayload {
   title: string;
   start_at: string;
   end_at: string;
+  duration_minutes: number;
   timezone_name: string;
   timezone_offset_minutes: number;
   instructions_override: string;

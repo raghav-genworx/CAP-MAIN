@@ -12,6 +12,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
+EVALUATION_SCHEMA = "evaluation"
+
 revision: str = "20260627_0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
@@ -19,6 +21,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
     op.create_table(
         "evaluation_jobs",
         sa.Column("job_id", sa.String(length=80), nullable=False),
@@ -32,21 +35,25 @@ def upgrade() -> None:
         sa.Column("request_json", postgresql.JSONB(astext_type=sa.Text())),
         sa.Column("result_json", postgresql.JSONB(astext_type=sa.Text())),
         sa.PrimaryKeyConstraint("job_id"),
+        schema=EVALUATION_SCHEMA,
     )
     op.create_index(
         "ix_evaluation_jobs_assessment_id",
         "evaluation_jobs",
         ["assessment_id"],
+        schema=EVALUATION_SCHEMA,
     )
     op.create_index(
         "ix_evaluation_jobs_candidate_assessment",
         "evaluation_jobs",
         ["candidate_assessment_id"],
+        schema=EVALUATION_SCHEMA,
     )
     op.create_index(
         "ix_evaluation_jobs_status_created",
         "evaluation_jobs",
         ["status", "created_at"],
+        schema=EVALUATION_SCHEMA,
     )
     op.create_table(
         "assessment_reports",
@@ -55,15 +62,25 @@ def upgrade() -> None:
         sa.Column("report_status", sa.String(length=20), nullable=False),
         sa.Column("generated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("assessment_id"),
+        schema=EVALUATION_SCHEMA,
     )
 
 
 def downgrade() -> None:
-    op.drop_table("assessment_reports")
-    op.drop_index("ix_evaluation_jobs_status_created", table_name="evaluation_jobs")
+    op.drop_table("assessment_reports", schema=EVALUATION_SCHEMA)
+    op.drop_index(
+        "ix_evaluation_jobs_status_created",
+        table_name="evaluation_jobs",
+        schema=EVALUATION_SCHEMA,
+    )
     op.drop_index(
         "ix_evaluation_jobs_candidate_assessment",
         table_name="evaluation_jobs",
+        schema=EVALUATION_SCHEMA,
     )
-    op.drop_index("ix_evaluation_jobs_assessment_id", table_name="evaluation_jobs")
-    op.drop_table("evaluation_jobs")
+    op.drop_index(
+        "ix_evaluation_jobs_assessment_id",
+        table_name="evaluation_jobs",
+        schema=EVALUATION_SCHEMA,
+    )
+    op.drop_table("evaluation_jobs", schema=EVALUATION_SCHEMA)

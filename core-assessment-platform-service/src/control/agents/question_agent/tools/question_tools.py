@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
 import re
+import subprocess
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from core.services.execution_adapter_service import ExecutionAdapterService
@@ -15,7 +23,9 @@ from schemas.question_bank import (
 )
 
 from ..prompts.adversarial_test_prompt import build_adversarial_test_prompt
+from ..prompts.constraint_replacement_prompt import build_constraint_replacement_prompt
 from ..prompts.constraint_review_prompt import build_constraint_review_prompt
+from ..prompts.constraint_script_prompt import build_constraint_script_prompt
 from ..prompts.question_prompts import (
     ADVERSARIAL_TESTS_PER_ROUND,
     ADVERSARIAL_VALIDATION_ROUNDS,
@@ -24,6 +34,7 @@ from ..prompts.repair_decision_prompt import build_repair_decision_prompt
 from ..prompts.solution_repair_prompt import build_solution_repair_prompt
 from ..prompts.testcase_repair_prompt import build_testcase_repair_prompt
 from ..states.question_state import (
+    ConstraintValidationScriptOutput,
     HiddenTestOutput,
     QuestionGenerationState,
     RepairDecisionOutput,
@@ -34,6 +45,35 @@ from ..states.question_state import (
 from ..utils.question_utils import QuestionAgentUtilsMixin
 
 LOGGER = logging.getLogger(__name__)
+CONSTRAINT_SCRIPT_REPLACEMENT_ROUNDS = 2
+CONSTRAINT_SCRIPT_TIMEOUT_SECONDS = 2.0
+
+
+@dataclass
+class _ValidationProgressContext:
+    callback: Callable[[dict[str, Any]], None]
+    validation_pass: int = 0
+
+
+_VALIDATION_PROGRESS_CONTEXT: ContextVar[_ValidationProgressContext | None] = (
+    ContextVar("question_validation_progress", default=None)
+)
+
+
+@contextmanager
+def validation_progress_events(
+    callback: Callable[[dict[str, Any]], None],
+) -> Iterator[None]:
+    """Publish individual execution results for a streamed validation node."""
+
+    token = _VALIDATION_PROGRESS_CONTEXT.set(
+        _ValidationProgressContext(callback=callback),
+    )
+    try:
+        yield
+    finally:
+        _VALIDATION_PROGRESS_CONTEXT.reset(token)
+
 
 _SIMPLE_RANGE_RE = re.compile(
     r"(?P<lower>-?\d+(?:\s*\^\s*\d+)?)\s*<=\s*"
@@ -47,6 +87,375 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
     """Execution validation, repair, and testcase helper routines."""
 
     _execution_adapter: ExecutionAdapterService
+
+    def _generate_constraint_validation_script(
+        self,
+        state: QuestionGenerationState,
+    ) -> str:
+        """Generate and contract-check a Python testcase constraint validator."""
+
+        system_prompt, user_prompt = build_constraint_script_prompt(state)
+        model = self._structured_completion(
+            schema_name="constraint_validation_script",
+            schema_model=ConstraintValidationScriptOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        script = self._sanitize_reference_solution(model.python_script)
+        contract_error = self._constraint_script_contract_error(script)
+        if contract_error:
+            raise ValueError(contract_error)
+        return script
+
+    def _repair_constraint_invalid_test_cases(
+        self,
+        *,
+        state: QuestionGenerationState,
+        script: str,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        sample_rejections: list[dict[str, Any]],
+        hidden_rejections: list[dict[str, Any]],
+    ) -> tuple[list[TestCase], list[TestCase], list[str], int]:
+        """Generate replacements and accept only rows that pass the script."""
+
+        warnings: list[str] = []
+        sample_indexes = {int(item["index"]) for item in sample_rejections}
+        hidden_indexes = {int(item["index"]) for item in hidden_rejections}
+        valid_sample_tests = [
+            test_case
+            for index, test_case in enumerate(sample_tests, start=1)
+            if index not in sample_indexes
+        ]
+        valid_hidden_tests = [
+            test_case
+            for index, test_case in enumerate(hidden_tests, start=1)
+            if index not in hidden_indexes
+        ]
+        sample_replacements: list[TestCase] = []
+        hidden_replacements: list[TestCase] = []
+        seen_inputs = {
+            test_case.input.strip()
+            for test_case in [*valid_sample_tests, *valid_hidden_tests]
+            if test_case.input.strip()
+        }
+        all_rejections = [*sample_rejections, *hidden_rejections]
+
+        for attempt in range(1, CONSTRAINT_SCRIPT_REPLACEMENT_ROUNDS + 1):
+            if len(sample_replacements) >= len(sample_indexes) and len(
+                hidden_replacements
+            ) >= len(hidden_indexes):
+                break
+            model = self._generate_constraint_replacement_candidates(
+                state=state,
+                invalid_sample_cases=sample_rejections,
+                invalid_hidden_cases=hidden_rejections,
+                valid_sample_cases=self._prompt_cases(valid_sample_tests),
+                valid_hidden_cases=self._prompt_cases(valid_hidden_tests),
+                script_rejections=all_rejections,
+                attempt=attempt,
+            )
+            for candidate in self._complete_test_cases(model.sample_test_cases):
+                if len(sample_replacements) >= len(sample_indexes):
+                    break
+                accepted = self._accept_constraint_replacement(
+                    script=script,
+                    candidate=candidate.model_copy(update={"is_sample": True}),
+                    bucket="sample",
+                    seen_inputs=seen_inputs,
+                )
+                if accepted:
+                    sample_replacements.append(accepted)
+            for candidate in self._complete_test_cases(model.hidden_test_cases):
+                if len(hidden_replacements) >= len(hidden_indexes):
+                    break
+                accepted = self._accept_constraint_replacement(
+                    script=script,
+                    candidate=candidate.model_copy(update={"is_sample": False}),
+                    bucket="hidden",
+                    seen_inputs=seen_inputs,
+                )
+                if accepted:
+                    hidden_replacements.append(accepted)
+
+        repaired_sample_tests = self._replace_failed_test_cases(
+            sample_tests,
+            sample_indexes,
+            sample_replacements,
+        )
+        repaired_hidden_tests = self._replace_failed_test_cases(
+            hidden_tests,
+            hidden_indexes,
+            hidden_replacements,
+        )
+        replaced_count = min(len(sample_indexes), len(sample_replacements)) + min(
+            len(hidden_indexes),
+            len(hidden_replacements),
+        )
+        missing_count = len(sample_indexes) + len(hidden_indexes) - replaced_count
+        if missing_count:
+            warnings.append(
+                (
+                    "Constraint script rejected testcase inputs, but AI generated "
+                    f"only {replaced_count} valid replacement(s); {missing_count} "
+                    "row(s) still need recruiter review."
+                ),
+            )
+        return repaired_sample_tests, repaired_hidden_tests, warnings, replaced_count
+
+    def _generate_constraint_replacement_candidates(
+        self,
+        *,
+        state: QuestionGenerationState,
+        invalid_sample_cases: list[dict[str, Any]],
+        invalid_hidden_cases: list[dict[str, Any]],
+        valid_sample_cases: list[dict[str, Any]],
+        valid_hidden_cases: list[dict[str, Any]],
+        script_rejections: list[dict[str, Any]],
+        attempt: int,
+    ) -> TestCaseRepairOutput:
+        system_prompt, user_prompt = build_constraint_replacement_prompt(
+            state,
+            invalid_sample_cases=invalid_sample_cases,
+            invalid_hidden_cases=invalid_hidden_cases,
+            valid_sample_cases=valid_sample_cases,
+            valid_hidden_cases=valid_hidden_cases,
+            script_rejections=script_rejections,
+            attempt=attempt,
+        )
+        model = self._structured_completion(
+            schema_name=f"constraint_replacement_round_{attempt}",
+            schema_model=TestCaseRepairOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return TestCaseRepairOutput.model_validate(model)
+
+    def _accept_constraint_replacement(
+        self,
+        *,
+        script: str,
+        candidate: TestCase,
+        bucket: Literal["sample", "hidden"],
+        seen_inputs: set[str],
+    ) -> TestCase | None:
+        input_key = candidate.input.strip()
+        if not input_key or input_key in seen_inputs:
+            return None
+        result = self._run_constraint_script_for_case(
+            script=script,
+            test_case=candidate,
+            bucket=bucket,
+            index=0,
+        )
+        if not result["valid"]:
+            return None
+        seen_inputs.add(input_key)
+        return candidate
+
+    def _run_constraint_script_for_cases(
+        self,
+        *,
+        script: str,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for index, test_case in enumerate(sample_tests, start=1):
+            results.append(
+                self._run_constraint_script_for_case(
+                    script=script,
+                    test_case=test_case,
+                    bucket="sample",
+                    index=index,
+                ),
+            )
+        for index, test_case in enumerate(hidden_tests, start=1):
+            results.append(
+                self._run_constraint_script_for_case(
+                    script=script,
+                    test_case=test_case,
+                    bucket="hidden",
+                    index=index,
+                ),
+            )
+        return results
+
+    def _run_constraint_script_for_case(
+        self,
+        *,
+        script: str,
+        test_case: TestCase,
+        bucket: Literal["sample", "hidden"],
+        index: int,
+    ) -> dict[str, Any]:
+        payload = json.dumps({"stdin": test_case.input, "bucket": bucket})
+        runner = (
+            f"{script}\n\n"
+            "import json as __constraint_json\n"
+            f"__payload = __constraint_json.loads({payload!r})\n"
+            "try:\n"
+            "    __result = validate_testcase(\n"
+            "        __payload['stdin'],\n"
+            "        __payload['bucket'],\n"
+            "    )\n"
+            "    __valid = bool(__result[0])\n"
+            "    __reason = str(__result[1] if len(__result) > 1 else '')\n"
+            "except BaseException as __exc:\n"
+            "    __valid = False\n"
+            "    __reason = f'validator error: {type(__exc).__name__}'\n"
+            "print(__constraint_json.dumps({'valid': __valid, 'reason': __reason}))\n"
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", runner],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=CONSTRAINT_SCRIPT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "bucket": bucket,
+                "index": index,
+                "testcase": test_case.model_dump(mode="json"),
+                "valid": False,
+                "reason": "constraint validator timed out",
+            }
+        if completed.returncode != 0:
+            return {
+                "bucket": bucket,
+                "index": index,
+                "testcase": test_case.model_dump(mode="json"),
+                "valid": False,
+                "reason": "constraint validator failed",
+            }
+        try:
+            parsed = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            parsed = {"valid": False, "reason": "constraint validator gave no result"}
+        return {
+            "bucket": bucket,
+            "index": index,
+            "testcase": test_case.model_dump(mode="json"),
+            "valid": bool(parsed.get("valid")),
+            "reason": str(parsed.get("reason") or ""),
+        }
+
+    @staticmethod
+    def _constraint_script_contract_error(script: str) -> str:
+        if not script.strip():
+            return "Constraint validation script is empty."
+        try:
+            tree = ast.parse(script)
+        except SyntaxError as exc:
+            return f"Constraint validation script has invalid syntax: {exc.msg}."
+
+        function_names = {
+            node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        if "validate_testcase" not in function_names:
+            return "Constraint validation script must define validate_testcase."
+        disallowed_top_level = [
+            node for node in tree.body if not isinstance(node, ast.FunctionDef)
+        ]
+        if disallowed_top_level:
+            return "Constraint validation script must not perform top-level work."
+
+        allowed_call_names = {
+            *function_names,
+            "abs",
+            "all",
+            "any",
+            "bool",
+            "dict",
+            "enumerate",
+            "float",
+            "int",
+            "len",
+            "list",
+            "map",
+            "max",
+            "min",
+            "range",
+            "set",
+            "sorted",
+            "str",
+            "sum",
+            "tuple",
+            "zip",
+        }
+        allowed_method_names = {
+            "append",
+            "count",
+            "endswith",
+            "extend",
+            "get",
+            "isdigit",
+            "join",
+            "lower",
+            "lstrip",
+            "replace",
+            "rstrip",
+            "split",
+            "startswith",
+            "strip",
+            "upper",
+        }
+        forbidden_nodes = (
+            ast.AsyncFunctionDef,
+            ast.ClassDef,
+            ast.Delete,
+            ast.Global,
+            ast.Import,
+            ast.ImportFrom,
+            ast.Nonlocal,
+            ast.Raise,
+            ast.With,
+        )
+        forbidden_names = {
+            "__import__",
+            "breakpoint",
+            "compile",
+            "eval",
+            "exec",
+            "globals",
+            "input",
+            "locals",
+            "open",
+            "print",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, forbidden_nodes):
+                return (
+                    "Constraint validation script contains unsupported Python "
+                    f"syntax: {type(node).__name__}."
+                )
+            if isinstance(node, ast.Name) and node.id in forbidden_names:
+                return f"Constraint validation script uses a forbidden name: {node.id}."
+            if isinstance(node, ast.Attribute) and (
+                node.attr.startswith("__") or node.attr not in allowed_method_names
+            ):
+                return (
+                    "Constraint validation script uses an unsupported attribute: "
+                    f"{node.attr}."
+                )
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    if node.func.id not in allowed_call_names:
+                        return (
+                            "Constraint validation script calls unsupported "
+                            f"function: {node.func.id}."
+                        )
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr not in allowed_method_names:
+                        return (
+                            "Constraint validation script calls unsupported "
+                            f"method: {node.func.attr}."
+                        )
+                else:
+                    return "Constraint validation script has an unsafe call."
+        return ""
 
     def _run_adversarial_solution_loop(
         self,
@@ -195,8 +604,20 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 )
                 rounds.append(round_status)
                 if repaired_report.failed_count > 0:
-                    final_report = repaired_report.model_copy(
-                        update={"rounds": rounds},
+                    (
+                        sample_tests,
+                        hidden_tests,
+                        final_report,
+                        rounds,
+                    ) = self._run_final_testcase_repair_if_needed(
+                        state=state,
+                        source_code=source_code,
+                        language=language,
+                        validation_report=repaired_report,
+                        sample_tests=sample_tests,
+                        hidden_tests=hidden_tests,
+                        rounds=rounds,
+                        round_number=round_number + 1,
                     )
                     return {
                         "reference_solution": source_code,
@@ -217,12 +638,106 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             time_limit_seconds=state.get("execution_time_limit_seconds"),
             memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
         )
+        if final_report.failed_count > 0:
+            (
+                sample_tests,
+                hidden_tests,
+                final_report,
+                rounds,
+            ) = self._run_final_testcase_repair_if_needed(
+                state=state,
+                source_code=source_code,
+                language=language,
+                validation_report=final_report,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+                rounds=rounds,
+                round_number=ADVERSARIAL_VALIDATION_ROUNDS + 1,
+            )
         return {
             "reference_solution": source_code,
             "sample_test_cases": sample_tests,
             "hidden_test_cases": hidden_tests,
             "solution_validation": final_report,
         }
+
+    def _run_final_testcase_repair_if_needed(
+        self,
+        *,
+        state: QuestionGenerationState,
+        source_code: str,
+        language: str,
+        validation_report: SolutionValidationReport,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        rounds: list[SolutionValidationRound],
+        round_number: int,
+    ) -> tuple[
+        list[TestCase],
+        list[TestCase],
+        SolutionValidationReport,
+        list[SolutionValidationRound],
+    ]:
+        if validation_report.failed_count == 0:
+            return sample_tests, hidden_tests, validation_report, rounds
+        if not self._failures_look_like_expected_output_mismatch(validation_report):
+            return (
+                sample_tests,
+                hidden_tests,
+                validation_report.model_copy(update={"rounds": rounds}),
+                rounds,
+            )
+
+        final_round_number = min(round_number, ADVERSARIAL_VALIDATION_ROUNDS + 1)
+        repaired_sample_tests, repaired_hidden_tests = self._repair_failed_test_cases(
+            state=state,
+            source_code=source_code,
+            validation_report=validation_report,
+            sample_tests=sample_tests,
+            hidden_tests=hidden_tests,
+            round_number=final_round_number,
+        )
+        repaired_report = self._validate_source_against_tests(
+            language=language,
+            source_code=source_code,
+            sample_tests=repaired_sample_tests,
+            hidden_tests=repaired_hidden_tests,
+            rounds=[],
+            time_limit_seconds=state.get("execution_time_limit_seconds"),
+            memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+        )
+        final_round = SolutionValidationRound(
+            round_number=final_round_number,
+            status=(
+                "testcase_repaired"
+                if repaired_report.failed_count == 0
+                else "failed"
+            ),
+            summary=repaired_report.summary,
+            challenger_summary=(
+                "Final testcase refinement after validation still showed "
+                "expected-output mismatches."
+            ),
+            repair_summary=(
+                "Recomputed failed testcase expected outputs and validated "
+                "the same reference solution again."
+            ),
+            repair_target="testcase",
+            decision_summary=(
+                "Program execution produced actual output without compile or "
+                "runtime failure, so the final pass refined testcase outputs."
+            ),
+            passed_count=repaired_report.passed_count,
+            failed_count=repaired_report.failed_count,
+            results=repaired_report.results,
+        )
+        next_rounds = [*rounds, final_round]
+        return (
+            repaired_sample_tests,
+            repaired_hidden_tests,
+            repaired_report.model_copy(update={"rounds": next_rounds}),
+            next_rounds,
+        )
 
     def _generate_adversarial_test_cases(
         self,
@@ -794,7 +1309,42 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             )
         runner_notes = self._runner_contract_notes(language, source_code)
         results: list[SolutionValidationCaseResult] = []
-        if sample_tests:
+        progress_context = _VALIDATION_PROGRESS_CONTEXT.get()
+        if progress_context is not None:
+            progress_context.validation_pass += 1
+            validation_pass = progress_context.validation_pass
+            total_cases = len(sample_tests) + len(hidden_tests)
+            results.extend(
+                self._execute_streamed_validation_cases(
+                    progress_context=progress_context,
+                    validation_pass=validation_pass,
+                    bucket="sample",
+                    test_cases=sample_tests,
+                    source_code=source_code,
+                    language=language,
+                    run_type="sample_run",
+                    total_cases=total_cases,
+                    overall_offset=0,
+                    time_limit_seconds=time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
+                )
+            )
+            results.extend(
+                self._execute_streamed_validation_cases(
+                    progress_context=progress_context,
+                    validation_pass=validation_pass,
+                    bucket="hidden",
+                    test_cases=hidden_tests,
+                    source_code=source_code,
+                    language=language,
+                    run_type="final_hidden",
+                    total_cases=total_cases,
+                    overall_offset=len(sample_tests),
+                    time_limit_seconds=time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
+                )
+            )
+        elif sample_tests:
             sample_results, _, _ = self._execution_adapter.execute_batch(
                 source_code=source_code,
                 language=language,
@@ -821,7 +1371,7 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                         memory_kb=result.memory_kb,
                     )
                 )
-        if hidden_tests:
+        if progress_context is None and hidden_tests:
             hidden_results, _, _ = self._execution_adapter.execute_batch(
                 source_code=source_code,
                 language=language,
@@ -874,5 +1424,152 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             rounds=rounds,
         )
 
+    def _execute_streamed_validation_cases(
+        self,
+        *,
+        progress_context: _ValidationProgressContext,
+        validation_pass: int,
+        bucket: Literal["sample", "hidden"],
+        test_cases: list[TestCase],
+        source_code: str,
+        language: str,
+        run_type: str,
+        total_cases: int,
+        overall_offset: int,
+        time_limit_seconds: float | None,
+        memory_limit_kb: int | None,
+    ) -> list[SolutionValidationCaseResult]:
+        """Execute and publish one validation case at a time for live SSE updates."""
 
-__all__ = ["QuestionAgentToolsMixin"]
+        case_results: list[SolutionValidationCaseResult] = []
+        bucket_label = "Sample" if bucket == "sample" else "Hidden"
+        for index, test_case in enumerate(test_cases, start=1):
+            overall_index = overall_offset + index
+            base_event = {
+                "validation_pass": validation_pass,
+                "test_bucket": bucket,
+                "test_index": index,
+                "bucket_total": len(test_cases),
+                "overall_index": overall_index,
+                "overall_total": total_cases,
+                "test_language": language,
+                "test_input": test_case.input,
+                "expected_output": test_case.expected_output,
+            }
+            progress_context.callback(
+                {
+                    **base_event,
+                    "type": "validation_case_start",
+                    "message": (
+                        f"Running {bucket_label.lower()} test {index} of "
+                        f"{len(test_cases)}."
+                    ),
+                    "test_outcome": "running",
+                    "test_status": "Running",
+                }
+            )
+            try:
+                raw_results, _, _ = self._execution_adapter.execute_batch(
+                    source_code=source_code,
+                    language=language,
+                    test_cases=[test_case],
+                    run_type=run_type,
+                    time_limit_seconds=time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
+                )
+            except Exception as exc:
+                progress_context.callback(
+                    {
+                        **base_event,
+                        "type": "validation_case_result",
+                        "message": f"{bucket_label} test {index} could not run.",
+                        "test_outcome": "error",
+                        "test_status": "Execution error",
+                        "actual_output": "",
+                        "error_message": str(exc),
+                    }
+                )
+                raise
+
+            if not raw_results:
+                case_result = SolutionValidationCaseResult(
+                    bucket=bucket,
+                    index=index,
+                    passed=False,
+                    status="Execution Error",
+                    stdin=test_case.input,
+                    expected_output=test_case.expected_output,
+                    message="Execution service returned no result for this test case.",
+                )
+            else:
+                result = raw_results[0]
+                case_result = SolutionValidationCaseResult(
+                    bucket=bucket,
+                    index=index,
+                    passed=result.passed,
+                    status=result.status,
+                    stdin=result.input,
+                    expected_output=result.expected_output,
+                    actual_output=result.actual_output,
+                    stderr=result.stderr,
+                    compile_output=result.compile_output,
+                    message=result.message,
+                    token=result.token,
+                    execution_time=result.execution_time,
+                    memory_kb=result.memory_kb,
+                )
+            case_results.append(case_result)
+            outcome = self._validation_case_outcome(case_result)
+            progress_context.callback(
+                {
+                    **base_event,
+                    "type": "validation_case_result",
+                    "message": (
+                        f"{bucket_label} test {index} passed."
+                        if outcome == "passed"
+                        else (
+                            f"{bucket_label} test {index} returned a wrong answer."
+                            if outcome == "wrong"
+                            else f"{bucket_label} test {index} returned an error."
+                        )
+                    ),
+                    "test_outcome": outcome,
+                    "test_status": case_result.status,
+                    "actual_output": case_result.actual_output,
+                    "error_message": (
+                        case_result.message
+                        or case_result.stderr
+                        or case_result.compile_output
+                    ),
+                }
+            )
+        return case_results
+
+    @staticmethod
+    def _validation_case_outcome(
+        result: SolutionValidationCaseResult,
+    ) -> Literal["passed", "wrong", "error"]:
+        if result.passed:
+            return "passed"
+        status = result.status.strip().lower()
+        if (
+            result.stderr.strip()
+            or result.compile_output.strip()
+            or any(
+                marker in status
+                for marker in (
+                    "error",
+                    "exception",
+                    "time limit",
+                    "memory limit",
+                    "runtime",
+                    "compilation",
+                    "internal",
+                )
+            )
+        ):
+            return "error"
+        return "wrong"
+
+
+__all__ = ["QuestionAgentToolsMixin", "validation_progress_events"]
