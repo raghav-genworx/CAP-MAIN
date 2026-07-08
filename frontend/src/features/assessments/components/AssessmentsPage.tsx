@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   Activity,
@@ -8,16 +8,20 @@ import {
   FileText,
   Play,
   Plus,
+  Redo2,
   Save,
   Sparkles,
   Trash2,
+  Undo2,
   Wand2,
+  X,
 } from "lucide-react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
 import { useAuth } from "../../auth";
+import { AgentRunOverlay, StepCard } from "./QuestionBuilderPanels";
 import {
   useBulkImportQuestionBankQuestions,
   useCreateQuestionGroup,
@@ -33,23 +37,35 @@ import {
   useValidateQuestionBankDraft,
 } from "../hooks/useQuestionBank";
 import type {
+  AnswerValidationMode,
   DifficultyLevel,
   QuestionBulkImportResponse,
   QuestionCreatePayload,
   QuestionDraftRefinementResponse,
-  QuestionGenerationSettings,
   QuestionAIDraftProgressEvent,
   QuestionAIDraftResponse,
   QuestionGroupRecord,
   QuestionGroupStatus,
   QuestionRecord,
   QuestionStatus,
+  QuestionVisibility,
   ReferenceSolutionArtifact,
   SolutionValidationReport,
   SolutionValidationCaseResult,
   TestCase,
   ValidationStatus,
 } from "../types/QuestionBank";
+import { languageDisplayName } from "../utils/questionLanguage";
+import {
+  appendQuestionGenerationProgress,
+  clearQuestionGenerationSession,
+  completeQuestionGenerationSession,
+  failQuestionGenerationSession,
+  getQuestionGenerationSession,
+  startQuestionGenerationSession,
+  subscribeQuestionGenerationSession,
+  type QuestionGenerationSettingsSnapshot,
+} from "../services/questionGenerationSession";
 
 type DashboardView = "questions" | "groups";
 type GroupSideTab = "selected" | "groups";
@@ -71,10 +87,7 @@ type DraftScope =
   | "metadata";
 type BusyScope = DraftScope | "validation";
 
-interface GenerationSettingsState
-  extends Omit<QuestionGenerationSettings, "topics" | "supported_languages"> {
-  topics_text: string;
-}
+type GenerationSettingsState = QuestionGenerationSettingsSnapshot;
 
 interface ActivityEntry {
   label: string;
@@ -108,6 +121,15 @@ interface AiPromptCopy {
 type TestBucket = "sample_test_cases" | "hidden_test_cases";
 type ValidationBucket = "sample" | "hidden";
 
+interface TestCaseEditorState {
+  bucket: TestBucket;
+  index: number;
+  draft: TestCase;
+  originalResult: SolutionValidationCaseResult | null;
+  undoStack: TestCase[];
+  redoStack: TestCase[];
+}
+
 interface PromptContextSource {
   label: string;
   value: string;
@@ -122,15 +144,60 @@ interface FieldToast {
   tone: FieldToastTone;
 }
 
+function fieldToastTitle(toast: FieldToast) {
+  for (const title of [
+    "Security alert",
+    "Safety alert",
+    "Data sanitation alert",
+  ]) {
+    if (toast.message.includes(`${title}:`)) {
+      return title;
+    }
+  }
+  return toast.tone === "error" ? "Error" : "Check this";
+}
+
 interface LanguageGenerationOptions {
   baseDraft?: QuestionCreatePayload;
   requestedLanguages?: string[];
   progressStart?: number;
   progressSpan?: number;
   appendFinalCompleteEvent?: boolean;
+  signal?: AbortSignal;
 }
 
 const AVAILABLE_LANGUAGES = ["python", "java", "cpp", "c"] as const;
+const ANSWER_VALIDATION_OPTIONS: Array<{
+  value: AnswerValidationMode;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "exact",
+    label: "Exact output",
+    detail: "Candidate output must match the expected output after safe whitespace normalization.",
+  },
+  {
+    value: "unordered",
+    label: "Unordered tokens",
+    detail: "The same whitespace-separated tokens may appear in any order.",
+  },
+  {
+    value: "floating",
+    label: "Floating tolerance",
+    detail: "Numeric outputs are accepted within a small tolerance.",
+  },
+  {
+    value: "multiple_valid",
+    label: "Multiple valid answers",
+    detail: "A custom checker accepts any output that satisfies the testcase.",
+  },
+  {
+    value: "constructive",
+    label: "Constructive checker",
+    detail: "A custom checker validates any constructed answer against the rules.",
+  },
+];
 const BULK_IMPORT_COLUMNS = [
   "title",
   "problem_statement",
@@ -148,6 +215,9 @@ const BULK_IMPORT_COLUMNS = [
   "reference_solution",
   "reference_language",
   "supported_languages",
+  "answer_validation_mode",
+  "output_checker",
+  "output_checker_explanation",
   "execution_time_limit_seconds",
   "memory_limit_mb",
   "metadata_status",
@@ -206,6 +276,24 @@ function createEmptyTestCase(isSample = false): TestCase {
   return { input: "", expected_output: "", is_sample: isSample, explanation: "" };
 }
 
+function answerValidationOption(mode: AnswerValidationMode) {
+  return (
+    ANSWER_VALIDATION_OPTIONS.find((option) => option.value === mode) ??
+    ANSWER_VALIDATION_OPTIONS[0]
+  );
+}
+
+function answerValidationNeedsCustomChecker(mode: AnswerValidationMode) {
+  return mode === "multiple_valid" || mode === "constructive";
+}
+
+function answerValidationDescription(composer: QuestionCreatePayload) {
+  return (
+    composer.output_checker_explanation.trim() ||
+    answerValidationOption(composer.answer_validation_mode).detail
+  );
+}
+
 function createEmptyComposer(): QuestionCreatePayload {
   return {
     title: "",
@@ -233,11 +321,15 @@ function createEmptyComposer(): QuestionCreatePayload {
     validation_status: "not_run",
     validation_updated_at: null,
     reference_solutions: {},
+    answer_validation_mode: "exact",
+    output_checker: "",
+    output_checker_explanation: answerValidationOption("exact").detail,
     solution_approach: "",
     time_complexity: "",
     space_complexity: "",
     status: "draft",
     creation_mode: "manual",
+    visibility: "private",
   };
 }
 
@@ -342,6 +434,10 @@ function buildBulkImportTemplate() {
       'def solve(raw_input: str) -> str:\n    age = int(raw_input)\n    return "Eligible" if age >= 18 else "Not Eligible"\n\nif __name__ == "__main__":\n    import sys\n    print(solve(sys.stdin.read()))',
     reference_language: "python",
     supported_languages: "python",
+    answer_validation_mode: "exact",
+    output_checker: "",
+    output_checker_explanation:
+      "Candidate output must match the expected output exactly after safe whitespace normalization.",
     execution_time_limit_seconds: "2",
     memory_limit_mb: "128",
     metadata_status: "classified",
@@ -386,7 +482,7 @@ function buildAgentThinkingLines(scope: BusyScope): string[] {
     return [
       "Reading the title and existing context",
       "Generating the problem statement",
-      "Preserving formats and constraints unless requested",
+      "Building input/output formats and constraints",
       "Reviewing the section before applying it",
     ];
   }
@@ -476,23 +572,6 @@ function createInitialGenerationProgressEvent(
     next_node: "queued",
     progress: 4,
   };
-}
-
-function languageDisplayName(language: string) {
-  const normalized = languageKey(language);
-  if (normalized === "cpp" || normalized === "c++") {
-    return "C++";
-  }
-  if (normalized === "c") {
-    return "C";
-  }
-  if (normalized === "java") {
-    return "Java";
-  }
-  if (normalized === "python") {
-    return "Python";
-  }
-  return language.trim().toUpperCase();
 }
 
 function languageKey(language: string) {
@@ -626,11 +705,17 @@ function fromRecord(question: QuestionRecord): QuestionCreatePayload {
     validation_status: question.validation_status ?? "not_run",
     validation_updated_at: question.validation_updated_at ?? null,
     reference_solutions: { ...(question.reference_solutions ?? {}) },
+    answer_validation_mode: question.answer_validation_mode ?? "exact",
+    output_checker: question.output_checker ?? "",
+    output_checker_explanation:
+      question.output_checker_explanation ||
+      answerValidationOption(question.answer_validation_mode ?? "exact").detail,
     solution_approach: question.solution_approach ?? "",
     time_complexity: question.time_complexity ?? "",
     space_complexity: question.space_complexity ?? "",
     status: question.status,
     creation_mode: question.creation_mode,
+    visibility: question.visibility ?? "private",
   });
 }
 
@@ -664,6 +749,10 @@ function countCompleteTestCases(testCases: TestCase[]) {
   return testCases.filter(
     (testCase) => testCase.input.trim() && testCase.expected_output.trim(),
   ).length;
+}
+
+function persistableTestCases(testCases: TestCase[]) {
+  return testCases.filter((testCase) => testCase.input.trim().length > 0);
 }
 
 function scoreComposer(composer: QuestionCreatePayload) {
@@ -742,10 +831,10 @@ function nextStepAfterGeneration(scope: DraftScope): WizardStep | null {
     case "basics":
       return 2;
     case "problem":
-      return 2;
     case "constraints":
     case "constraints_formats":
-      return 3;
+    case "problem_field":
+      return null;
     case "examples":
     case "tests":
       return 3;
@@ -793,8 +882,12 @@ function exactTestCountsSatisfied(
   generationSettings: GenerationSettingsState,
 ) {
   return (
+    composer.sample_test_cases.length ===
+      generationSettings.sample_test_case_count &&
     countCompleteTestCases(composer.sample_test_cases) ===
       generationSettings.sample_test_case_count &&
+    composer.hidden_test_cases.length ===
+      generationSettings.hidden_test_case_count &&
     countCompleteTestCases(composer.hidden_test_cases) ===
       generationSettings.hidden_test_case_count
   );
@@ -878,10 +971,26 @@ function getValidationPrerequisiteError(
   generationSettings: GenerationSettingsState,
 ) {
   if (!exactTestCountsSatisfied(composer, generationSettings)) {
-    return "Match the sample and hidden testcase counts before running validation.";
+    return "Complete every testcase and match the sample and hidden counts before running all tests.";
   }
   if (!composer.reference_solution.trim()) {
     return "Generate or paste a runnable reference solution before executing tests.";
+  }
+  return "";
+}
+
+function getTestcaseRepairPrerequisiteError(composer: QuestionCreatePayload) {
+  if (composer.problem_statement.trim().length < 20) {
+    return "Add a clear problem statement before repairing test cases.";
+  }
+  if (!composer.input_format.trim() || !composer.output_format.trim()) {
+    return "Add input and output formats before repairing test cases.";
+  }
+  if (!composer.constraints.trim()) {
+    return "Add constraints before repairing test cases.";
+  }
+  if (!composer.reference_solution.trim()) {
+    return "Generate or paste a runnable reference solution before repairing test cases.";
   }
   return "";
 }
@@ -959,12 +1068,12 @@ function getAiPromptCopy(scope: DraftScope, composer: QuestionCreatePayload): Ai
     case "problem":
       return {
         eyebrow: "Problem",
-        title: "Generate problem statement",
+        title: "Generate problem statement and formats",
         question: "Optional instructions",
         placeholder:
           "Example: Keep the statement short and beginner-friendly.",
-        helper: "Leave blank to use title, tags, and languages. Only the statement section is applied.",
-        actionLabel: "Generate Problem Statement",
+        helper: "Leave blank to use title, tags, and languages. Statement, input/output formats, and constraints are applied together.",
+        actionLabel: "Generate Step 2 Contract",
       };
     case "problem_field":
       return {
@@ -1168,7 +1277,7 @@ function buildSectionPrompt(
   const taskByScope: Record<DraftScope, string> = {
     full: "Generate and validate the complete question draft.",
     basics: "Generate only the starter title and context fields.",
-    problem: "Generate only the title and problem statement.",
+    problem: "Generate the title, problem statement, input format, output format, and constraints in one response.",
     problem_field: "Complete only missing or explicitly requested problem fields.",
     constraints: "Generate only I/O formats, constraints, and execution limits.",
     constraints_formats: "Generate only I/O formats, constraints, and execution limits.",
@@ -1190,6 +1299,19 @@ function buildSectionPrompt(
     null,
     2,
   );
+}
+
+function answerValidationFieldsFromDraft(
+  current: QuestionCreatePayload,
+  draft: QuestionCreatePayload,
+) {
+  return {
+    answer_validation_mode:
+      draft.answer_validation_mode || current.answer_validation_mode,
+    output_checker: draft.output_checker ?? current.output_checker,
+    output_checker_explanation:
+      draft.output_checker_explanation || current.output_checker_explanation,
+  };
 }
 
 function mergeDraftIntoComposer(
@@ -1226,9 +1348,20 @@ function mergeDraftIntoComposer(
         ...current,
         title: draft.title || current.title,
         problem_statement: draft.problem_statement || current.problem_statement,
+        input_format: draft.input_format || current.input_format,
+        input_explanation: draft.input_explanation || current.input_explanation,
+        output_format: draft.output_format || current.output_format,
+        output_explanation: draft.output_explanation || current.output_explanation,
+        constraints: draft.constraints || current.constraints,
+        candidate_solve_time_minutes:
+          draft.candidate_solve_time_minutes || current.candidate_solve_time_minutes,
+        execution_time_limit_seconds:
+          draft.execution_time_limit_seconds || current.execution_time_limit_seconds,
+        memory_limit_mb: draft.memory_limit_mb || current.memory_limit_mb,
         topics: draft.topics.length ? draft.topics : current.topics,
         tags: draft.tags.length ? draft.tags : current.tags,
         category: draft.category || current.category,
+        ...answerValidationFieldsFromDraft(current, draft),
         creation_mode: "ai_assisted",
       };
     }
@@ -1245,6 +1378,7 @@ function mergeDraftIntoComposer(
       sample_test_cases: draft.sample_test_cases.length
         ? draft.sample_test_cases.map((item) => ({ ...item, is_sample: true }))
         : current.sample_test_cases,
+      ...answerValidationFieldsFromDraft(current, draft),
       creation_mode: "ai_assisted",
     };
   }
@@ -1266,6 +1400,7 @@ function mergeDraftIntoComposer(
       execution_time_limit_seconds:
         draft.execution_time_limit_seconds || current.execution_time_limit_seconds,
       memory_limit_mb: draft.memory_limit_mb || current.memory_limit_mb,
+      ...answerValidationFieldsFromDraft(current, draft),
       creation_mode: "ai_assisted",
     };
   }
@@ -1287,6 +1422,7 @@ function mergeDraftIntoComposer(
       validation_report: draft.validation_report || current.validation_report,
       validation_status: draft.validation_status || current.validation_status,
       validation_updated_at: draft.validation_updated_at || current.validation_updated_at,
+      ...answerValidationFieldsFromDraft(current, draft),
       reference_solutions:
         Object.keys(draft.reference_solutions).length > 0
           ? draft.reference_solutions
@@ -1357,6 +1493,7 @@ function mergeDraftIntoComposer(
       validation_report: draft.validation_report || current.validation_report,
       validation_status: draft.validation_status || current.validation_status,
       validation_updated_at: draft.validation_updated_at || current.validation_updated_at,
+      ...answerValidationFieldsFromDraft(current, draft),
       reference_solutions:
         Object.keys(draft.reference_solutions).length > 0
           ? {
@@ -1414,6 +1551,7 @@ function mergeDraftIntoComposer(
     validation_report: draft.validation_report || current.validation_report,
     validation_status: draft.validation_status || current.validation_status,
     validation_updated_at: draft.validation_updated_at || current.validation_updated_at,
+    ...answerValidationFieldsFromDraft(current, draft),
     reference_solutions:
       Object.keys(draft.reference_solutions).length > 0
         ? draft.reference_solutions
@@ -1478,6 +1616,14 @@ export function QuestionManagementPage() {
   const [bulkImportError, setBulkImportError] = useState("");
   const [bulkImportResult, setBulkImportResult] =
     useState<QuestionBulkImportResponse | null>(null);
+  const [generationSession, setGenerationSession] = useState(
+    getQuestionGenerationSession,
+  );
+
+  useEffect(() => {
+    setGenerationSession(getQuestionGenerationSession());
+    return subscribeQuestionGenerationSession(setGenerationSession);
+  }, []);
 
   useEffect(() => {
     if (!saveSuccess) {
@@ -1501,9 +1647,8 @@ export function QuestionManagementPage() {
         question.difficulty,
         question.status,
         question.creation_mode,
-        question.topics.join(" "),
+        question.visibility,
         question.tags.join(" "),
-        question.category,
         question.validation_status,
       ]
         .join(" ")
@@ -1511,6 +1656,17 @@ export function QuestionManagementPage() {
       return haystack.includes(term);
     });
   }, [questions, search]);
+  const runningGeneration =
+    generationSession?.status === "running" ? generationSession : null;
+  const runningQuestionIsVisible = Boolean(
+    runningGeneration?.questionId &&
+      filteredQuestions.some((question) => question.id === runningGeneration.questionId),
+  );
+  const showTemporaryGenerationRow = Boolean(
+    runningGeneration && !runningQuestionIsVisible,
+  );
+  const generationProgress =
+    runningGeneration?.events[runningGeneration.events.length - 1]?.progress ?? 0;
 
   const metrics = useMemo(() => {
     const validated = questions.filter((item) => item.status === "validated").length;
@@ -1523,16 +1679,23 @@ export function QuestionManagementPage() {
       : 0;
 
     return {
-      questions: questions.length,
+      questions: data?.total ?? questions.length,
       validated,
       drafts,
-      groups: groups.length,
+      groups: groupData?.total ?? groups.length,
       avgScore,
     };
-  }, [groups.length, questions]);
+  }, [data?.total, groupData?.total, groups.length, questions]);
 
   function openQuestion(question: QuestionRecord) {
     navigate(`/recruiter/question-management/new?questionId=${encodeURIComponent(question.id)}`);
+  }
+
+  function openRunningGeneration() {
+    const target = runningGeneration?.questionId
+      ? `/recruiter/question-management/new?questionId=${encodeURIComponent(runningGeneration.questionId)}`
+      : "/recruiter/question-management/new";
+    navigate(target);
   }
 
   function closeBulkImportModal() {
@@ -1594,6 +1757,24 @@ export function QuestionManagementPage() {
           <p>Question management</p>
           <h1>Question library</h1>
         </div>
+        <div className="assessment-hero-metrics">
+          <span>
+            <strong>{formatCount(metrics.questions)}</strong>
+            Total
+          </span>
+          <span>
+            <strong>{formatCount(metrics.validated)}</strong>
+            Validated
+          </span>
+          <span>
+            <strong>{formatCount(metrics.drafts)}</strong>
+            Drafts
+          </span>
+          <span>
+            <strong>{formatCount(metrics.groups)}</strong>
+            Groups
+          </span>
+        </div>
         <div className="management-hero-actions">
           <Button
             type="button"
@@ -1615,60 +1796,43 @@ export function QuestionManagementPage() {
         </div>
       </section>
 
-      <section className="metrics-grid" aria-label="Question management summary">
-        <Card className="metric-card">
-          <span>Total Questions</span>
-          <strong>{formatCount(metrics.questions)}</strong>
-        </Card>
-        <Card className="metric-card">
-          <span>Validated</span>
-          <strong>{formatCount(metrics.validated)}</strong>
-        </Card>
-        <Card className="metric-card">
-          <span>Drafts</span>
-          <strong>{formatCount(metrics.drafts)}</strong>
-        </Card>
-        <Card className="metric-card">
-          <span>Groups</span>
-          <strong>{formatCount(metrics.groups)}</strong>
-        </Card>
-      </section>
-
       <section className="management-grid">
         <Card className="management-panel">
-          <div className="panel-head">
-            <div>
-              <p>{view === "questions" ? "Question library" : "Question groups"}</p>
-              <h2>{view === "questions" ? "Questions" : "Reusable groups"}</h2>
+          <div className="panel-head question-library-panel-head">
+            <div className="question-library-controls">
+              <div className="segmented-control" role="tablist" aria-label="Management view">
+                <button
+                  type="button"
+                  className={view === "questions" ? "is-active" : ""}
+                  onClick={() => setView("questions")}
+                >
+                  Questions
+                </button>
+                <button
+                  type="button"
+                  className={view === "groups" ? "is-active" : ""}
+                  onClick={() => setView("groups")}
+                >
+                  Groups
+                </button>
+              </div>
+
+              <label className="field search-field question-library-search">
+                <span>Search</span>
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search title, tag, status, or mode"
+                />
+              </label>
             </div>
-            <span>{view === "questions" ? filteredQuestions.length : groups.length} rows</span>
+            <span>
+              {view === "questions"
+                ? filteredQuestions.length + (showTemporaryGenerationRow ? 1 : 0)
+                : groups.length}{" "}
+              rows
+            </span>
           </div>
-
-          <div className="segmented-control" role="tablist" aria-label="Management view">
-            <button
-              type="button"
-              className={view === "questions" ? "is-active" : ""}
-              onClick={() => setView("questions")}
-            >
-              Questions
-            </button>
-            <button
-              type="button"
-              className={view === "groups" ? "is-active" : ""}
-              onClick={() => setView("groups")}
-            >
-              Groups
-            </button>
-          </div>
-
-          <label className="field search-field">
-            <span>Search</span>
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search title, tag, status, or mode"
-            />
-          </label>
 
           {view === "questions" ? (
             <div className="table-shell">
@@ -1676,10 +1840,10 @@ export function QuestionManagementPage() {
                 <thead>
                   <tr>
                     <th>Title</th>
-                    <th>Topics</th>
-                    <th>Tags / Category</th>
+                    <th>Tags</th>
                     <th>Difficulty</th>
-                    <th>Validation</th>
+                    <th>Question Status</th>
+                    <th>Visibility</th>
                     <th>Updated</th>
                     <th>Options</th>
                   </tr>
@@ -1691,58 +1855,106 @@ export function QuestionManagementPage() {
                         Loading questions...
                       </td>
                     </tr>
-                  ) : filteredQuestions.length === 0 ? (
+                  ) : filteredQuestions.length === 0 && !showTemporaryGenerationRow ? (
                     <tr>
                       <td colSpan={7} className="table-empty">
                         No questions yet. Start with a new question flow.
                       </td>
                     </tr>
                   ) : (
-                    filteredQuestions.map((question) => (
-                      <tr key={question.id} className="data-row question-row-compact">
+                    <>
+                      {showTemporaryGenerationRow && runningGeneration ? (
+                        <tr className="data-row question-row-compact question-row-generating">
+                          <td>
+                            <div className="question-title-cell">
+                              <strong>
+                                {runningGeneration.baseDraft.title.trim() || "Untitled question"}
+                              </strong>
+                              <span className="question-generation-status" role="status">
+                                <i aria-hidden="true" />
+                                Generating... {generationProgress}%
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="tag-list">
+                              {runningGeneration.baseDraft.tags.length ? (
+                                runningGeneration.baseDraft.tags.slice(0, 6).map((tag) => (
+                                  <span key={`generating-${tag}`}>{tag}</span>
+                                ))
+                              ) : (
+                                <span className="is-empty">AI draft in progress</span>
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            <span className="pill pending">Pending AI</span>
+                          </td>
+                          <td>
+                            <span className="pill draft">Draft</span>
+                          </td>
+                          <td>
+                            <span className="pill private">Private</span>
+                          </td>
+                          <td>Now</td>
+                          <td className="row-actions">
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={openRunningGeneration}
+                            >
+                              View live
+                            </Button>
+                          </td>
+                        </tr>
+                      ) : null}
+                      {filteredQuestions.map((question) => {
+                        const isGenerating = runningGeneration?.questionId === question.id;
+                        const isOwned = question.recruiter_uid === currentUser?.uid;
+                        return (
+                          <tr
+                            key={question.id}
+                            className={`data-row question-row-compact${isGenerating ? " question-row-generating" : ""}`}
+                          >
                         <td>
                           <div className="question-title-cell">
                             <strong>{question.title}</strong>
-                            <span className={`pill ${questionStatusTone(question.status)}`}>
-                              {question.status}
-                            </span>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="tag-list">
-                            {question.topics.length ? (
-                              question.topics.slice(0, 3).map((topic) => (
-                                <span key={`${question.id}-topic-${topic}`}>{topic}</span>
-                              ))
-                            ) : (
-                              <span className="is-empty">Pending AI</span>
-                            )}
+                            {isGenerating ? (
+                              <span className="question-generation-status" role="status">
+                                <i aria-hidden="true" />
+                                Generating... {generationProgress}%
+                              </span>
+                            ) : null}
                           </div>
                         </td>
                         <td>
                           <div className="tag-list">
                             {question.tags.length ? (
-                              question.tags.slice(0, 4).map((tag) => (
+                              question.tags.slice(0, 6).map((tag) => (
                                 <span key={`${question.id}-${tag}`}>{tag}</span>
                               ))
                             ) : (
                               <span className="is-empty">No tags</span>
                             )}
-                            {question.category ? <strong>{question.category}</strong> : null}
                           </div>
                         </td>
                         <td>
                           {question.metadata_status === "classified" ? (
-                            <span className={`pill ${questionDifficultyTone(question.difficulty)}`}>
+                            <span className={`question-difficulty-text ${questionDifficultyTone(question.difficulty)}`}>
                               {question.difficulty}
                             </span>
                           ) : (
-                            <span className="pill pending">Pending AI</span>
+                            <span className="question-difficulty-text pending">Pending AI</span>
                           )}
                         </td>
                         <td>
-                          <span className={`pill ${question.validation_status}`}>
-                            {question.validation_status.replace("_", " ")}
+                          <span className={`pill ${questionStatusTone(question.status)}`}>
+                            {question.status}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={`pill ${question.visibility}`}>
+                            {question.visibility}
                           </span>
                         </td>
                         <td>{new Date(question.updated_at).toLocaleDateString()}</td>
@@ -1751,12 +1963,16 @@ export function QuestionManagementPage() {
                             type="button"
                             variant="secondary"
                             onClick={() => openQuestion(question)}
+                            disabled={!isOwned}
+                            title={isOwned ? undefined : "Public questions from other recruiters are read-only"}
                           >
-                            Edit
+                            {isOwned ? (isGenerating ? "View live" : "Edit") : "Shared"}
                           </Button>
                         </td>
-                      </tr>
-                    ))
+                          </tr>
+                        );
+                      })}
+                    </>
                   )}
                 </tbody>
               </table>
@@ -2020,6 +2236,17 @@ export function QuestionCreationFlowPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const questionId = searchParams.get("questionId");
+  const generationOwnerIdRef = useRef(
+    `question-page-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  const mountedRef = useRef(true);
+  const generationSessionIdRef = useRef<string | null>(null);
+  const restoredGenerationIdRef = useRef<string | null>(null);
+  const initialGenerationSession = getQuestionGenerationSession();
+  const resumableGenerationSession =
+    initialGenerationSession?.questionId === questionId
+      ? initialGenerationSession
+      : null;
 
   const createQuestion = useCreateQuestionBankQuestion(currentUser);
   const updateQuestion = useUpdateQuestionBankQuestion(currentUser);
@@ -2042,13 +2269,20 @@ export function QuestionCreationFlowPage() {
     [questionId, questions],
   );
 
-  const [composer, setComposer] = useState<QuestionCreatePayload>(createEmptyComposer());
+  const [composer, setComposer] = useState<QuestionCreatePayload>(() =>
+    resumableGenerationSession
+      ? cloneComposer(resumableGenerationSession.baseDraft)
+      : createEmptyComposer(),
+  );
   const [persistedQuestionId, setPersistedQuestionId] = useState<string | null>(questionId);
-  const [generationSettings, setGenerationSettings] = useState<GenerationSettingsState>(
-    createEmptyGenerationSettings(),
+  const [generationSettings, setGenerationSettings] = useState<GenerationSettingsState>(() =>
+    resumableGenerationSession
+      ? structuredClone(resumableGenerationSession.settings)
+      : createEmptyGenerationSettings(),
   );
   const [activeStep, setActiveStep] = useState<WizardStep>(1);
-  const [statusConfirmed, setStatusConfirmed] = useState(false);
+  const [statusConfirmed, setStatusConfirmed] = useState(() => Boolean(questionId));
+  const [visibilityConfirmed, setVisibilityConfirmed] = useState(() => Boolean(questionId));
   const [visitedSteps, setVisitedSteps] = useState<Set<WizardStep>>(() => new Set([1]));
   const [advanceAttemptedSteps, setAdvanceAttemptedSteps] = useState<Set<WizardStep>>(
     () => new Set(),
@@ -2059,11 +2293,17 @@ export function QuestionCreationFlowPage() {
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([
     createTimelineEntry("Workspace ready", "Start from any section.", "info"),
   ]);
-  const [toolbarBusy, setToolbarBusy] = useState<BusyScope | null>(null);
-  const [completedAiScopes, setCompletedAiScopes] = useState<Set<DraftScope>>(new Set());
+  const [toolbarBusy, setToolbarBusy] = useState<BusyScope | null>(() =>
+    resumableGenerationSession?.status === "running"
+      ? (resumableGenerationSession.scope as BusyScope)
+      : null,
+  );
   const [historyStack, setHistoryStack] = useState<QuestionCreatePayload[]>([]);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [, setFieldError] = useState("");
   const [showActivityPanel, setShowActivityPanel] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [checkerInfoOpen, setCheckerInfoOpen] = useState(false);
   const [aiPromptRequest, setAiPromptRequest] = useState<AiPromptRequest | null>(null);
   const [solutionValidation, setSolutionValidation] = useState<SolutionValidationReport | null>(
     null,
@@ -2073,22 +2313,126 @@ export function QuestionCreationFlowPage() {
     Record<string, SolutionValidationCaseResult>
   >({});
   const [singleTestRunningKey, setSingleTestRunningKey] = useState<string | null>(null);
+  const [testCaseEditor, setTestCaseEditor] = useState<TestCaseEditorState | null>(null);
   const [languageValidationReports, setLanguageValidationReports] = useState<
     Record<string, SolutionValidationReport>
   >({});
   const [languageTestRunningKey, setLanguageTestRunningKey] = useState<string | null>(null);
   const [generationProgress, setGenerationProgress] = useState<
     QuestionAIDraftProgressEvent[]
-  >([]);
+  >(() => resumableGenerationSession?.events ?? []);
   const [fieldToasts, setFieldToasts] = useState<FieldToast[]>([]);
   const latestGenerationEvent = generationProgress[generationProgress.length - 1] ?? null;
   const toastTimerIdsRef = useRef<number[]>([]);
+  const dismissFieldToast = useCallback((toastId: number) => {
+    setFieldToasts((current) => current.filter((toast) => toast.id !== toastId));
+  }, []);
+  const notifyFieldError = useCallback((
+    message: string,
+    tone: FieldToastTone = "warning",
+  ) => {
+    setFieldError(message);
+    const toastId = Date.now() + Math.floor(Math.random() * 1000);
+    setFieldToasts((current) => [...current.slice(-2), { id: toastId, message, tone }]);
+    const timerId = window.setTimeout(() => {
+      dismissFieldToast(toastId);
+      toastTimerIdsRef.current = toastTimerIdsRef.current.filter((item) => item !== timerId);
+    }, 4500);
+    toastTimerIdsRef.current.push(timerId);
+  }, [dismissFieldToast]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toolbarBusy) {
+      return;
+    }
+    document.body.classList.add("question-generation-locked");
+    return () => document.body.classList.remove("question-generation-locked");
+  }, [toolbarBusy]);
 
   useEffect(() => {
     return () => {
       toastTimerIdsRef.current.forEach((timerId) => window.clearTimeout(timerId));
     };
   }, []);
+
+  useEffect(() => {
+    function restoreGenerationSession(
+      session: ReturnType<typeof getQuestionGenerationSession>,
+    ) {
+      if (
+        !session ||
+        session.questionId !== questionId ||
+        session.ownerId === generationOwnerIdRef.current
+      ) {
+        return;
+      }
+      generationSessionIdRef.current = session.id;
+      setGenerationProgress(session.events);
+      setGenerationSettings(structuredClone(session.settings));
+      if (session.status === "running") {
+        setToolbarBusy(session.scope as BusyScope);
+        return;
+      }
+      setToolbarBusy(null);
+      if (session.status === "failed") {
+        if (restoredGenerationIdRef.current !== session.id) {
+          restoredGenerationIdRef.current = session.id;
+          setAssistantMessage(session.error || "AI generation could not complete.");
+          notifyFieldError(session.error || "AI generation could not complete.", "error");
+        }
+        clearQuestionGenerationSession(session.id);
+        return;
+      }
+      if (
+        !session.response ||
+        restoredGenerationIdRef.current === session.id ||
+        (questionId && !editingQuestion)
+      ) {
+        return;
+      }
+
+      restoredGenerationIdRef.current = session.id;
+      const scope = session.scope as DraftScope;
+      const response = session.response;
+      let restoredComposer = response.draft
+        ? mergeDraftIntoComposer(
+            session.baseDraft,
+            response.draft,
+            scope,
+            session.settings,
+          )
+        : cloneComposer(session.baseDraft);
+      if (response.solution_validation) {
+        restoredComposer = {
+          ...restoredComposer,
+          validation_report: response.solution_validation,
+          validation_status: response.solution_validation.status,
+          validation_updated_at: new Date().toISOString(),
+        };
+        setSolutionValidation(response.solution_validation);
+        setSingleTestResults(buildSingleTestResultMap(response.solution_validation));
+        setSolutionValidationStale(false);
+      }
+      setComposer(restoredComposer);
+      setAssistantMessage(response.summary || "AI generation completed.");
+      const nextStep = nextStepAfterGeneration(scope);
+      if (nextStep) {
+        setActiveStep(nextStep);
+      }
+      clearQuestionGenerationSession(session.id);
+    }
+
+    const unsubscribe = subscribeQuestionGenerationSession(restoreGenerationSession);
+    restoreGenerationSession(getQuestionGenerationSession());
+    return unsubscribe;
+  }, [editingQuestion, notifyFieldError, questionId]);
 
   useEffect(() => {
     setVisitedSteps((current) => new Set(current).add(activeStep));
@@ -2103,7 +2447,6 @@ export function QuestionCreationFlowPage() {
         hidden_test_case_count: Math.max(1, editingQuestion.hidden_test_cases.length),
       }));
       setPersistedQuestionId(editingQuestion.id);
-      setCompletedAiScopes(new Set());
       setAssistantMessage(`Editing ${editingQuestion.title}.`);
       setActivityLog((current) => [
         createTimelineEntry("Question loaded", editingQuestion.title, "info"),
@@ -2116,6 +2459,7 @@ export function QuestionCreationFlowPage() {
       setSolutionValidationStale(false);
       setAiPromptRequest(null);
       setStatusConfirmed(false);
+      setVisibilityConfirmed(false);
     }
   }, [editingQuestion]);
 
@@ -2155,21 +2499,6 @@ export function QuestionCreationFlowPage() {
     setActivityLog((current) => [createTimelineEntry(label, detail, tone), ...current].slice(0, 6));
   }
 
-  function dismissFieldToast(toastId: number) {
-    setFieldToasts((current) => current.filter((toast) => toast.id !== toastId));
-  }
-
-  function notifyFieldError(message: string, tone: FieldToastTone = "warning") {
-    setFieldError(message);
-    const toastId = Date.now() + Math.floor(Math.random() * 1000);
-    setFieldToasts((current) => [...current.slice(-2), { id: toastId, message, tone }]);
-    const timerId = window.setTimeout(() => {
-      dismissFieldToast(toastId);
-      toastTimerIdsRef.current = toastTimerIdsRef.current.filter((item) => item !== timerId);
-    }, 4500);
-    toastTimerIdsRef.current.push(timerId);
-  }
-
   function assertCanGenerate(scope: DraftScope) {
     const message = getGenerationPrerequisiteError(scope, composer, generationSettings);
     if (message) {
@@ -2203,8 +2532,9 @@ export function QuestionCreationFlowPage() {
       return;
     }
 
-    await generateDraft(aiPromptRequest.scope, aiPromptRequest.prompt.trim());
+    const request = aiPromptRequest;
     setAiPromptRequest(null);
+    await generateDraft(request.scope, request.prompt.trim());
   }
 
   function invalidateSolutionValidation() {
@@ -2271,6 +2601,9 @@ export function QuestionCreationFlowPage() {
         "output_explanation",
         "reference_solution",
         "reference_language",
+        "answer_validation_mode",
+        "output_checker",
+        "output_checker_explanation",
       ].includes(String(key))
     ) {
       invalidateSolutionValidation();
@@ -2278,19 +2611,25 @@ export function QuestionCreationFlowPage() {
     setComposer((current) => ({ ...current, [key]: value }));
   }
 
-  function updateTestCase(
-    bucket: "sample_test_cases" | "hidden_test_cases",
-    index: number,
-    field: keyof TestCase,
-    value: string,
-  ) {
+  function updateAnswerValidationMode(mode: AnswerValidationMode) {
     invalidateSolutionValidation();
-    setComposer((current) => ({
-      ...current,
-      [bucket]: current[bucket].map((testCase, testCaseIndex) =>
-        testCaseIndex === index ? { ...testCase, [field]: value } : testCase,
-      ),
-    }));
+    setComposer((current) => {
+      const currentDefault = answerValidationOption(current.answer_validation_mode).detail;
+      const nextDefault = answerValidationOption(mode).detail;
+      const shouldReplaceExplanation =
+        !current.output_checker_explanation.trim() ||
+        current.output_checker_explanation.trim() === currentDefault;
+      return {
+        ...current,
+        answer_validation_mode: mode,
+        output_checker_explanation: shouldReplaceExplanation
+          ? nextDefault
+          : current.output_checker_explanation,
+        output_checker: answerValidationNeedsCustomChecker(mode)
+          ? current.output_checker
+          : "",
+      };
+    });
   }
 
   function addTestCase(bucket: "sample_test_cases" | "hidden_test_cases") {
@@ -2307,6 +2646,116 @@ export function QuestionCreationFlowPage() {
       ...current,
       [bucket]: current[bucket].filter((_, testCaseIndex) => testCaseIndex !== index),
     }));
+  }
+
+  function openTestCaseEditor(bucket: TestBucket, index: number) {
+    const testCase = composer[bucket][index];
+    if (!testCase) {
+      return;
+    }
+    setTestCaseEditor({
+      bucket,
+      index,
+      draft: { ...testCase },
+      originalResult: singleTestResults[`${bucket}-${index}`] ?? null,
+      undoStack: [],
+      redoStack: [],
+    });
+  }
+
+  function closeTestCaseEditor() {
+    if (!testCaseEditor) {
+      return;
+    }
+    const resultKey = `${testCaseEditor.bucket}-${testCaseEditor.index}`;
+    setSingleTestResults((current) => {
+      const next = { ...current };
+      if (testCaseEditor.originalResult) {
+        next[resultKey] = testCaseEditor.originalResult;
+      } else {
+        delete next[resultKey];
+      }
+      return next;
+    });
+    setTestCaseEditor(null);
+  }
+
+  function updateTestCaseEditor(
+    field: "input" | "expected_output" | "explanation",
+    value: string,
+  ) {
+    setTestCaseEditor((current) => {
+      if (!current || current.draft[field] === value) {
+        return current;
+      }
+      return {
+        ...current,
+        draft: { ...current.draft, [field]: value },
+        undoStack: [...current.undoStack.slice(-49), current.draft],
+        redoStack: [],
+      };
+    });
+  }
+
+  function undoTestCaseEdit() {
+    setTestCaseEditor((current) => {
+      if (!current?.undoStack.length) {
+        return current;
+      }
+      const previous = current.undoStack[current.undoStack.length - 1];
+      return {
+        ...current,
+        draft: previous,
+        undoStack: current.undoStack.slice(0, -1),
+        redoStack: [current.draft, ...current.redoStack].slice(0, 50),
+      };
+    });
+  }
+
+  function redoTestCaseEdit() {
+    setTestCaseEditor((current) => {
+      if (!current?.redoStack.length) {
+        return current;
+      }
+      const [next, ...remaining] = current.redoStack;
+      return {
+        ...current,
+        draft: next,
+        undoStack: [...current.undoStack.slice(-49), current.draft],
+        redoStack: remaining,
+      };
+    });
+  }
+
+  function saveTestCaseEditor() {
+    if (!testCaseEditor) {
+      return;
+    }
+    const { bucket, index, draft } = testCaseEditor;
+    const resultKey = `${bucket}-${index}`;
+    const savedResult = singleTestResults[resultKey];
+    const resultMatchesDraft =
+      savedResult?.stdin === draft.input &&
+      savedResult.expected_output === draft.expected_output;
+    invalidateSolutionValidation();
+    setComposer((current) => ({
+      ...current,
+      [bucket]: current[bucket].map((testCase, testCaseIndex) =>
+        testCaseIndex === index ? { ...draft } : testCase,
+      ),
+    }));
+    if (savedResult && resultMatchesDraft) {
+      setSingleTestResults({ [resultKey]: savedResult });
+    }
+    setTestCaseEditor(null);
+  }
+
+  function removeEditedTestCase() {
+    if (!testCaseEditor) {
+      return;
+    }
+    removeTestCase(testCaseEditor.bucket, testCaseEditor.index);
+    setTestCaseEditor(null);
   }
 
   function toggleLanguage(language: (typeof AVAILABLE_LANGUAGES)[number]) {
@@ -2432,7 +2881,7 @@ export function QuestionCreationFlowPage() {
 
   function moveToStep(step: WizardStep) {
     if (step === 6) {
-      openFinalReview();
+      void saveAndMoveNext(6);
       return;
     }
     setActiveStep(step);
@@ -2446,14 +2895,35 @@ export function QuestionCreationFlowPage() {
   }
 
   function goToNextStep() {
-    if (activeStep === 5) {
-      openFinalReview();
-      return;
-    }
     if (activeStep >= 6) {
       return;
     }
     void saveAndMoveNext((activeStep + 1) as WizardStep);
+  }
+
+  function draftPersistencePayload(): QuestionCreatePayload {
+    return {
+      ...cloneComposer(composer),
+      status: "draft",
+      sample_test_cases: persistableTestCases(composer.sample_test_cases),
+      hidden_test_cases: persistableTestCases(composer.hidden_test_cases),
+    };
+  }
+
+  async function persistQuestionDraft() {
+    if (editingQuestion && editingQuestion.status !== "draft") {
+      return;
+    }
+
+    const payload = draftPersistencePayload();
+    const existingId = persistedQuestionId || editingQuestion?.id || null;
+    if (existingId) {
+      await updateQuestion.mutateAsync({ questionId: existingId, payload });
+      return;
+    }
+
+    const created = await createQuestion.mutateAsync(payload);
+    setPersistedQuestionId(created.id);
   }
 
   async function saveAndMoveNext(nextStep: WizardStep) {
@@ -2464,28 +2934,27 @@ export function QuestionCreationFlowPage() {
       notifyFieldError(message);
       return;
     }
-    setActiveStep(nextStep);
-  }
 
-  function openFinalReview() {
-    const message = getStepNavigationError(5);
-    setAdvanceAttemptedSteps((current) => new Set(current).add(5));
-    setVisitedSteps((current) => new Set(current).add(5));
-    if (message) {
-      notifyFieldError(message);
-      return;
+    try {
+      await persistQuestionDraft();
+      setAssistantMessage(`Draft saved after Page ${activeStep}.`);
+      pushActivity("Draft saved", `Page ${activeStep} changes are stored.`, "success");
+      if (nextStep === 6) {
+        setStatusConfirmed(false);
+        setVisibilityConfirmed(false);
+      }
+      setActiveStep(nextStep);
+    } catch (error) {
+      notifyFieldError(
+        error instanceof Error ? error.message : "Unable to save the question draft.",
+        "error",
+      );
+      pushActivity("Draft save failed", `Page ${activeStep} was not stored.`, "warning");
     }
-    setStatusConfirmed(false);
-    setActiveStep(6);
   }
 
   function goToProblemStatement() {
-    if (!validateBasics()) {
-      return;
-    }
-
-    setAdvanceAttemptedSteps((current) => new Set(current).add(1));
-    setActiveStep(2);
+    void saveAndMoveNext(2);
   }
 
   function generateWholeQuestionFromBasics() {
@@ -2513,6 +2982,32 @@ export function QuestionCreationFlowPage() {
       pushActivity("Undo applied", "Reverted the most recent AI change.", "warning");
       return rest;
     });
+  }
+
+  function beginTrackedGeneration(
+    scope: DraftScope,
+    baseDraft: QuestionCreatePayload,
+  ) {
+    const initialEvent = createInitialGenerationProgressEvent(scope);
+    setGenerationProgress([initialEvent]);
+    const sessionId = startQuestionGenerationSession({
+      ownerId: generationOwnerIdRef.current,
+      questionId: persistedQuestionId,
+      scope,
+      baseDraft,
+      settings: generationSettings,
+      initialEvent,
+    });
+    generationSessionIdRef.current = sessionId;
+    return sessionId;
+  }
+
+  function appendTrackedGenerationEvent(event: QuestionAIDraftProgressEvent) {
+    setGenerationProgress((current) => [...current.slice(-119), event]);
+    const sessionId = generationSessionIdRef.current;
+    if (sessionId) {
+      appendQuestionGenerationProgress(sessionId, event);
+    }
   }
 
   async function generateOtherLanguageDrafts(
@@ -2552,8 +3047,21 @@ export function QuestionCreationFlowPage() {
       const segmentSize = progressSpan / targetLanguages.length;
       const segmentStart = progressStart + index * segmentSize;
       const appendProgress = (event: QuestionAIDraftProgressEvent) => {
-        setGenerationProgress((current) => [...current.slice(-119), event]);
+        appendTrackedGenerationEvent(event);
       };
+
+      const existing = workingDraft.reference_solutions[targetLanguage];
+      if (existing?.source_code.trim() && existing.validation_status === "passed") {
+        appendProgress({
+          type: "node_complete",
+          scope: "other_languages",
+          message: `${displayName} solution is already generated and passed validation. Skipping generation.`,
+          current_node: `${targetLanguage}_code_generation`,
+          next_node: null,
+          progress: Math.round(segmentStart + segmentSize),
+        });
+        continue;
+      }
 
       appendProgress({
         type: "node_start",
@@ -2612,6 +3120,7 @@ export function QuestionCreationFlowPage() {
               ),
             });
           },
+          signal: options.signal,
         });
 
         if (response.error || !response.draft) {
@@ -2646,6 +3155,15 @@ export function QuestionCreationFlowPage() {
       } catch (error) {
         const message =
           error instanceof Error ? error.message : `${displayName} generation failed.`;
+        if (
+          message.includes("Security") ||
+          message.includes("Data sanitation") ||
+          message.includes("Guardrail") ||
+          message.includes("violation") ||
+          message.includes("alert")
+        ) {
+          notifyFieldError(message, "error");
+        }
         failedLanguages.push(displayName);
         workingDraft.reference_solutions[targetLanguage] = {
           language: targetLanguage,
@@ -2672,17 +3190,14 @@ export function QuestionCreationFlowPage() {
       ? "Generated and validated every requested language solution."
       : `Completed language generation. Review: ${failedLanguages.join(", ")}.`;
     if (appendFinalCompleteEvent) {
-      setGenerationProgress((current) => [
-        ...current.slice(-119),
-        {
-          type: "complete",
-          scope: "other_languages",
-          message: summary,
-          current_node: "language_generation_complete",
-          next_node: "END",
-          progress: 100,
-        },
-      ]);
+      appendTrackedGenerationEvent({
+        type: "complete",
+        scope: "other_languages",
+        message: summary,
+        current_node: "language_generation_complete",
+        next_node: "END",
+        progress: 100,
+      });
     }
 
     return {
@@ -2699,6 +3214,9 @@ export function QuestionCreationFlowPage() {
     scope: DraftScope,
     recruiterPrompt = "",
   ) {
+    let trackedSessionId: string | null = null;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setFieldError("");
       if (!assertCanGenerate(scope)) {
@@ -2730,10 +3248,10 @@ export function QuestionCreationFlowPage() {
             supported_languages: [primaryLanguage],
           })
         : requestComposer;
-      setGenerationProgress([createInitialGenerationProgressEvent(scope)]);
+      trackedSessionId = beginTrackedGeneration(scope, requestComposer);
       let response: QuestionAIDraftResponse;
       if (scope === "other_languages") {
-        response = await generateOtherLanguageDrafts(recruiterPrompt);
+        response = await generateOtherLanguageDrafts(recruiterPrompt, { signal: controller.signal });
       } else {
         response = await streamDraftQuestion.mutateAsync({
           payload: {
@@ -2776,8 +3294,9 @@ export function QuestionCreationFlowPage() {
                   progress: Math.round(4 + (progressWithinPrimary / 100) * 68),
                 }
               : event;
-            setGenerationProgress((current) => [...current.slice(-119), nextEvent]);
+            appendTrackedGenerationEvent(nextEvent);
           },
+          signal: controller.signal,
         });
       }
 
@@ -2792,6 +3311,7 @@ export function QuestionCreationFlowPage() {
           progressStart: 72,
           progressSpan: 26,
           appendFinalCompleteEvent: false,
+          signal: controller.signal,
         });
         const languageDraft = languageResponse.draft ?? primaryDraft;
         const combinedDraft = syncComposerLanguageState({
@@ -2806,26 +3326,30 @@ export function QuestionCreationFlowPage() {
           solution_validation:
             response.solution_validation ?? languageResponse.solution_validation,
         };
-        setGenerationProgress((current) => [
-          ...current.slice(-119),
-          {
-            type: "complete",
-            scope: "full",
-            message: response.summary,
-            current_node: "full_generation_complete",
-            next_node: "END",
-            progress: 100,
-            response,
-          },
-        ]);
+        appendTrackedGenerationEvent({
+          type: "complete",
+          scope: "full",
+          message: response.summary,
+          current_node: "full_generation_complete",
+          next_node: "END",
+          progress: 100,
+          response,
+        });
       }
 
       // Check if generation failed
       if (response.error) {
+        if (trackedSessionId) {
+          failQuestionGenerationSession(trackedSessionId, response.error);
+        }
         notifyFieldError(response.error, "error");
         setAssistantMessage("AI generation failed");
         pushActivity("AI draft failed", response.error, "error");
         return;
+      }
+
+      if (trackedSessionId) {
+        completeQuestionGenerationSession(trackedSessionId, response);
       }
 
       // Only merge draft if it was successfully generated
@@ -2848,58 +3372,6 @@ export function QuestionCreationFlowPage() {
         setComposer((current) =>
           mergeDraftIntoComposer(current, generatedDraft, scope, generationSettings),
         );
-        setCompletedAiScopes((current) => {
-          const next = new Set(current);
-          if (scope === "full") {
-            (
-              [
-                "basics",
-                "problem",
-                "constraints_formats",
-                "constraints",
-                "examples",
-                "tests",
-                "tests_solution",
-                "solution",
-                "recruiter_validation",
-                "other_languages",
-                "difficulty",
-                "metadata",
-              ] as DraftScope[]
-            ).forEach((item) => next.add(item));
-          } else {
-            next.add(scope);
-            if (
-              scope === "tests" ||
-              scope === "examples" ||
-              scope === "tests_solution"
-            ) {
-              next.add("constraints");
-              next.add("examples");
-              next.add("tests");
-              if (scope === "tests_solution") {
-                next.add("tests_solution");
-                next.add("solution");
-              }
-            }
-            if (scope === "solution") {
-              next.add("solution");
-            }
-            if (scope === "examples") {
-              next.add("constraints");
-            }
-            if (scope === "constraints_formats") {
-              next.add("constraints");
-            }
-            if (scope === "recruiter_validation") {
-              next.add("solution");
-            }
-            if (scope === "metadata") {
-              next.add("difficulty");
-            }
-          }
-          return next;
-        });
         pushActivity("AI draft generated", response.summary, "success");
       }
 
@@ -2939,16 +3411,41 @@ export function QuestionCreationFlowPage() {
       }
 
     } catch (error) {
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        if (trackedSessionId) {
+          failQuestionGenerationSession(trackedSessionId, "Generation stopped by user.");
+        }
+        pushActivity("AI action canceled", "User stopped the generation process.", "warning");
+        setAssistantMessage("Generation stopped by user.");
+        return;
+      }
       const message = error instanceof Error ? error.message : "Unable to generate draft.";
+      if (trackedSessionId) {
+        failQuestionGenerationSession(trackedSessionId, message);
+      }
       notifyFieldError(message, "error");
       setAssistantMessage("AI generation could not complete.");
       pushActivity("AI draft failed", message, "error");
     } finally {
       setToolbarBusy(null);
+      if (trackedSessionId && mountedRef.current) {
+        clearQuestionGenerationSession(trackedSessionId);
+      }
+      abortControllerRef.current = null;
+    }
+  }
+
+  function handleStopGeneration() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
   }
 
   async function validateCurrentDraft() {
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setFieldError("");
       const validationError = getValidationPrerequisiteError(composer, generationSettings);
@@ -2956,74 +3453,49 @@ export function QuestionCreationFlowPage() {
         notifyFieldError(validationError);
         return;
       }
-      const requestComposer = syncComposerLanguageState(composer);
-      setGenerationProgress([createInitialGenerationProgressEvent("recruiter_validation")]);
+      const requestComposer = cloneComposer(syncComposerLanguageState(composer));
+      setGenerationProgress([]);
       setToolbarBusy("validation");
-      pushActivity("Validation started", "Running reference solution against test cases.", "info");
+      pushActivity(
+        "Test run started",
+        "Running the latest saved testcase values against the current reference solution.",
+        "info",
+      );
 
-      const response = await streamDraftQuestion.mutateAsync({
-        payload: {
-          prompt: buildSectionPrompt("recruiter_validation", ""),
-          generation_scope: "recruiter_validation",
-          reference_language: requestComposer.reference_language,
-          title_hint: requestComposer.title.trim() || undefined,
-          focus_tags: requestComposer.tags,
-          current_draft: requestComposer,
-          generation_settings: {
-            question_count: generationSettings.question_count,
-            easy_count: generationSettings.easy_count,
-            medium_count: generationSettings.medium_count,
-            hard_count: generationSettings.hard_count,
-            topics: splitList(generationSettings.topics_text),
-            supported_languages: requestComposer.supported_languages,
-            interview_style: generationSettings.interview_style,
-            company_style: generationSettings.company_style,
-            time_limit_minutes: generationSettings.time_limit_minutes,
-            candidate_solve_time_minutes:
-              generationSettings.candidate_solve_time_minutes,
-            execution_time_limit_seconds:
-              generationSettings.execution_time_limit_seconds,
-            memory_limit_mb: generationSettings.memory_limit_mb,
-            sample_test_case_count: generationSettings.sample_test_case_count,
-            hidden_test_case_count: generationSettings.hidden_test_case_count,
-            edge_case_count: generationSettings.edge_case_count,
-            stress_test_count: generationSettings.stress_test_count,
-          },
-        },
-        onProgress: (event) => {
-          setGenerationProgress((current) => [...current.slice(-119), event]);
-        },
+      const response = await validateDraft.mutateAsync({
+        draft: requestComposer,
+        signal: controller.signal,
       });
-      if (response.error) {
-        throw new Error(response.error);
-      }
-      const report = response.solution_validation ?? response.draft?.validation_report;
-      if (!report) {
-        throw new Error("Validation completed without an execution report.");
-      }
+      const report = response.validation_report;
       setSolutionValidation(report);
       setSingleTestResults(buildSingleTestResultMap(report));
       setSolutionValidationStale(false);
       setComposer((current) => ({
         ...current,
-        ...(response.draft ? mergeDraftIntoComposer(current, response.draft, "recruiter_validation", generationSettings) : {}),
         validation_report: report,
         validation_status: report.status,
         validation_updated_at: new Date().toISOString(),
       }));
       pushActivity(
-        "Validation complete",
+        "Test run complete",
         report.summary,
         report.status === "passed" ? "success" : "warning",
       );
       setAssistantMessage(report.summary);
       setActiveStep(3);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to validate draft.";
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        pushActivity("AI action canceled", "User stopped the validation process.", "warning");
+        setAssistantMessage("Validation stopped by user.");
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Unable to run test cases.";
       notifyFieldError(message, "error");
-      pushActivity("Validation failed", message, "error");
+      pushActivity("Test run failed", message, "error");
     } finally {
       setToolbarBusy(null);
+      abortControllerRef.current = null;
     }
   }
 
@@ -3050,6 +3522,8 @@ export function QuestionCreationFlowPage() {
       new Set([...languageDraft.supported_languages.map(languageKey), normalizedLanguage]),
     );
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setLanguageTestRunningKey(normalizedLanguage);
       setFieldError("");
@@ -3058,7 +3532,10 @@ export function QuestionCreationFlowPage() {
         "Running this edited solution against the question test cases.",
         "info",
       );
-      const response = await validateDraft.mutateAsync({ draft: languageDraft });
+      const response = await validateDraft.mutateAsync({
+        draft: languageDraft,
+        signal: controller.signal,
+      });
       const report = response.validation_report;
       setLanguageValidationReports((current) => ({
         ...current,
@@ -3091,6 +3568,11 @@ export function QuestionCreationFlowPage() {
         report.status === "passed" ? "success" : "warning",
       );
     } catch (error) {
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        pushActivity("AI action canceled", "User stopped the tests process.", "warning");
+        return;
+      }
       const message =
         error instanceof Error ? error.message : `Unable to validate ${displayName} code.`;
       notifyFieldError(message, "error");
@@ -3114,6 +3596,7 @@ export function QuestionCreationFlowPage() {
       pushActivity(`${displayName} tests failed`, message, "error");
     } finally {
       setLanguageTestRunningKey(null);
+      abortControllerRef.current = null;
     }
   }
 
@@ -3125,16 +3608,38 @@ export function QuestionCreationFlowPage() {
     return report;
   }
 
+  function refinementGenerationSettingsPayload() {
+    return {
+      question_count: generationSettings.question_count,
+      easy_count: generationSettings.easy_count,
+      medium_count: generationSettings.medium_count,
+      hard_count: generationSettings.hard_count,
+      topics: splitList(generationSettings.topics_text),
+      supported_languages: composer.supported_languages,
+      interview_style: generationSettings.interview_style,
+      company_style: generationSettings.company_style,
+      time_limit_minutes: generationSettings.time_limit_minutes,
+      candidate_solve_time_minutes:
+        generationSettings.candidate_solve_time_minutes,
+      execution_time_limit_seconds:
+        generationSettings.execution_time_limit_seconds,
+      memory_limit_mb: generationSettings.memory_limit_mb,
+      sample_test_case_count: generationSettings.sample_test_case_count,
+      hidden_test_case_count: generationSettings.hidden_test_case_count,
+      edge_case_count: generationSettings.edge_case_count,
+      stress_test_count: generationSettings.stress_test_count,
+    };
+  }
+
   async function refineExistingTestCases() {
-    const validationError = getValidationPrerequisiteError(
-      composer,
-      generationSettings,
-    );
+    const validationError = getTestcaseRepairPrerequisiteError(composer);
     if (validationError) {
       notifyFieldError(validationError);
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setFieldError("");
       setGenerationProgress([]);
@@ -3145,7 +3650,11 @@ export function QuestionCreationFlowPage() {
         "Executing existing cases and reviewing expected-output mismatches.",
         "info",
       );
-      const response = await refineTestCases.mutateAsync({ draft: composer });
+      const response = await refineTestCases.mutateAsync({
+        draft: composer,
+        generation_settings: refinementGenerationSettingsPayload(),
+        signal: controller.signal,
+      });
       const report = applyRefinementReport(response);
       setComposer((current) => ({
         ...current,
@@ -3167,12 +3676,19 @@ export function QuestionCreationFlowPage() {
         report.status === "passed" ? "success" : "warning",
       );
     } catch (error) {
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        pushActivity("AI action canceled", "User stopped testcase refinement.", "warning");
+        setAssistantMessage("Refinement stopped by user.");
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "Unable to refine test cases.";
       notifyFieldError(message, "error");
       pushActivity("Testcase refinement failed", message, "error");
     } finally {
       setToolbarBusy(null);
+      abortControllerRef.current = null;
     }
   }
 
@@ -3186,6 +3702,8 @@ export function QuestionCreationFlowPage() {
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setFieldError("");
       setGenerationProgress([]);
@@ -3196,7 +3714,11 @@ export function QuestionCreationFlowPage() {
         "Repairing from the problem contract with failures as diagnostic evidence.",
         "info",
       );
-      const response = await refineSolution.mutateAsync({ draft: composer });
+      const response = await refineSolution.mutateAsync({
+        draft: composer,
+        generation_settings: refinementGenerationSettingsPayload(),
+        signal: controller.signal,
+      });
       const report = applyRefinementReport(response);
       setComposer((current) => ({
         ...current,
@@ -3212,17 +3734,28 @@ export function QuestionCreationFlowPage() {
         report.status === "passed" ? "success" : "warning",
       );
     } catch (error) {
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        pushActivity("AI action canceled", "User stopped solution refinement.", "warning");
+        setAssistantMessage("Refinement stopped by user.");
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "Unable to refine the solution.";
       notifyFieldError(message, "error");
       pushActivity("Solution refinement failed", message, "error");
     } finally {
       setToolbarBusy(null);
+      abortControllerRef.current = null;
     }
   }
 
-  async function validateSingleTestCase(bucket: TestBucket, index: number) {
-    const testCase = composer[bucket][index];
+  async function validateSingleTestCase(
+    bucket: TestBucket,
+    index: number,
+    testCaseOverride?: TestCase,
+  ) {
+    const testCase = testCaseOverride ?? composer[bucket][index];
     if (!testCase?.input.trim() || !testCase.expected_output.trim()) {
       notifyFieldError("Add input and expected output before running this test case.");
       return;
@@ -3239,10 +3772,15 @@ export function QuestionCreationFlowPage() {
     singleCaseDraft.hidden_test_cases =
       bucket === "hidden_test_cases" ? [{ ...testCase, is_sample: false }] : [];
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       setSingleTestRunningKey(resultKey);
       setFieldError("");
-      const response = await validateDraft.mutateAsync({ draft: singleCaseDraft });
+      const response = await validateDraft.mutateAsync({
+        draft: singleCaseDraft,
+        signal: controller.signal,
+      });
       const result = response.validation_report.results[0];
       if (result) {
         const normalizedResult: SolutionValidationCaseResult = {
@@ -3261,11 +3799,17 @@ export function QuestionCreationFlowPage() {
         );
       }
     } catch (error) {
+      const isAbort = error instanceof Error && (error.name === "AbortError" || error.message?.includes("canceled") || error.message?.includes("aborted"));
+      if (isAbort) {
+        pushActivity("AI action canceled", "User stopped the single test run.", "warning");
+        return;
+      }
       const message = error instanceof Error ? error.message : "Unable to run this test case.";
       notifyFieldError(message, "error");
       pushActivity("Single test failed", message, "error");
     } finally {
       setSingleTestRunningKey(null);
+      abortControllerRef.current = null;
     }
   }
 
@@ -3297,8 +3841,14 @@ export function QuestionCreationFlowPage() {
             <pre>{result.execution_time || "n/a"}</pre>
           </div>
         </div>
-        {result.stderr || result.compile_output || result.message ? (
+        {result.stderr || result.compile_output || result.message || result.checker_message ? (
           <div className="single-test-diagnostics">
+            {result.checker_message ? (
+              <div>
+                <span>Checker</span>
+                <pre>{result.checker_message}</pre>
+              </div>
+            ) : null}
             {result.message ? (
               <div>
                 <span>Message</span>
@@ -3320,6 +3870,56 @@ export function QuestionCreationFlowPage() {
           </div>
         ) : null}
       </div>
+    );
+  }
+
+  function renderCompactTestCaseCard(
+    bucket: TestBucket,
+    testCase: TestCase,
+    index: number,
+  ) {
+    const resultKey = `${bucket}-${index}`;
+    const result = singleTestResults[resultKey];
+    const statusMeta = getTestCaseStatusMeta(bucket, index, testCase);
+    const toneClass = result
+      ? result.passed ? "is-passed" : "is-failed"
+      : "is-pending";
+    const label = bucket === "sample_test_cases" ? "Sample" : "Hidden";
+
+    return (
+      <button
+        key={`${bucket}-${index}`}
+        type="button"
+        className={`testcase-summary-card ${toneClass}`}
+        onClick={() => openTestCaseEditor(bucket, index)}
+        aria-label={`Open ${label} test case ${index + 1}`}
+      >
+        <div className="testcase-summary-head">
+          <div>
+            <span>{label} testcase</span>
+            <strong>TC {index + 1}</strong>
+          </div>
+          <em>{statusMeta.label}</em>
+        </div>
+        <div className="testcase-summary-io">
+          <div>
+            <span>Input</span>
+            <pre>{testCase.input || "(empty)"}</pre>
+          </div>
+          <div>
+            <span>Expected output</span>
+            <pre>{testCase.expected_output || "(empty)"}</pre>
+          </div>
+          <div>
+            <span>Actual output</span>
+            <pre>{result?.actual_output || (result ? "(empty)" : "Not run yet")}</pre>
+          </div>
+        </div>
+        <div className="testcase-summary-foot">
+          <span>{result?.execution_time ? `Runtime ${result.execution_time}` : statusMeta.detail}</span>
+          <strong>View details</strong>
+        </div>
+      </button>
     );
   }
 
@@ -3360,6 +3960,7 @@ export function QuestionCreationFlowPage() {
               <pre>
                 {firstFailedResult.compile_output ||
                   firstFailedResult.stderr ||
+                  firstFailedResult.checker_message ||
                   firstFailedResult.message ||
                   firstFailedResult.status}
               </pre>
@@ -3370,9 +3971,35 @@ export function QuestionCreationFlowPage() {
     );
   }
 
+  function renderAnswerValidationBadge(compact = false) {
+    const option = answerValidationOption(composer.answer_validation_mode);
+    const highlighted = composer.answer_validation_mode !== "exact";
+    return (
+      <button
+        type="button"
+        className={[
+          "answer-validation-badge",
+          highlighted ? "is-highlighted" : "",
+          compact ? "is-compact" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        onClick={() => setCheckerInfoOpen(true)}
+      >
+        <CheckCircle2 size={16} aria-hidden="true" />
+        <span>Answer checker</span>
+        <strong>{option.label}</strong>
+      </button>
+    );
+  }
+
   async function saveQuestion() {
     if (!statusConfirmed) {
       notifyFieldError("Select and confirm the final question status before saving.");
+      return;
+    }
+    if (!visibilityConfirmed) {
+      notifyFieldError("Choose whether the question is public or private before saving.");
       return;
     }
     const saveError = getQuestionSaveError(
@@ -3465,7 +4092,7 @@ export function QuestionCreationFlowPage() {
               role="alert"
             >
               <div>
-                <strong>{toast.tone === "error" ? "Error" : "Check this"}</strong>
+                <strong>{fieldToastTitle(toast)}</strong>
                 <p>{toast.message}</p>
               </div>
               <button
@@ -3532,7 +4159,9 @@ export function QuestionCreationFlowPage() {
                     <span>{step.id}</span>
                     <strong>{step.title}</strong>
                     <em>
-                      {state === "complete"
+                      {activeStep === step.id
+                        ? "Current section"
+                        : state === "complete"
                         ? "Done"
                         : state === "untouched"
                           ? "Not visited"
@@ -3544,54 +4173,10 @@ export function QuestionCreationFlowPage() {
             </div>
 
             <div className="question-page-shell">
-              <div className="question-page-header">
-                <div>
-                  <p>Page {activeStep} of {STEP_DEFINITIONS.length}</p>
-                  <h2>{STEP_DEFINITIONS[activeStep - 1].title}</h2>
-                </div>
-                <div className="question-page-nav">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={goToPreviousStep}
-                    disabled={activeStep === 1 || draftSaving}
-                  >
-                    <ArrowLeft size={16} />
-                    Previous
-                  </Button>
-                  {activeStep < 6 ? (
-                    <Button type="button" onClick={goToNextStep} disabled={draftSaving || Boolean(toolbarBusy)}>
-                      {activeStep === 5
-                        ? editingQuestion
-                          ? "Save Changes & Review"
-                          : "Save & Review"
-                        : "Next"}
-                      <ArrowRight size={16} />
-                    </Button>
-                  ) : (
-                    <Button type="button" onClick={saveQuestionFromWizard} disabled={draftSaving || !statusConfirmed}>
-                      <Save size={16} />
-                      {draftSaving
-                        ? "Saving..."
-                        : editingQuestion
-                          ? "Update Question"
-                          : "Create Question"}
-                    </Button>
-                  )}
-                </div>
-              </div>
-
           {selectedStep === 1 ? (
           <StepCard
             step={STEP_DEFINITIONS[0]}
-            active={selectedStep === 1}
-            visualState={getStepVisualState(1)}
             busy={toolbarBusy === "basics"}
-            onToggle={() => setActiveStep(1)}
-            completed={
-              completedAiScopes.has("basics") ||
-              stepIsComplete(1, composer, generationSettings)
-            }
           >
             <div className="field-grid">
               <label className="field">
@@ -3701,11 +4286,7 @@ export function QuestionCreationFlowPage() {
           {selectedStep === 2 ? (
           <StepCard
             step={STEP_DEFINITIONS[1]}
-            active={selectedStep === 2}
-            visualState={getStepVisualState(2)}
             busy={toolbarBusy === "problem" || toolbarBusy === "constraints_formats"}
-            onToggle={() => setActiveStep(2)}
-            completed={stepIsComplete(2, composer)}
             onGenerate={() => openAiPrompt("problem")}
           >
             <label className="field">
@@ -3727,7 +4308,7 @@ export function QuestionCreationFlowPage() {
                 disabled={Boolean(toolbarBusy)}
               >
                 <FileText size={16} />
-                {toolbarBusy === "problem" ? "Generating..." : "Generate Problem Statement Alone"}
+                {toolbarBusy === "problem" ? "Generating..." : "Generate Step 2 Contract"}
               </Button>
               <Button
                 type="button"
@@ -3800,18 +4381,11 @@ export function QuestionCreationFlowPage() {
           {selectedStep === 3 ? (
           <StepCard
             step={STEP_DEFINITIONS[2]}
-            active={selectedStep === 3}
-            visualState={getStepVisualState(3)}
             busy={
               toolbarBusy === "tests" ||
               toolbarBusy === "tests_solution" ||
               toolbarBusy === "solution" ||
               toolbarBusy === "validation"
-            }
-            onToggle={() => setActiveStep(3)}
-            completed={
-              completedAiScopes.has("tests_solution") ||
-              stepIsComplete(3, composer, generationSettings)
             }
           >
             <div className="mode-card-row">
@@ -3891,6 +4465,10 @@ export function QuestionCreationFlowPage() {
               </span>
             </div>
 
+            <div className="answer-validation-row">
+              {renderAnswerValidationBadge()}
+            </div>
+
             <div className="step-three-status-grid">
               <div
                 className={[
@@ -3948,7 +4526,6 @@ export function QuestionCreationFlowPage() {
 
             <div className="section-head">
               <div>
-                <p>Keep the case data, actual output, and diagnostics together on each card.</p>
                 <h3>Sample tests</h3>
               </div>
               <Button type="button" variant="secondary" onClick={() => addTestCase("sample_test_cases")}>
@@ -3957,90 +4534,14 @@ export function QuestionCreationFlowPage() {
               </Button>
             </div>
 
-            <div className="testcase-stack">
-              {composer.sample_test_cases.map((testCase, index) => {
-                const statusMeta = getTestCaseStatusMeta(
-                  "sample_test_cases",
-                  index,
-                  testCase,
-                );
-
-                return (
-                <div key={`sample-${index}`} className="testcase-card">
-                  <div className="testcase-head">
-                    <div className="testcase-heading-copy">
-                      <strong>Sample {index + 1}</strong>
-                      <p className="testcase-caption">{statusMeta.detail}</p>
-                      <span className={`testcase-status ${statusMeta.toneClass}`}>
-                        {statusMeta.label}
-                      </span>
-                    </div>
-                    <div className="testcase-actions">
-                      <button
-                        type="button"
-                        className="link-button"
-                        disabled={singleTestRunningKey === `sample_test_cases-${index}`}
-                        onClick={() => void validateSingleTestCase("sample_test_cases", index)}
-                      >
-                        <Play size={13} />
-                        {singleTestRunningKey === `sample_test_cases-${index}` ? "Running..." : "Run"}
-                      </button>
-                      <button type="button" className="link-button" onClick={() => removeTestCase("sample_test_cases", index)}>
-                        <Trash2 size={13} />
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                  <div className="field-grid testcase-io-grid">
-                    <label className="field">
-                      <span>Input</span>
-                      <textarea
-                        rows={3}
-                        value={testCase.input}
-                        onChange={(event) =>
-                          updateTestCase("sample_test_cases", index, "input", event.target.value)
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Expected output</span>
-                      <textarea
-                        rows={3}
-                        value={testCase.expected_output}
-                        onChange={(event) =>
-                          updateTestCase(
-                            "sample_test_cases",
-                            index,
-                            "expected_output",
-                            event.target.value,
-                          )
-                        }
-                      />
-                    </label>
-                  </div>
-                  <label className="field">
-                    <span>Explanation</span>
-                    <textarea
-                      rows={2}
-                      value={testCase.explanation}
-                      onChange={(event) =>
-                        updateTestCase(
-                          "sample_test_cases",
-                          index,
-                          "explanation",
-                          event.target.value,
-                        )
-                      }
-                    />
-                  </label>
-                  {renderSingleTestResult(`sample_test_cases-${index}`)}
-                </div>
-              )})}
+            <div className="testcase-stack testcase-summary-grid">
+              {composer.sample_test_cases.map((testCase, index) =>
+                renderCompactTestCaseCard("sample_test_cases", testCase, index),
+              )}
             </div>
 
             <div className="section-head">
               <div>
-                <p>Hidden cases keep the same run feedback inline without moving to a separate result area.</p>
                 <h3>Hidden tests</h3>
               </div>
               <Button type="button" variant="secondary" onClick={() => addTestCase("hidden_test_cases")}>
@@ -4049,85 +4550,10 @@ export function QuestionCreationFlowPage() {
               </Button>
             </div>
 
-            <div className="testcase-stack">
-              {composer.hidden_test_cases.map((testCase, index) => {
-                const statusMeta = getTestCaseStatusMeta(
-                  "hidden_test_cases",
-                  index,
-                  testCase,
-                );
-
-                return (
-                <div key={`hidden-${index}`} className="testcase-card subtle">
-                  <div className="testcase-head">
-                    <div className="testcase-heading-copy">
-                      <strong>Hidden {index + 1}</strong>
-                      <p className="testcase-caption">{statusMeta.detail}</p>
-                      <span className={`testcase-status ${statusMeta.toneClass}`}>
-                        {statusMeta.label}
-                      </span>
-                    </div>
-                    <div className="testcase-actions">
-                      <button
-                        type="button"
-                        className="link-button"
-                        disabled={singleTestRunningKey === `hidden_test_cases-${index}`}
-                        onClick={() => void validateSingleTestCase("hidden_test_cases", index)}
-                      >
-                        <Play size={13} />
-                        {singleTestRunningKey === `hidden_test_cases-${index}` ? "Running..." : "Run"}
-                      </button>
-                      <button type="button" className="link-button" onClick={() => removeTestCase("hidden_test_cases", index)}>
-                        <Trash2 size={13} />
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                  <div className="field-grid testcase-io-grid">
-                    <label className="field">
-                      <span>Input</span>
-                      <textarea
-                        rows={3}
-                        value={testCase.input}
-                        onChange={(event) =>
-                          updateTestCase("hidden_test_cases", index, "input", event.target.value)
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Expected output</span>
-                      <textarea
-                        rows={3}
-                        value={testCase.expected_output}
-                        onChange={(event) =>
-                          updateTestCase(
-                            "hidden_test_cases",
-                            index,
-                            "expected_output",
-                            event.target.value,
-                          )
-                        }
-                      />
-                    </label>
-                  </div>
-                  <label className="field">
-                    <span>Explanation</span>
-                    <textarea
-                      rows={2}
-                      value={testCase.explanation}
-                      onChange={(event) =>
-                        updateTestCase(
-                          "hidden_test_cases",
-                          index,
-                          "explanation",
-                          event.target.value,
-                        )
-                      }
-                    />
-                  </label>
-                  {renderSingleTestResult(`hidden_test_cases-${index}`)}
-                </div>
-              )})}
+            <div className="testcase-stack testcase-summary-grid">
+              {composer.hidden_test_cases.map((testCase, index) =>
+                renderCompactTestCaseCard("hidden_test_cases", testCase, index),
+              )}
             </div>
 
             <div className="field-grid solution-entry-grid step-three-solution-grid">
@@ -4143,13 +4569,6 @@ export function QuestionCreationFlowPage() {
                 />
               </label>
               <div className="sub-panel step-three-side-panel">
-                <div className="contract-note">
-                  <span>CodeChef-style contract</span>
-                  <p>
-                    Candidate and reference code must be complete programs: read STDIN,
-                    print STDOUT, and never print prompts like "Enter number:".
-                  </p>
-                </div>
                 <label className="field">
                   <span>
                     Reference language <em>Primary</em>
@@ -4204,10 +4623,46 @@ export function QuestionCreationFlowPage() {
                     />
                   </label>
                 </div>
-                <div className="metadata-pending-box">
-                  Each testcase card below shows the latest actual output, pass or fail state,
-                  runtime, and any compiler or runtime diagnostics from the most recent run.
-                </div>
+                <label className="field">
+                  <span>Answer validation</span>
+                  <select
+                    value={composer.answer_validation_mode}
+                    onChange={(event) =>
+                      updateAnswerValidationMode(event.target.value as AnswerValidationMode)
+                    }
+                  >
+                    {ANSWER_VALIDATION_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Checker explanation</span>
+                  <textarea
+                    rows={4}
+                    value={composer.output_checker_explanation}
+                    onChange={(event) =>
+                      updateField("output_checker_explanation", event.target.value)
+                    }
+                  />
+                </label>
+                {answerValidationNeedsCustomChecker(composer.answer_validation_mode) ? (
+                  <label className="field">
+                    <span>
+                      Python checker <em>Required</em>
+                    </span>
+                    <textarea
+                      rows={9}
+                      value={composer.output_checker}
+                      onChange={(event) =>
+                        updateField("output_checker", event.target.value)
+                      }
+                      placeholder="def check_output(stdin, expected_output, actual_output):"
+                    />
+                  </label>
+                ) : null}
               </div>
             </div>
 
@@ -4217,11 +4672,7 @@ export function QuestionCreationFlowPage() {
           {selectedStep === 4 ? (
           <StepCard
             step={STEP_DEFINITIONS[3]}
-            active={selectedStep === 4}
-            visualState={getStepVisualState(4)}
             busy={toolbarBusy === "other_languages"}
-            onToggle={() => setActiveStep(4)}
-            completed={stepIsComplete(4, composer)}
             onGenerate={() => openAiPrompt("other_languages")}
           >
             <div className="language-solution-panel">
@@ -4236,6 +4687,9 @@ export function QuestionCreationFlowPage() {
                 <div className="metadata-pending-box">
                   Translation gate:{" "}
                   {otherLanguageSolutionsComplete(composer) ? "ready" : "pending"}
+                </div>
+                <div className="metadata-pending-box answer-validation-overview">
+                  {renderAnswerValidationBadge(true)}
                 </div>
               </div>
 
@@ -4317,11 +4771,7 @@ export function QuestionCreationFlowPage() {
           {selectedStep === 5 ? (
           <StepCard
             step={STEP_DEFINITIONS[4]}
-            active={selectedStep === 5}
-            visualState={getStepVisualState(5)}
             busy={toolbarBusy === "metadata" || toolbarBusy === "difficulty"}
-            onToggle={() => setActiveStep(5)}
-            completed={difficultyIsAgentSet}
             onGenerate={() => openAiPrompt("metadata")}
           >
             <div className="assistant-message">{assistantMessage}</div>
@@ -4422,10 +4872,6 @@ export function QuestionCreationFlowPage() {
                 <Button type="button" variant="secondary" onClick={undoAiChanges} disabled={!historyStack.length}>
                   Undo AI
                 </Button>
-                <Button type="button" onClick={openFinalReview}>
-                  {editingQuestion ? "Save Changes & Review" : "Save & Review"}
-                  <ArrowRight size={16} />
-                </Button>
               </div>
             </div>
           </StepCard>
@@ -4448,7 +4894,9 @@ export function QuestionCreationFlowPage() {
                 <div><span>Languages</span><strong>{composer.supported_languages.join(", ")}</strong></div>
                 <div><span>Tests</span><strong>{composer.sample_test_cases.length} sample · {composer.hidden_test_cases.length} hidden</strong></div>
                 <div><span>Validation</span><strong>{composer.validation_status.replace("_", " ")}</strong></div>
+                <div className="question-review-checker-cell">{renderAnswerValidationBadge(true)}</div>
                 <div><span>Limits</span><strong>{composer.execution_time_limit_seconds}s · {composer.memory_limit_mb} MB</strong></div>
+                <div><span>Visibility</span><strong>{composer.visibility}</strong></div>
               </div>
 
               <div className="question-review-section">
@@ -4512,45 +4960,6 @@ export function QuestionCreationFlowPage() {
                 </div>
               </div>
 
-              <div className="question-status-manager question-final-status">
-                <div className="question-status-manager-head">
-                  <div>
-                    <span>Required final decision</span>
-                    <strong>Select the question status</strong>
-                  </div>
-                  {statusConfirmed ? <CheckCircle2 size={24} aria-label="Status confirmed" /> : null}
-                </div>
-                <div className="question-status-options" role="radiogroup" aria-label="Question status">
-                  {[
-                    { value: "draft", label: "Draft", detail: "Keep working" },
-                    { value: "validated", label: "Validated", detail: "Ready for assessments" },
-                    { value: "blocked", label: "Blocked", detail: "Exclude from assessments" },
-                    { value: "archived", label: "Archived", detail: "Retain but hide" },
-                  ].map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className={[
-                        "question-status-option",
-                        `status-${option.value}`,
-                        composer.status === option.value && statusConfirmed ? "is-active" : "",
-                      ].filter(Boolean).join(" ")}
-                      onClick={() => {
-                        updateField("status", option.value as QuestionStatus);
-                        setStatusConfirmed(true);
-                      }}
-                      role="radio"
-                      aria-checked={composer.status === option.value && statusConfirmed}
-                    >
-                      <strong>{option.label}</strong>
-                      <span>{option.detail}</span>
-                    </button>
-                  ))}
-                </div>
-                {composer.status === "blocked" && statusConfirmed ? (
-                  <p className="question-status-lock">Blocked questions cannot be selected for assessments.</p>
-                ) : null}
-              </div>
             </section>
           ) : null}
 
@@ -4574,13 +4983,9 @@ export function QuestionCreationFlowPage() {
                     <ArrowRight size={16} />
                   </Button>
                 ) : (
-                  <Button type="button" onClick={saveQuestionFromWizard} disabled={draftSaving || !statusConfirmed}>
+                  <Button type="button" onClick={() => setShowPublishModal(true)} disabled={draftSaving}>
                     <Save size={16} />
-                    {draftSaving
-                      ? "Saving..."
-                      : editingQuestion
-                        ? "Update Question"
-                        : "Create Question"}
+                    {editingQuestion ? "Update Question" : "Create Question"}
                   </Button>
                 )}
               </div>
@@ -4589,6 +4994,167 @@ export function QuestionCreationFlowPage() {
         </Card>
       </section>
 
+      {testCaseEditor ? (() => {
+        const resultKey = `${testCaseEditor.bucket}-${testCaseEditor.index}`;
+        const result = singleTestResults[resultKey];
+        const statusMeta = getTestCaseStatusMeta(
+          testCaseEditor.bucket,
+          testCaseEditor.index,
+          testCaseEditor.draft,
+        );
+        const testLabel =
+          testCaseEditor.bucket === "sample_test_cases" ? "Sample" : "Hidden";
+        const isRunning = singleTestRunningKey === resultKey;
+        return (
+          <div
+            className="testcase-detail-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !isRunning) {
+                closeTestCaseEditor();
+              }
+            }}
+          >
+            <Card
+              className="testcase-detail-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="testcase-detail-title"
+            >
+              <div className="testcase-detail-toolbar">
+                <div className="testcase-detail-history-actions">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={closeTestCaseEditor}
+                    disabled={isRunning}
+                  >
+                    <ArrowLeft size={16} />
+                    Back
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={undoTestCaseEdit}
+                    disabled={isRunning || !testCaseEditor.undoStack.length}
+                    title="Undo testcase edit"
+                  >
+                    <Undo2 size={16} />
+                    Undo
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={redoTestCaseEdit}
+                    disabled={isRunning || !testCaseEditor.redoStack.length}
+                    title="Redo testcase edit"
+                  >
+                    <Redo2 size={16} />
+                    Redo
+                  </Button>
+                </div>
+                <button
+                  type="button"
+                  className="testcase-detail-close"
+                  onClick={closeTestCaseEditor}
+                  disabled={isRunning}
+                  aria-label="Close testcase details"
+                >
+                  <X size={20} aria-hidden="true" />
+                </button>
+              </div>
+
+              <div className="testcase-detail-heading">
+                <div>
+                  <span>{testLabel} testcase</span>
+                  <h2 id="testcase-detail-title">Test case {testCaseEditor.index + 1}</h2>
+                  <p>{statusMeta.detail}</p>
+                </div>
+                <span className={`testcase-status ${statusMeta.toneClass}`}>
+                  {statusMeta.label}
+                </span>
+              </div>
+
+              <div className="testcase-detail-scroll">
+                <div className="field-grid testcase-io-grid">
+                  <label className="field">
+                    <span>Input</span>
+                    <textarea
+                      rows={7}
+                      value={testCaseEditor.draft.input}
+                      disabled={isRunning}
+                      onChange={(event) => updateTestCaseEditor("input", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Expected output</span>
+                    <textarea
+                      rows={7}
+                      value={testCaseEditor.draft.expected_output}
+                      disabled={isRunning}
+                      onChange={(event) =>
+                        updateTestCaseEditor("expected_output", event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>Explanation</span>
+                  <textarea
+                    rows={4}
+                    value={testCaseEditor.draft.explanation}
+                    disabled={isRunning}
+                    onChange={(event) =>
+                      updateTestCaseEditor("explanation", event.target.value)
+                    }
+                  />
+                </label>
+
+                <div className="testcase-detail-run-actions">
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      void validateSingleTestCase(
+                        testCaseEditor.bucket,
+                        testCaseEditor.index,
+                        testCaseEditor.draft,
+                      )
+                    }
+                    disabled={isRunning}
+                  >
+                    <Play size={16} />
+                    {isRunning ? "Running..." : "Run Test Case"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={removeEditedTestCase}
+                    disabled={isRunning}
+                  >
+                    <Trash2 size={16} />
+                    Remove Test Case
+                  </Button>
+                </div>
+
+                {result ? renderSingleTestResult(resultKey) : (
+                  <div className="testcase-detail-empty-result">
+                    Run this testcase to see actual output, runtime, and diagnostics.
+                  </div>
+                )}
+              </div>
+
+              <div className="testcase-detail-footer">
+                <span>Changes are applied only when you save.</span>
+                <Button type="button" onClick={saveTestCaseEditor} disabled={isRunning}>
+                  <Save size={16} />
+                  Save Test Case
+                </Button>
+              </div>
+            </Card>
+          </div>
+        );
+      })() : null}
+
       {toolbarBusy ? (
         <AgentRunOverlay
           scope={toolbarBusy}
@@ -4596,7 +5162,69 @@ export function QuestionCreationFlowPage() {
           lines={buildAgentThinkingLines(toolbarBusy)}
           progressEvents={generationProgress}
           latestEvent={latestGenerationEvent}
+          onStop={handleStopGeneration}
         />
+      ) : null}
+
+      {checkerInfoOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setCheckerInfoOpen(false);
+            }
+          }}
+        >
+          <Card
+            className="answer-checker-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="answer-checker-title"
+          >
+            <div className="answer-checker-modal-head">
+              <div>
+                <span>Answer validation</span>
+                <h3 id="answer-checker-title">
+                  {answerValidationOption(composer.answer_validation_mode).label}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="testcase-detail-close"
+                onClick={() => setCheckerInfoOpen(false)}
+                aria-label="Close answer checker details"
+              >
+                <X size={20} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="answer-checker-modal-body">
+              <p>{answerValidationDescription(composer)}</p>
+              <div className="answer-checker-rule-grid">
+                <div>
+                  <span>Mode</span>
+                  <strong>
+                    {answerValidationOption(composer.answer_validation_mode).label}
+                  </strong>
+                </div>
+                <div>
+                  <span>Expected output role</span>
+                  <strong>
+                    {composer.answer_validation_mode === "exact"
+                      ? "Canonical answer"
+                      : "Valid exemplar"}
+                  </strong>
+                </div>
+              </div>
+              {composer.output_checker.trim() ? (
+                <div className="answer-checker-code">
+                  <span>Python checker</span>
+                  <pre>{composer.output_checker}</pre>
+                </div>
+              ) : null}
+            </div>
+          </Card>
+        </div>
       ) : null}
 
       {aiPromptRequest && activePromptCopy ? (
@@ -4720,6 +5348,131 @@ export function QuestionCreationFlowPage() {
               </div>
             </Card>
           </div>
+        </div>
+      ) : null}
+      {showPublishModal ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !draftSaving) {
+              setShowPublishModal(false);
+            }
+          }}
+        >
+          <Card
+            className="publish-confirmation-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="publish-modal-title"
+          >
+            <div className="publish-modal-header">
+              <h3 id="publish-modal-title">
+                {editingQuestion ? "Update Question Details" : "Publish Question"}
+              </h3>
+              <p>Configure visibility and status for "{composer.title}" before saving.</p>
+            </div>
+
+            <div className="publish-modal-body">
+              <div className="question-status-manager">
+                <div className="question-status-manager-head">
+                  <div>
+                    <span>Required final decision</span>
+                    <strong>Select the question status</strong>
+                  </div>
+                  {statusConfirmed ? <CheckCircle2 size={20} style={{ color: "#16a34a" }} /> : null}
+                </div>
+                <div className="question-status-options" role="radiogroup" aria-label="Question status">
+                  {[
+                    { value: "draft", label: "Draft", detail: "Keep working" },
+                    { value: "validated", label: "Validated", detail: "Ready for assessments" },
+                    { value: "blocked", label: "Blocked", detail: "Exclude from assessments" },
+                    { value: "archived", label: "Archived", detail: "Retain but hide" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={[
+                        "question-status-option",
+                        `status-${option.value}`,
+                        composer.status === option.value && statusConfirmed ? "is-active" : "",
+                      ].filter(Boolean).join(" ")}
+                      onClick={() => {
+                        updateField("status", option.value as QuestionStatus);
+                        setStatusConfirmed(true);
+                      }}
+                      role="radio"
+                      aria-checked={composer.status === option.value && statusConfirmed}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.detail}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="question-status-manager question-visibility-manager" style={{ marginTop: "20px" }}>
+                <div className="question-status-manager-head">
+                  <div>
+                    <span>Required sharing decision</span>
+                    <strong>Who can use this question?</strong>
+                  </div>
+                  {visibilityConfirmed ? <CheckCircle2 size={20} style={{ color: "#16a34a" }} /> : null}
+                </div>
+                <div className="question-status-options" role="radiogroup" aria-label="Question visibility">
+                  {[
+                    {
+                      value: "private",
+                      label: "Private",
+                      detail: "Only you can use this question in assessments",
+                    },
+                    {
+                      value: "public",
+                      label: "Public",
+                      detail: "All recruiters can use this question in assessments",
+                    },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={[
+                        "question-status-option",
+                        `visibility-${option.value}`,
+                        composer.visibility === option.value && visibilityConfirmed ? "is-active" : "",
+                      ].filter(Boolean).join(" ")}
+                      onClick={() => {
+                        updateField("visibility", option.value as QuestionVisibility);
+                        setVisibilityConfirmed(true);
+                      }}
+                      role="radio"
+                      aria-checked={composer.visibility === option.value && visibilityConfirmed}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.detail}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="publish-modal-footer">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setShowPublishModal(false)}
+                disabled={draftSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={saveQuestionFromWizard}
+                disabled={draftSaving || !statusConfirmed || !visibilityConfirmed}
+              >
+                {draftSaving ? "Saving..." : editingQuestion ? "Save & Update" : "Confirm & Create"}
+              </Button>
+            </div>
+          </Card>
         </div>
       ) : null}
     </main>
@@ -5069,271 +5822,5 @@ export function QuestionGroupCreationFlowPage() {
   );
 }
 
-function AgentRunOverlay({
-  scope,
-  commentary,
-  lines,
-  progressEvents,
-  latestEvent,
-}: {
-  scope: BusyScope;
-  commentary: string;
-  lines: string[];
-  progressEvents: QuestionAIDraftProgressEvent[];
-  latestEvent: QuestionAIDraftProgressEvent | null;
-}) {
-  const title =
-    scope === "full"
-      ? "Generating full question draft"
-      : scope === "validation"
-        ? "Running execution validation"
-        : "Generating section";
-  const showLiveProgress = Boolean(latestEvent);
-  const liveUpdates = progressEvents
-    .filter(
-      (event) =>
-        event.type !== "validation_case_start" && event.type !== "validation_case_result",
-    )
-    .slice(-5);
-  const liveCommentary = latestEvent?.message || commentary;
-  const progressValue = latestEvent?.progress ?? null;
-  const latestValidationPass = progressEvents.reduce(
-    (latest, event) => Math.max(latest, event.validation_pass || 0),
-    0,
-  );
-  const validationCaseMap = new Map<string, QuestionAIDraftProgressEvent>();
-  progressEvents.forEach((event) => {
-    if (
-      event.validation_pass !== latestValidationPass ||
-      !event.test_bucket ||
-      !event.test_index ||
-      !event.test_outcome
-    ) {
-      return;
-    }
-    validationCaseMap.set(`${event.test_bucket}-${event.test_index}`, event);
-  });
-  const validationCases = Array.from(validationCaseMap.values()).sort((left, right) => {
-    const leftBucket = left.test_bucket === "sample" ? 0 : 1;
-    const rightBucket = right.test_bucket === "sample" ? 0 : 1;
-    return leftBucket - rightBucket || (left.test_index || 0) - (right.test_index || 0);
-  });
-  const completedValidationCases = validationCases.filter(
-    (event) => event.test_outcome !== "running",
-  ).length;
-
-  return (
-    <div className="agent-run-backdrop" role="status" aria-live="polite">
-      <Card className="agent-run-modal">
-        <div className="agent-run-head">
-          <div className="agent-orb" aria-hidden="true" />
-          <div>
-            <span>{scope === "validation" ? "Validation" : "Generation"}</span>
-            <h2>{title}</h2>
-            <p>{liveCommentary}</p>
-          </div>
-        </div>
-        {showLiveProgress && progressValue !== null ? (
-          <div className="agent-run-progress" aria-live="polite">
-            <div className="agent-run-progress-head">
-              <div>
-                <span>Live progress</span>
-                <strong>{latestEvent?.next_node || latestEvent?.current_node || "working"}</strong>
-              </div>
-              <em>{progressValue}%</em>
-            </div>
-            <div
-              className="agent-run-progress-track"
-              role="progressbar"
-              aria-label="AI generation progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={progressValue}
-            >
-              <span style={{ width: `${progressValue}%` }} />
-            </div>
-          </div>
-        ) : null}
-        {validationCases.length > 0 ? (
-          <section className="agent-test-progress" aria-label="Live test case validation">
-            <div className="agent-test-progress-head">
-              <div>
-                <span>Test execution</span>
-                <strong>
-                  {completedValidationCases} of {latestEvent?.overall_total || validationCases.length} checked
-                </strong>
-              </div>
-              <em>Pass {latestValidationPass}</em>
-            </div>
-            <div className="agent-test-case-list">
-              {validationCases.map((event) => {
-                const outcome = event.test_outcome || "running";
-                const statusLabel =
-                  outcome === "passed"
-                    ? "Passed"
-                    : outcome === "wrong"
-                      ? "Wrong answer"
-                      : outcome === "error"
-                        ? "Error"
-                        : "Running";
-                const compactValue = (value: string | undefined, fallback: string) => {
-                  const compacted = (value || fallback).replace(/\s+/g, " ").trim();
-                  return compacted.length > 120
-                    ? `${compacted.slice(0, 117)}...`
-                    : compacted;
-                };
-                const inputPreview = compactValue(event.test_input, "No standard input");
-                const expectedPreview = compactValue(event.expected_output, "(empty)");
-                const actualPreview =
-                  outcome === "running"
-                    ? "Waiting for program output"
-                    : compactValue(event.actual_output, "(empty)");
-                return (
-                  <article
-                    key={`${latestValidationPass}-${event.test_bucket}-${event.test_index}`}
-                    className={`agent-test-case is-${outcome}`}
-                  >
-                    <div className="agent-test-case-title">
-                      <span aria-hidden="true" />
-                      <strong>
-                        {event.test_bucket === "sample" ? "Sample" : "Hidden"} {event.test_index}
-                      </strong>
-                      {event.test_language ? <b>{languageDisplayName(event.test_language)}</b> : null}
-                      <em>{statusLabel}</em>
-                    </div>
-                    <div className="agent-test-io-grid">
-                      <div>
-                        <span>Input</span>
-                        <code title={event.test_input || ""}>{inputPreview}</code>
-                      </div>
-                      <div>
-                        <span>Expected</span>
-                        <code title={event.expected_output || ""}>{expectedPreview}</code>
-                      </div>
-                      <div>
-                        <span>Actual</span>
-                        <code title={event.actual_output || ""}>{actualPreview}</code>
-                      </div>
-                    </div>
-                    {outcome === "error" && event.error_message ? (
-                      <p>{event.error_message}</p>
-                    ) : null}
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-        ) : null}
-        {showLiveProgress ? (
-          <div className="agent-thinking-list">
-            {liveUpdates.map((event, index) => (
-              <div
-                key={`${event.type}-${event.current_node || "start"}-${index}`}
-                className={[
-                  "agent-thinking-line",
-                  index === liveUpdates.length - 1 ? "is-active" : "is-complete",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <span aria-hidden="true" />
-                <p>{event.message}</p>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="agent-thinking-list">
-            {lines.map((line, index) => (
-              <div
-                key={line}
-                className={index === 0 ? "agent-thinking-line is-active" : "agent-thinking-line"}
-              >
-                <span aria-hidden="true" />
-                <p>
-                  {line}
-                  <b className="thinking-dots" aria-hidden="true" />
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-        <p className="agent-run-foot">
-          Keep this page open. This popup now tracks the live agent updates, and
-          the builder will apply the accepted fields automatically when the run finishes.
-        </p>
-      </Card>
-    </div>
-  );
-}
-
-function StepCard({
-  step,
-  active,
-  visualState = "untouched",
-  busy = false,
-  completed = false,
-  onToggle,
-  onGenerate,
-  children,
-}: {
-  step: StepDefinition;
-  active: boolean;
-  visualState?: "untouched" | "in-progress" | "complete";
-  busy?: boolean;
-  completed?: boolean;
-  onToggle: () => void;
-  onGenerate?: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Card
-      className={[
-        "step-card",
-        active ? "is-active" : "",
-        completed ? "is-complete" : "",
-        `is-${visualState}`,
-        busy ? "is-loading" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-    >
-      <div className="step-card-header">
-        <button type="button" className="step-card-toggle" onClick={onToggle}>
-          <div>
-            <p>
-              {busy
-                ? "Agent loading"
-                : visualState === "complete"
-                  ? "Section complete"
-                  : visualState === "untouched"
-                    ? "Not visited"
-                    : `Step ${step.id} in progress`}
-            </p>
-            <h3>{step.title}</h3>
-          </div>
-        </button>
-        {onGenerate ? (
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={busy}
-            onClick={(event) => {
-              event.stopPropagation();
-              onGenerate();
-            }}
-          >
-            <Sparkles size={16} />
-            {busy ? "Working..." : step.actionLabel}
-          </Button>
-        ) : null}
-      </div>
-      {active ? (
-        <div className="step-card-body">
-          {children}
-        </div>
-      ) : null}
-    </Card>
-  );
-}
 
 export { QuestionManagementPage as AssessmentsPage };
