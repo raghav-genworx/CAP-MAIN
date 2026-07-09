@@ -675,9 +675,7 @@ class ReportPdfService:
         return table
 
     def _score_breakdown_table(self, candidate: CandidateEvaluationSummary) -> Table:
-        rows: list[list[Any]] = [
-            ["Component", "Weight", "Raw score", "Weighted score"]
-        ]
+        rows: list[list[Any]] = [["Component", "Weight", "Raw score", "Weighted score"]]
         for row in score_breakdown_rows(candidate.scores, candidate.weights):
             rows.append(
                 [
@@ -713,12 +711,18 @@ class ReportPdfService:
             if activity and activity.total_time_seconds is not None
             else candidate.time_taken_seconds
         )
+        question_time = "Not recorded"
+        if activity and activity.question_time_seconds:
+            question_time = ", ".join(
+                f"{question_id}: {duration_label(seconds)}"
+                for question_id, seconds in activity.question_time_seconds.items()
+            )
         return self._metadata_strip(
             [
                 ("Started", _datetime_label(started_at)),
                 ("Submitted", _datetime_label(submitted_at)),
                 ("Total time", duration_label(total_time)),
-                ("Question time", "Not available"),
+                ("Question time", question_time),
             ]
         )
 
@@ -1099,8 +1103,7 @@ class ReportPdfService:
                     Paragraph(hidden_case_label(index), self._styles["tableBody"]),
                     Paragraph(
                         escape(
-                            case.case_category
-                            or "Confidential hidden validation case"
+                            case.case_category or "Confidential hidden validation case"
                         ),
                         self._styles["tableBody"],
                     ),
@@ -1138,8 +1141,7 @@ class ReportPdfService:
                     ),
                     Paragraph(
                         escape(
-                            case.case_category
-                            or "Confidential hidden validation case"
+                            case.case_category or "Confidential hidden validation case"
                         ),
                         self._styles["tableBody"],
                     ),
@@ -1218,9 +1220,7 @@ class ReportPdfService:
             if key in breakdown
         ]
         return (
-            f"({'; '.join(parts)})"
-            if parts
-            else "(sub-score breakdown not available)"
+            f"({'; '.join(parts)})" if parts else "(sub-score breakdown not available)"
         )
 
     def _code_panels(self, source_code: str) -> list[Any]:

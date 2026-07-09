@@ -17,9 +17,8 @@ from api.rest.routes import (
     auth,
     candidate_portal,
     health,
+    notifications,
     question_bank,
-    sse,
-    websocket,
 )
 from config.settings import get_settings
 from observability.logging.config import configure_logging
@@ -52,7 +51,6 @@ def create_app() -> FastAPI:
     app.include_router(assessments.router, prefix=settings.api_prefix)
     app.include_router(candidate_portal.router, prefix=settings.api_prefix)
     app.include_router(health.router, prefix=settings.api_prefix)
+    app.include_router(notifications.router, prefix=settings.api_prefix)
     app.include_router(question_bank.router, prefix=settings.api_prefix)
-    app.include_router(sse.router, prefix=settings.api_prefix)
-    app.include_router(websocket.router, prefix=settings.api_prefix)
     return app

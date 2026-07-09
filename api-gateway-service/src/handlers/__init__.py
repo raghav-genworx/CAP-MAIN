@@ -1,1 +1,0 @@
-"""External handler layer."""

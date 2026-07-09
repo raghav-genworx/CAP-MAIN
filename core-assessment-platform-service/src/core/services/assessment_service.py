@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,16 +30,32 @@ from core.services.assessment_lifecycle import (
     slot_summary_from_model,
     submitted_assignment_count,
 )
+from core.services.assessment_policy import (
+    allocate_template_marks,
+    default_language,
+    normalize_languages,
+    validate_scoring_weights,
+)
 from core.services.assessment_schedule import normalize_assessment_schedule
 from core.services.candidate_csv_import import parse_candidate_csv
-from core.services.candidate_session_service import CandidateSessionService
-from core.services.evaluation_adapter_service import (
-    EvaluationAdapterService,
-    EvaluationReportDownload,
+from core.services.candidate_execution_policy import (
+    HIDDEN_CHECK_COOLDOWN_SECONDS,
+    can_execute_final_submission,
+    complete_test_cases,
+    execution_failed_results,
+    hidden_check_cooldown_remaining,
+    hidden_error_type,
+    not_attempted_results,
+    time_remaining_seconds,
 )
+from core.services.candidate_session_service import CandidateSessionService
 from core.services.evaluation_payload_builder import build_evaluation_payload
-from core.services.execution_adapter_service import ExecutionAdapterService
-from core.services.invite_mail_service import InviteMailService
+from core.services.notification_service import NotificationService
+from core.services.output_validation import (
+    apply_answer_validation,
+    default_checker_explanation,
+    normalize_answer_validation_mode,
+)
 from data.models.postgres.assessment_question import AssessmentQuestionModel
 from data.models.postgres.assessment_slot import AssessmentSlotModel
 from data.models.postgres.assessment_template import AssessmentTemplateModel
@@ -47,6 +64,12 @@ from data.models.postgres.candidate_assessment import CandidateAssessmentModel
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.submission import SubmissionModel
 from data.repositories.assessment_repository import AssessmentRepository
+from handlers.http_clients.brevo import InviteMailService
+from handlers.http_clients.evaluation import (
+    EvaluationAdapterService,
+    EvaluationReportDownload,
+)
+from handlers.http_clients.execution import ExecutionAdapterService
 from schemas.assessments import (
     AssessmentCreateRequest,
     AssessmentListResponse,
@@ -98,14 +121,20 @@ from schemas.evaluation_reports import (
     AssessmentEvaluationDashboard,
     AssessmentEvaluationOverview,
     AssessmentReportResponse,
+    CandidateBenchmarkContext,
     CandidateEvaluationSummary,
     CandidateReportResponse,
     EvaluationJobResponse,
     RetryEvaluationResponse,
 )
-from schemas.question_bank import DifficultyLevel, QuestionStatus, TestCase
+from schemas.question_bank import (
+    AnswerValidationMode,
+    DifficultyLevel,
+    QuestionStatus,
+    TestCase,
+)
 
-HIDDEN_CHECK_COOLDOWN_SECONDS = 5
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -141,6 +170,7 @@ class AssessmentService:
         self._execution_adapter = ExecutionAdapterService(self._settings)
         self._evaluation_adapter = EvaluationAdapterService(self._settings)
         self._invite_mail_service = InviteMailService(self._settings)
+        self._notification_service = NotificationService(session, self._settings)
 
     def list_assessments(self, recruiter_uid: str) -> AssessmentListResponse:
         """Return recruiter-owned assessment templates."""
@@ -161,7 +191,7 @@ class AssessmentService:
     ) -> AssessmentRecord:
         """Create a recruiter-owned assessment template."""
 
-        self._validate_scoring_weights(
+        validate_scoring_weights(
             payload.test_case_score_weight,
             payload.coding_score_weight,
             payload.ai_score_weight,
@@ -185,7 +215,7 @@ class AssessmentService:
             hidden_feedback_mode=payload.hidden_feedback_mode.value,
             max_hidden_checks=0,
             hidden_check_cooldown_seconds=HIDDEN_CHECK_COOLDOWN_SECONDS,
-            supported_languages=self._normalize_languages(payload.supported_languages),
+            supported_languages=normalize_languages(payload.supported_languages),
             status=(
                 AssessmentStatus.ARCHIVED.value
                 if payload.status == AssessmentStatus.ARCHIVED
@@ -251,16 +281,14 @@ class AssessmentService:
         model.max_hidden_checks = 0
         model.hidden_check_cooldown_seconds = HIDDEN_CHECK_COOLDOWN_SECONDS
         if payload.supported_languages is not None:
-            model.supported_languages = self._normalize_languages(
-                payload.supported_languages
-            )
+            model.supported_languages = normalize_languages(payload.supported_languages)
         if payload.status is not None:
             model.status = (
                 AssessmentStatus.ARCHIVED.value
                 if payload.status == AssessmentStatus.ARCHIVED
                 else AssessmentStatus.AVAILABLE.value
             )
-        self._validate_scoring_weights(
+        validate_scoring_weights(
             model.test_case_score_weight,
             model.coding_score_weight,
             model.ai_score_weight,
@@ -671,6 +699,9 @@ class AssessmentService:
                 "Unable to persist evaluation backfill results"
             ) from exc
 
+        with suppress(Exception):
+            self._notification_service.flush_events()
+
         return EvaluationBackfillResponse(
             assessment_id=assessment_id,
             requested_count=len(assignments),
@@ -734,13 +765,61 @@ class AssessmentService:
             )
             if candidate is None:
                 raise
+            leaderboard = self._stored_evaluation_dashboard(
+                recruiter_uid,
+                assessment,
+            ).leaderboard
             return CandidateReportResponse(
                 assessment_id=assessment_id,
                 candidate_assessment_id=candidate_assessment_id,
                 candidate=candidate,
+                benchmark=self._stored_candidate_benchmark(candidate, leaderboard),
                 generated_at=datetime.now(UTC),
                 download_label=f"{candidate.candidate_name} scorecard",
             )
+
+    @staticmethod
+    def _stored_candidate_benchmark(
+        candidate: CandidateEvaluationSummary,
+        leaderboard: list[CandidateEvaluationSummary],
+    ) -> CandidateBenchmarkContext:
+        completion_times = [
+            item.time_taken_seconds
+            for item in leaderboard
+            if item.time_taken_seconds is not None
+        ]
+        total = len(leaderboard)
+        return CandidateBenchmarkContext(
+            candidate_rank=candidate.rank,
+            total_candidates=total,
+            average_score=(
+                round(
+                    sum(item.scores.final_score for item in leaderboard) / total,
+                    2,
+                )
+                if total
+                else None
+            ),
+            average_completion_time_seconds=(
+                round(sum(completion_times) / len(completion_times))
+                if completion_times
+                else None
+            ),
+            percentile=(
+                round(
+                    sum(
+                        1
+                        for item in leaderboard
+                        if item.scores.final_score <= candidate.scores.final_score
+                    )
+                    / total
+                    * 100,
+                    1,
+                )
+                if total
+                else None
+            ),
+        )
 
     def retry_evaluation_job(
         self,
@@ -1399,7 +1478,7 @@ class AssessmentService:
                 submission_tag=item.submission_tag,
                 submission_message=item.submission_message,
                 current_question_order=item.current_question_order,
-                time_remaining_seconds=self._time_remaining_seconds(item.deadline_at),
+                time_remaining_seconds=time_remaining_seconds(item.deadline_at),
             )
             for item in assignments
         ]
@@ -1565,8 +1644,13 @@ class AssessmentService:
             current_question_order=context.candidate_assessment.current_question_order,
             time_remaining_seconds=max(
                 0,
-                self._time_remaining_seconds(context.candidate_assessment.deadline_at)
-                or 0,
+                time_remaining_seconds(context.candidate_assessment.deadline_at) or 0,
+            ),
+            tab_switch_count=context.candidate_assessment.tab_switch_count,
+            copy_paste_count=context.candidate_assessment.copy_paste_count,
+            fullscreen_exit_count=context.candidate_assessment.fullscreen_exit_count,
+            question_time_seconds=dict(
+                context.candidate_assessment.question_time_seconds or {}
             ),
             supported_languages=list(context.assessment.supported_languages or []),
             questions=ordered_questions,
@@ -1590,6 +1674,10 @@ class AssessmentService:
         submission.last_saved_at = now
         context.candidate_assessment.current_question_order = (
             payload.current_question_order
+        )
+        self._merge_candidate_activity_evidence(
+            context.candidate_assessment,
+            payload,
         )
         context.candidate_assessment.last_activity_at = now
 
@@ -1618,8 +1706,9 @@ class AssessmentService:
         self._assert_candidate_can_edit(context)
         question = self._question_by_id(context, payload.question_id)
         self._validate_question_language(context, payload.question_id, payload.language)
-        sample_tests = self._complete_test_cases(question.sample_test_cases)
-        results, passed_count, total_count = self._execution_adapter.execute_batch(
+        sample_tests = complete_test_cases(question.sample_test_cases)
+        results, passed_count, total_count = self._execute_candidate_test_batch(
+            question=question,
             source_code=payload.source_code,
             language=payload.language.strip().lower(),
             test_cases=sample_tests,
@@ -1667,16 +1756,18 @@ class AssessmentService:
 
         assignment = context.candidate_assessment
         now = datetime.now(UTC)
-        cooldown_remaining = self._hidden_check_cooldown_remaining(
-            context.assessment, assignment, now
+        cooldown_remaining = hidden_check_cooldown_remaining(
+            assignment.last_hidden_check_at,
+            now,
         )
         if cooldown_remaining > 0:
             raise AssessmentValidationError(
                 "Hidden check cooldown is active for another "
                 f"{cooldown_remaining} seconds"
             )
-        hidden_tests = self._complete_test_cases(question.hidden_test_cases)
-        results, passed_count, total_count = self._execution_adapter.execute_batch(
+        hidden_tests = complete_test_cases(question.hidden_test_cases)
+        results, passed_count, total_count = self._execute_candidate_test_batch(
+            question=question,
             source_code=payload.source_code,
             language=payload.language.strip().lower(),
             test_cases=hidden_tests,
@@ -1697,7 +1788,7 @@ class AssessmentService:
                     "status": item.status,
                     "passed": item.passed,
                     "execution_time": item.execution_time,
-                    "error_type": self._hidden_error_type(item),
+                    "error_type": hidden_error_type(item),
                 }
                 for item in results
             ],
@@ -1723,7 +1814,7 @@ class AssessmentService:
                     status=item.status,
                     passed=item.passed,
                     execution_time=item.execution_time,
-                    error_type=self._hidden_error_type(item),
+                    error_type=hidden_error_type(item),
                 )
                 for item in results
             ],
@@ -1761,6 +1852,11 @@ class AssessmentService:
         summaries: list[SubmissionExecutionSummary] = []
         now = datetime.now(UTC)
 
+        assignment = context.candidate_assessment
+        self._merge_candidate_activity_evidence(assignment, payload)
+        assignment.submission_tag = payload.submission_tag.strip()
+        assignment.submission_message = payload.submission_message.strip()
+
         delivered_mappings = self._candidate_question_mappings(context)
         question_by_id = {question.id: question for question in context.questions}
         delivered_questions = [
@@ -1779,7 +1875,7 @@ class AssessmentService:
             source_code = submission.draft_code.strip()
             if not source_code:
                 source_code = submission.final_code.strip()
-            hidden_tests = self._complete_test_cases(question.hidden_test_cases)
+            hidden_tests = complete_test_cases(question.hidden_test_cases)
             if not source_code:
                 submission.final_code = ""
                 submission.status = SubmissionStatus.SKIPPED_EVALUATION.value
@@ -1802,14 +1898,15 @@ class AssessmentService:
                         results,
                         passed_count,
                         total_count,
-                    ) = self._execution_adapter.execute_batch(
+                    ) = self._execute_candidate_test_batch(
+                        question=question,
                         source_code=source_code,
                         language=submission.source_language,
                         test_cases=hidden_tests,
                         run_type="final_hidden",
                     )
                 except ExecutionAdapterError:
-                    results = self._execution_failed_results(hidden_tests)
+                    results = execution_failed_results(hidden_tests)
                     passed_count = 0
                     total_count = len(hidden_tests)
             submission.final_code = source_code
@@ -1905,10 +2002,6 @@ class AssessmentService:
             if should_auto_submit
             else CandidateAssessmentStatus.SUBMITTED.value
         )
-        context.candidate_assessment.submission_tag = payload.submission_tag.strip()
-        context.candidate_assessment.submission_message = (
-            payload.submission_message.strip()
-        )
         context.candidate_assessment.submitted_at = now
         context.candidate_assessment.last_activity_at = now
         if evaluation_job is None or evaluation_job.result is None:
@@ -1921,6 +2014,15 @@ class AssessmentService:
                 fallback_assignments=[context.candidate_assessment],
             )
 
+        evaluation_completed = (
+            evaluation_job is not None and evaluation_job.result is not None
+        )
+        self._notify_candidate_events(
+            context=context,
+            notify_submission=True,
+            notify_evaluation=evaluation_completed,
+        )
+
         try:
             self._repository.commit()
         except SQLAlchemyError as exc:
@@ -1928,6 +2030,9 @@ class AssessmentService:
             raise AssessmentStoreUnavailableError(
                 "Unable to submit assessment"
             ) from exc
+
+        with suppress(Exception):
+            self._notification_service.flush_events()
 
         return CandidateSubmitResponse(
             candidate_assessment_id=context.candidate_assessment.id,
@@ -1937,6 +2042,33 @@ class AssessmentService:
             submission_tag=context.candidate_assessment.submission_tag,
             submission_message=context.candidate_assessment.submission_message,
         )
+
+    @staticmethod
+    def _merge_candidate_activity_evidence(
+        assignment: CandidateAssessmentModel,
+        payload: CandidateCheckpointRequest | CandidateSubmitRequest,
+    ) -> None:
+        """Keep cumulative browser evidence monotonic across retries and resumes."""
+
+        assignment.tab_switch_count = max(
+            assignment.tab_switch_count,
+            payload.tab_switch_count,
+        )
+        assignment.copy_paste_count = max(
+            assignment.copy_paste_count,
+            payload.copy_paste_count,
+        )
+        assignment.fullscreen_exit_count = max(
+            assignment.fullscreen_exit_count,
+            payload.fullscreen_exit_count,
+        )
+        merged_times = dict(assignment.question_time_seconds or {})
+        for question_id, seconds in payload.question_time_seconds.items():
+            merged_times[question_id] = max(
+                merged_times.get(question_id, 0),
+                seconds,
+            )
+        assignment.question_time_seconds = merged_times
 
     def _backfill_candidate_evaluation(
         self,
@@ -1996,16 +2128,17 @@ class AssessmentService:
             )
 
         try:
-            evaluation_job = self._evaluation_adapter.create_job(
-                self._evaluation_payload_from_context(
-                    context=context,
-                    mappings=delivered_mappings,
-                    questions=delivered_questions,
-                    submissions=delivered_submissions,
-                    summaries=summaries,
-                    submitted_at=submitted_at,
-                )
+            evaluation_payload = self._evaluation_payload_from_context(
+                context=context,
+                mappings=delivered_mappings,
+                questions=delivered_questions,
+                submissions=delivered_submissions,
+                summaries=summaries,
+                submitted_at=submitted_at,
             )
+            if force:
+                evaluation_payload["force"] = True
+            evaluation_job = self._evaluation_adapter.create_job(evaluation_payload)
         except EvaluationAdapterError as exc:
             return EvaluationBackfillCandidateResult(
                 candidate_assessment_id=assignment.id,
@@ -2037,6 +2170,12 @@ class AssessmentService:
                 else SubmissionStatus.SKIPPED_EVALUATION.value
             )
 
+        self._notify_candidate_events(
+            context=context,
+            notify_submission=False,
+            notify_evaluation=True,
+        )
+
         return EvaluationBackfillCandidateResult(
             candidate_assessment_id=assignment.id,
             status="evaluated",
@@ -2045,6 +2184,57 @@ class AssessmentService:
             final_score=evaluation_job.result.scores.final_score,
             rank=evaluation_job.result.rank,
         )
+
+    def _notify_candidate_events(
+        self,
+        *,
+        context: CandidateAssessmentContext,
+        notify_submission: bool,
+        notify_evaluation: bool,
+    ) -> None:
+        """Emit recruiter dashboard notifications without breaking the flow."""
+
+        recruiter_uid = getattr(context.assessment, "recruiter_uid", None)
+        if not recruiter_uid:
+            return
+        assessment_id = context.assessment.id
+        assessment_title = getattr(context.assessment, "title", "") or ""
+        slot_id = context.slot.id
+        slot_title = getattr(context.slot, "title", "") or ""
+        candidate_name = getattr(context.candidate, "full_name", "") or "A candidate"
+
+        if notify_submission:
+            try:
+                self._notification_service.record_submission(
+                    recruiter_uid=recruiter_uid,
+                    assessment_id=assessment_id,
+                    assessment_title=assessment_title,
+                    slot_id=slot_id,
+                    slot_title=slot_title,
+                    candidate_name=candidate_name,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record submission notification for recruiter %s",
+                    recruiter_uid,
+                    exc_info=True,
+                )
+        if notify_evaluation:
+            try:
+                self._notification_service.record_evaluation(
+                    recruiter_uid=recruiter_uid,
+                    assessment_id=assessment_id,
+                    assessment_title=assessment_title,
+                    slot_id=slot_id,
+                    slot_title=slot_title,
+                    candidate_name=candidate_name,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record evaluation notification for recruiter %s",
+                    recruiter_uid,
+                    exc_info=True,
+                )
 
     def _final_hidden_summaries_for_backfill(
         self,
@@ -2088,13 +2278,13 @@ class AssessmentService:
         source_code = (submission.final_code or submission.draft_code).strip()
         if not source_code:
             raise ValueError("Empty submissions must not be evaluated.")
-        hidden_tests = self._complete_test_cases(question.hidden_test_cases)
-        if not self._can_execute_final_submission(
+        hidden_tests = complete_test_cases(question.hidden_test_cases)
+        if not can_execute_final_submission(
             source_code,
             submission.source_language,
             hidden_tests,
         ):
-            results = self._not_attempted_results(hidden_tests)
+            results = not_attempted_results(hidden_tests)
             passed_count = 0
             total_count = len(hidden_tests)
         else:
@@ -2103,14 +2293,15 @@ class AssessmentService:
                     results,
                     passed_count,
                     total_count,
-                ) = self._execution_adapter.execute_batch(
+                ) = self._execute_candidate_test_batch(
+                    question=question,
                     source_code=source_code,
                     language=submission.source_language,
                     test_cases=hidden_tests,
                     run_type="final_hidden",
                 )
             except ExecutionAdapterError:
-                results = self._execution_failed_results(hidden_tests)
+                results = execution_failed_results(hidden_tests)
                 passed_count = 0
                 total_count = len(hidden_tests)
 
@@ -2127,6 +2318,44 @@ class AssessmentService:
             total_count=total_count,
             results=results,
         )
+
+    @staticmethod
+    def _score_results_for_question(
+        question: QuestionBankQuestionModel,
+        results: list[ExecutionCaseResult],
+    ) -> tuple[list[ExecutionCaseResult], int, int]:
+        scored_results = [
+            apply_answer_validation(
+                result,
+                mode=getattr(question, "answer_validation_mode", "exact") or "exact",
+                checker_source=getattr(question, "output_checker", "") or "",
+            )
+            for result in results
+        ]
+        return (
+            scored_results,
+            sum(1 for result in scored_results if result.passed),
+            len(scored_results),
+        )
+
+    def _execute_candidate_test_batch(
+        self,
+        *,
+        question: QuestionBankQuestionModel,
+        source_code: str,
+        language: str,
+        test_cases: list[TestCase],
+        run_type: str,
+    ) -> tuple[list[ExecutionCaseResult], int, int]:
+        """Run one candidate source against all required cases in one batch."""
+
+        results, _, _ = self._execution_adapter.execute_batch(
+            source_code=source_code,
+            language=language,
+            test_cases=test_cases,
+            run_type=run_type,
+        )
+        return self._score_results_for_question(question, results)
 
     @staticmethod
     def _has_evaluation_job_metadata(submissions: list[SubmissionModel]) -> bool:
@@ -2459,7 +2688,7 @@ class AssessmentService:
                 raise AssessmentValidationError(
                     "Selected question order must match the difficulty template"
                 )
-        template_marks = self._template_marks(blueprint)
+        template_marks = allocate_template_marks(blueprint)
         if assessment.shuffle_questions:
             marks_by_difficulty = {
                 difficulty: template_marks[blueprint.index(difficulty)]
@@ -2474,31 +2703,6 @@ class AssessmentService:
             ):
                 item["marks"] = template_marks[index]
         return sorted(normalized, key=lambda item: item["question_order"])
-
-    @staticmethod
-    def _difficulty_ratio(difficulty: str) -> int:
-        if difficulty == DifficultyLevel.EASY.value:
-            return 1
-        if difficulty == DifficultyLevel.HARD.value:
-            return 3
-        return 2
-
-    def _template_marks(self, blueprint: list[str]) -> list[int]:
-        """Allocate exactly 100 marks across delivered template slots."""
-
-        ratios = [self._difficulty_ratio(difficulty) for difficulty in blueprint]
-        total_ratio = sum(ratios) or 1
-        raw_marks = [(ratio / total_ratio) * 100 for ratio in ratios]
-        marks = [int(item) for item in raw_marks]
-        remainder = 100 - sum(marks)
-        ranked_remainders = sorted(
-            range(len(raw_marks)),
-            key=lambda index: raw_marks[index] - marks[index],
-            reverse=True,
-        )
-        for index in ranked_remainders[:remainder]:
-            marks[index] += 1
-        return marks
 
     def _question_bank_records(
         self,
@@ -2516,35 +2720,6 @@ class AssessmentService:
             raise AssessmentStoreUnavailableError(
                 "Unable to read assessment questions"
             ) from exc
-
-    def _validate_publishable_assessment(
-        self,
-        recruiter_uid: str,
-        model: AssessmentTemplateModel,
-    ) -> None:
-        mappings = self._assessment_mappings(model.id)
-        if not mappings:
-            raise AssessmentValidationError(
-                "Add at least one validated question before publishing"
-            )
-        if not self._normalize_languages(list(model.supported_languages or [])):
-            raise AssessmentValidationError(
-                "Assessment must have at least one supported language"
-            )
-        if model.duration_minutes <= 0:
-            raise AssessmentValidationError(
-                "Assessment duration must be greater than zero"
-            )
-
-    def _validate_scoring_weights(
-        self,
-        test_case_score_weight: float,
-        coding_score_weight: float,
-        ai_score_weight: float,
-    ) -> None:
-        total = test_case_score_weight + coding_score_weight + ai_score_weight
-        if abs(total - 100.0) > 0.01:
-            raise AssessmentValidationError("Scoring weights must add up to 100")
 
     def _slot_candidate_assignments(
         self,
@@ -2755,14 +2930,15 @@ class AssessmentService:
         for mapping in context.mappings:
             if mapping.question_id in context.submissions:
                 continue
-            default_language = self._default_language(
-                question_by_id.get(mapping.question_id)
+            question = question_by_id.get(mapping.question_id)
+            default_submission_language = default_language(
+                question.supported_languages if question is not None else None
             )
             submission = SubmissionModel(
                 candidate_assessment_id=context.candidate_assessment.id,
                 assessment_id=context.assessment.id,
                 question_id=mapping.question_id,
-                source_language=default_language,
+                source_language=default_submission_language,
                 draft_code="",
                 final_code="",
                 status=SubmissionStatus.DRAFT.value,
@@ -2793,6 +2969,19 @@ class AssessmentService:
                     constraints=question.constraints,
                     input_format=question.input_format,
                     output_format=question.output_format,
+                    answer_validation_mode=AnswerValidationMode(
+                        normalize_answer_validation_mode(
+                            getattr(question, "answer_validation_mode", "exact"),
+                        )
+                    ),
+                    output_checker_explanation=(
+                        getattr(question, "output_checker_explanation", "") or ""
+                    ).strip()
+                    or default_checker_explanation(
+                        normalize_answer_validation_mode(
+                            getattr(question, "answer_validation_mode", "exact"),
+                        ),
+                    ),
                     sample_test_cases=[
                         TestCase.model_validate(item)
                         for item in (question.sample_test_cases or [])
@@ -2827,7 +3016,7 @@ class AssessmentService:
             raise AssessmentValidationError(
                 "Assessment difficulty template is incomplete"
             )
-        template_marks = self._template_marks(blueprint)
+        template_marks = allocate_template_marks(blueprint)
         if not should_randomize:
             return [
                 self._delivered_mapping(mapping, index + 1, template_marks[index])
@@ -2932,19 +3121,6 @@ class AssessmentService:
                 f"Language {normalized} is not allowed for this question"
             )
 
-    def _hidden_check_cooldown_remaining(
-        self,
-        assessment: AssessmentTemplateModel,
-        assignment: CandidateAssessmentModel,
-        now: datetime,
-    ) -> int:
-        if not assignment.last_hidden_check_at or HIDDEN_CHECK_COOLDOWN_SECONDS <= 0:
-            return 0
-        elapsed = int(
-            (now - assignment.last_hidden_check_at.astimezone(UTC)).total_seconds()
-        )
-        return max(0, HIDDEN_CHECK_COOLDOWN_SECONDS - elapsed)
-
     def _auto_submit_if_expired(self, context: CandidateAssessmentContext) -> None:
         deadline = context.candidate_assessment.deadline_at
         if deadline is None:
@@ -2981,105 +3157,6 @@ class AssessmentService:
         except SQLAlchemyError as exc:
             raise AssessmentStoreUnavailableError("Unable to read submissions") from exc
 
-    @staticmethod
-    def _normalize_languages(values: list[str]) -> list[str]:
-        languages: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            language = value.strip().lower()
-            if language and language not in seen:
-                languages.append(language)
-                seen.add(language)
-        return languages or ["python", "java", "cpp"]
-
-    @staticmethod
-    def _default_language(question: QuestionBankQuestionModel | None) -> str:
-        languages = (
-            list(question.supported_languages or []) if question is not None else []
-        )
-        return languages[0] if languages else "python"
-
-    @staticmethod
-    def _complete_test_cases(
-        raw_cases: list[dict[str, Any]] | list[TestCase],
-    ) -> list[TestCase]:
-        cases = [
-            case if isinstance(case, TestCase) else TestCase.model_validate(case)
-            for case in raw_cases
-        ]
-        return [
-            case
-            for case in cases
-            if case.input.strip() and case.expected_output.strip()
-        ]
-
-    @staticmethod
-    def _can_execute_final_submission(
-        source_code: str,
-        language: str,
-        test_cases: list[TestCase],
-    ) -> bool:
-        return bool(source_code.strip() and language.strip() and test_cases)
-
-    @staticmethod
-    def _not_attempted_results(test_cases: list[TestCase]) -> list[ExecutionCaseResult]:
-        return [
-            ExecutionCaseResult(
-                index=index,
-                input=test_case.input,
-                expected_output=test_case.expected_output,
-                status="not_attempted",
-                passed=False,
-                message="No candidate answer was submitted for execution.",
-            )
-            for index, test_case in enumerate(test_cases, start=1)
-        ]
-
-    @staticmethod
-    def _execution_failed_results(
-        test_cases: list[TestCase],
-    ) -> list[ExecutionCaseResult]:
-        return [
-            ExecutionCaseResult(
-                index=index,
-                input=test_case.input,
-                expected_output=test_case.expected_output,
-                status="execution_failed",
-                passed=False,
-                message="Execution service could not evaluate this answer.",
-            )
-            for index, test_case in enumerate(test_cases, start=1)
-        ]
-
-    @staticmethod
-    def _hidden_error_type(result: ExecutionCaseResult) -> str:
-        """Return useful failure classification without leaking hidden test data."""
-
-        if result.passed:
-            return ""
-        status = result.status.strip() or "Execution failed"
-        normalized = status.lower()
-        if "compile" in normalized:
-            return "Compilation error"
-        if "time" in normalized and "limit" in normalized:
-            return "Time limit exceeded"
-        if "memory" in normalized:
-            return "Memory limit exceeded"
-        if "runtime" in normalized or result.stderr.strip():
-            return "Runtime error"
-        if "wrong" in normalized or normalized in {"failed", "rejected"}:
-            return "Wrong answer"
-        return status
-
-    @staticmethod
-    def _time_remaining_seconds(deadline_at: datetime | None) -> int | None:
-        if deadline_at is None:
-            return None
-        remaining = int(
-            (deadline_at.astimezone(UTC) - datetime.now(UTC)).total_seconds()
-        )
-        return max(0, remaining)
-
 
 def dispatch_slot_invites_background(
     *,
@@ -3090,7 +3167,7 @@ def dispatch_slot_invites_background(
 ) -> None:
     """Background-task entrypoint for assessment invite delivery."""
 
-    from data.database import create_session_factory
+    from data.clients.database import create_session_factory
 
     session = create_session_factory(settings)()
     try:

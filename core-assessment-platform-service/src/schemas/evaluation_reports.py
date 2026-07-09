@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +24,39 @@ class EvaluationScores(BaseModel):
     ai_score: float
     final_score: float
     percentage: float
+
+
+class EvaluationResult(BaseModel):
+    """Candidate scorecard subset consumed from the evaluation service."""
+
+    rank: int | None = None
+    scores: EvaluationScores
+    hidden_passed: int
+    hidden_total: int
+    total_execution_time_ms: float
+    peak_memory_kb: int
+    ai_quality: dict[str, Any] = Field(default_factory=dict)
+    question_breakdown: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvaluationJobResult(BaseModel):
+    """Evaluation job response consumed by the core service."""
+
+    job_id: str
+    assessment_id: str
+    candidate_assessment_id: str
+    status: str
+    attempt_count: int
+    error_message: str | None = None
+    result: EvaluationResult | None = None
+
+
+class CandidateEvaluationScorecard(BaseModel):
+    """Leaderboard scorecard subset consumed by the core service."""
+
+    candidate_assessment_id: str
+    rank: int | None = None
+    scores: EvaluationScores
 
 
 class QuestionTestCaseResult(BaseModel):

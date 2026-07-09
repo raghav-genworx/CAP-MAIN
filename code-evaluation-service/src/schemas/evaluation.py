@@ -155,6 +155,7 @@ class EvaluationJobCreateRequest(BaseModel):
     integrity: CandidateIntegritySignal | None = None
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     time_taken_seconds: int | None = Field(default=None, ge=0)
+    force: bool = False
 
 
 class QuestionEvaluationBreakdown(BaseModel):

@@ -2,12 +2,6 @@
 
 import re
 
-EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
-PHONE_REGEX = re.compile(
-    r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
-)
-CREDIT_CARD_REGEX = re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b")
-
 INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "instruction override",
@@ -79,21 +73,6 @@ def check_input_guardrails(prompt: str | None) -> str | None:
                 f"detected ({label})."
             )
 
-    if EMAIL_REGEX.search(prompt):
-        return (
-            "Data sanitation alert: Prompt contains personal email information, "
-            "which is not allowed in AI generation requests."
-        )
-    if PHONE_REGEX.search(prompt):
-        return (
-            "Data sanitation alert: Prompt contains personal phone number details, "
-            "which are not allowed in AI generation requests."
-        )
-    if CREDIT_CARD_REGEX.search(prompt):
-        return (
-            "Data sanitation alert: Prompt contains credit card details, which are "
-            "not allowed in AI generation requests."
-        )
     if SELF_HARM_PATTERN.search(prompt):
         return (
             "Safety alert: Prompt contains self-harm content and cannot be used "

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.question_tag_taxonomy import QUESTION_TAG_CATEGORIES
+
 from ..states.question_state import QuestionGenerationState
 from .prompt_contract import build_task_system_prompt, build_task_user_prompt
 
@@ -27,8 +29,8 @@ def build_metadata_prompt(
                 "and constraints."
             ),
             (
-                "Use recruiter-searchable topic and tag labels without synonyms "
-                "or duplicates."
+                "Use only exact tag identifiers from the supplied taxonomy; never "
+                "invent, paraphrase, or broaden a tag."
             ),
             "Complexity and approach must describe the supplied reference solution.",
         ),
@@ -48,6 +50,7 @@ def build_metadata_prompt(
             "testcases": {"sample": sample_cases, "hidden": hidden_cases},
             "reference_solution": state.get("reference_solution", ""),
             "execution_validation_summary": validation_summary,
+            "allowed_tag_taxonomy": QUESTION_TAG_CATEGORIES,
         },
         requirements=(
             (
@@ -55,8 +58,13 @@ def build_metadata_prompt(
                 "constrained problem."
             ),
             (
-                "Return 3..6 normalized topics, 3..6 specific tags, and one broad "
-                "category."
+                "Return topics as an empty list, 1..6 exact matching tags from "
+                "allowed_tag_taxonomy, and the taxonomy category that best "
+                "describes those tags."
+            ),
+            (
+                "Assign a tag only when the problem or solution directly requires "
+                "it; never pad the result to increase the tag count."
             ),
             "Set expected_solve_time_minutes to a realistic value in 1..180.",
             (

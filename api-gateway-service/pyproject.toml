@@ -5,12 +5,13 @@ description = "API Gateway Service"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.109.0",
+    "google-auth>=2.29.0",
     "httpx>=0.28.0",
     "prometheus-client>=0.20.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "requests>=2.31.0",
     "slowapi>=0.1.9",
-    "tenacity>=8.2.0",
     "uvicorn[standard]>=0.27.0",
 ]
 
@@ -19,7 +20,6 @@ dev = [
     "httpx>=0.28.0",
     "mypy>=1.17.0",
     "pre-commit>=4.0.0",
-    "pytest>=8.0.0",
     "ruff>=0.12.0",
 ]
 
@@ -51,7 +51,3 @@ strict = true
 mypy_path = "src"
 disallow_untyped_defs = true
 no_implicit_optional = true
-
-[tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]

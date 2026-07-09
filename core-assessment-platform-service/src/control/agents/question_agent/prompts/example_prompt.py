@@ -18,6 +18,7 @@ def build_example_prompt(state: QuestionGenerationState) -> tuple[str, str]:
             "Derive outputs independently from the problem contract.",
             "Each sample input must satisfy every format rule and constraint.",
             "Sample explanations must describe why the output follows from the input.",
+            "The requested sample count is a hard output contract.",
         ),
     )
     user_prompt = build_task_user_prompt(
@@ -32,11 +33,16 @@ def build_example_prompt(state: QuestionGenerationState) -> tuple[str, str]:
             },
             "difficulty": state.get("difficulty", "medium"),
             "required_sample_count": settings.sample_test_case_count,
+            "answer_validation": {
+                "mode": state.get("answer_validation_mode", "exact"),
+                "explanation": state.get("output_checker_explanation", ""),
+            },
         },
         requirements=(
             (
                 "Return exactly required_sample_count rows and set is_sample=true "
-                "for every row."
+                "for every row. If required_sample_count is 3, the array length "
+                "must be 3."
             ),
             (
                 "Use raw STDIN and STDOUT strings with required newlines "
@@ -44,11 +50,21 @@ def build_example_prompt(state: QuestionGenerationState) -> tuple[str, str]:
             ),
             (
                 "Cover distinct normal or readable boundary behavior; do not "
-                "duplicate inputs."
+                "duplicate inputs. Distinct means the raw input strings differ."
             ),
             (
                 "Recompute every expected_output and include a concise "
                 "explanation for each row."
+            ),
+            (
+                "When answer_validation.mode is not exact, expected_output must "
+                "still be one valid exemplar output for the input; it is not the "
+                "only accepted output."
+            ),
+            (
+                "Never omit a required row because the contract is ambiguous; "
+                "choose the most conservative valid readable case and mention "
+                "the ambiguity in notes."
             ),
             "Use notes only for a material ambiguity in the problem contract.",
         ),

@@ -11,7 +11,6 @@ RUN uv sync --frozen --no-dev
 
 COPY src ./src
 COPY alembic.ini ./alembic.ini
-COPY alembic ./alembic
 
 FROM python:3.11-slim
 
@@ -21,7 +20,6 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/alembic.ini /app/alembic.ini
-COPY --from=builder /app/alembic /app/alembic
 RUN mkdir -p /app/data && chown -R appuser:appuser /app/data
 
 ENV APP_ENV=production \
@@ -32,4 +30,4 @@ ENV APP_ENV=production \
 USER appuser
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

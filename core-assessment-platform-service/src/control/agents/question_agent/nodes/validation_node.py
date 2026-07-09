@@ -18,10 +18,15 @@ class ValidationNodeMixin(QuestionAgentToolsMixin):
     def _validation_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
-        loop_result = self._run_adversarial_solution_loop(state)
+        oracle_patch = self._normalize_expected_outputs_with_oracle(state)
+        validation_state: QuestionGenerationState = {
+            **state,
+            **oracle_patch,
+        }
+        loop_result = self._run_adversarial_solution_loop(validation_state)
         solution_validation = loop_result["solution_validation"]
         system_prompt, user_prompt = build_validation_prompt(
-            state,
+            validation_state,
             solution_validation=solution_validation,
         )
         model = self._structured_completion(
@@ -46,23 +51,23 @@ class ValidationNodeMixin(QuestionAgentToolsMixin):
                 solution_validation.runner_notes[:1] or [solution_validation.summary],
             )
 
-        notes = self._append_notes(state.get("notes", []), *model.notes)
+        notes = self._append_notes(validation_state.get("notes", []), *model.notes)
         execution_history = self._append_notes(
-            state.get("execution_history", []),
+            validation_state.get("execution_history", []),
             "Validation Agent: completed consistency review",
             f"Execution Validation: {solution_validation.summary}",
         )
         primary_language = self._normalize_solution_language(
-            state.get("reference_language", "python"),
+            validation_state.get("reference_language", "python"),
         )
-        reference_solutions = dict(state.get("reference_solutions", {}))
+        reference_solutions = dict(validation_state.get("reference_solutions", {}))
         if loop_result["reference_solution"].strip():
             reference_solutions[primary_language] = ReferenceSolutionArtifact(
                 language=primary_language,
                 source_code=loop_result["reference_solution"],
                 validation_status=ValidationStatus(solution_validation.status),
-                time_complexity=state.get("time_complexity", ""),
-                space_complexity=state.get("space_complexity", ""),
+                time_complexity=validation_state.get("time_complexity", ""),
+                space_complexity=validation_state.get("space_complexity", ""),
             )
         return {
             "reference_solution": loop_result["reference_solution"],

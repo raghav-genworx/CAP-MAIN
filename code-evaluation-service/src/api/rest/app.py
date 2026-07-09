@@ -12,7 +12,7 @@ from api.middleware.cors import setup_cors
 from api.middleware.error_handler import setup_error_handlers
 from api.middleware.logging import setup_request_logging
 from api.middleware.metrics import setup_metrics
-from api.rest.routes import evaluations, health, sse, websocket
+from api.rest.routes import evaluations, health
 from config.settings import get_settings
 from observability.logging.config import configure_logging
 
@@ -45,6 +45,4 @@ def create_app() -> FastAPI:
 
     app.include_router(evaluations.router, prefix=settings.api_prefix)
     app.include_router(health.router, prefix=settings.api_prefix)
-    app.include_router(sse.router, prefix=settings.api_prefix)
-    app.include_router(websocket.router, prefix=settings.api_prefix)
     return app

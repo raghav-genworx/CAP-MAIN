@@ -11,8 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-
-EVALUATION_SCHEMA = "evaluation"
+from data.models.postgres.base import EVALUATION_SCHEMA
 
 revision: str = "20260627_0001"
 down_revision: str | None = None
@@ -21,7 +20,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+    if EVALUATION_SCHEMA != "public":
+        op.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
     op.create_table(
         "evaluation_jobs",
         sa.Column("job_id", sa.String(length=80), nullable=False),

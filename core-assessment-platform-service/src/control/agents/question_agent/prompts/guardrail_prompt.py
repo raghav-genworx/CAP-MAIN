@@ -70,6 +70,20 @@ TEST_CASE_GUARDRAILS: tuple[str, ...] = (
         "Public samples must teach distinct behavior. Hidden cases must cover "
         "boundaries, branches, common wrong assumptions, and valid stress inputs."
     ),
+    (
+        "When the task context provides a testcase count, return exactly that "
+        "many rows in the requested bucket. Do not return fewer rows because of "
+        "ambiguity, do not add extras, and do not move testcase data into notes."
+    ),
+    (
+        "A testcase is distinct by input string. Never repeat the same raw STDIN "
+        "in public samples, hidden cases, repair candidates, or adversarial "
+        "cases."
+    ),
+    (
+        "Set is_sample=true only for public sample rows and is_sample=false for "
+        "all hidden, edge, stress, repair, and adversarial rows."
+    ),
 )
 
 SOLUTION_GUARDRAILS: tuple[str, ...] = (

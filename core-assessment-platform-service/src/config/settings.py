@@ -104,10 +104,6 @@ class Settings(BaseSettings):
         default="llama-3.3-70b-versatile",
         validation_alias=AliasChoices("GROQ_MODEL", "VITE_GROQ_MODEL"),
     )
-    groq_qwen_model: str = Field(
-        default="qwen/qwen3-32b",
-        validation_alias=AliasChoices("GROQ_QWEN_MODEL"),
-    )
     groq_gpt_oss_model: str = Field(
         default="openai/gpt-oss-120b",
         validation_alias=AliasChoices("GROQ_GPT_OSS_MODEL"),
@@ -115,22 +111,6 @@ class Settings(BaseSettings):
     groq_retry_count: int = 3
     groq_retry_backoff_seconds: float = 0.5
     groq_request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
-    ollama_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("OLLAMA_ENABLED"),
-    )
-    ollama_base_url: str = Field(
-        default="http://localhost:11434/v1",
-        validation_alias=AliasChoices("OLLAMA_BASE_URL"),
-    )
-    ollama_model: str = Field(
-        default="llama3.3:70b",
-        validation_alias=AliasChoices("OLLAMA_MODEL"),
-    )
-    ollama_api_key: str = Field(
-        default="ollama",
-        validation_alias=AliasChoices("OLLAMA_API_KEY"),
-    )
     langsmith_tracing: bool = Field(
         default=False,
         validation_alias=AliasChoices("LANGSMITH_TRACING", "LANGCHAIN_TRACING"),
@@ -222,6 +202,21 @@ class Settings(BaseSettings):
         "postgresql+psycopg://cap_user:cap_password@localhost:55432/cap_core"
     )
     auto_create_recruiter_role: bool = True
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        validation_alias=AliasChoices("REDIS_URL", "CELERY_BROKER_URL"),
+        description="Redis connection URL for notification pub/sub push.",
+    )
+    notification_channel_prefix: str = Field(
+        default="notifications",
+        description="Redis channel prefix for recruiter notification events.",
+    )
+    notification_stream_heartbeat_seconds: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=120.0,
+        description="Idle heartbeat interval for the notification SSE stream.",
+    )
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> "Settings":
@@ -302,16 +297,13 @@ class Settings(BaseSettings):
 
     @property
     def groq_fallback_models(self) -> list[str]:
-        """Return Groq models in preferred failover order."""
+        """Return GPT-OSS then Llama 70B in failover order."""
 
         models = [
-            self.groq_qwen_model.strip(),
             self.groq_gpt_oss_model.strip(),
+            self.groq_model.strip(),
         ]
-        active_models = [model for model in models if model]
-        if active_models:
-            return active_models
-        return [self.groq_model.strip()] if self.groq_model.strip() else []
+        return list(dict.fromkeys(model for model in models if model))
 
     @property
     def ai_model_sequence_label(self) -> str:
@@ -319,7 +311,6 @@ class Settings(BaseSettings):
 
         labels = [
             *(f"groq:{model}" for model in self.groq_fallback_models),
-            *([f"ollama:{self.ollama_model.strip()}"] if self.ollama_enabled else []),
         ]
         return " -> ".join(labels)
 

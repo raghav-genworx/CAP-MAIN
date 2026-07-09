@@ -31,6 +31,13 @@ class QuestionCreationMode(StrEnum):
     AI_ASSISTED = "ai_assisted"
 
 
+class QuestionVisibility(StrEnum):
+    """Who may discover and use a question in an assessment."""
+
+    PRIVATE = "private"
+    PUBLIC = "public"
+
+
 class MetadataStatus(StrEnum):
     """AI metadata classification lifecycle."""
 
@@ -55,6 +62,16 @@ class ValidationStatus(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
     STALE = "stale"
+
+
+class AnswerValidationMode(StrEnum):
+    """How solution output should be judged for a question."""
+
+    EXACT = "exact"
+    UNORDERED = "unordered"
+    FLOATING = "floating"
+    MULTIPLE_VALID = "multiple_valid"
+    CONSTRUCTIVE = "constructive"
 
 
 class QuestionGroupStatus(StrEnum):
@@ -136,6 +153,7 @@ class SolutionValidationCaseResult(BaseModel):
     stderr: str = ""
     compile_output: str = ""
     message: str = ""
+    checker_message: str = ""
     token: str = ""
     execution_time: str = ""
     memory_kb: int | None = None
@@ -186,7 +204,7 @@ class QuestionBase(BaseModel):
     """Common question fields."""
 
     title: str = Field(min_length=3, max_length=180)
-    problem_statement: str = Field(min_length=20)
+    problem_statement: str = ""
     difficulty: DifficultyLevel = DifficultyLevel.MEDIUM
     topics: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -212,11 +230,15 @@ class QuestionBase(BaseModel):
     reference_solutions: dict[str, ReferenceSolutionArtifact] = Field(
         default_factory=dict
     )
+    answer_validation_mode: AnswerValidationMode = AnswerValidationMode.EXACT
+    output_checker: str = ""
+    output_checker_explanation: str = ""
     solution_approach: str = ""
     time_complexity: str = ""
     space_complexity: str = ""
     status: QuestionStatus = QuestionStatus.DRAFT
     creation_mode: QuestionCreationMode = QuestionCreationMode.MANUAL
+    visibility: QuestionVisibility = QuestionVisibility.PRIVATE
 
 
 class QuestionCreateRequest(QuestionBase):
@@ -257,6 +279,9 @@ class QuestionAIDraftContext(BaseModel):
     reference_solutions: dict[str, ReferenceSolutionArtifact] = Field(
         default_factory=dict
     )
+    answer_validation_mode: AnswerValidationMode = AnswerValidationMode.EXACT
+    output_checker: str = ""
+    output_checker_explanation: str = ""
     solution_approach: str = ""
     time_complexity: str = ""
     space_complexity: str = ""
@@ -361,6 +386,7 @@ class QuestionDraftRefinementRequest(BaseModel):
     """Refine existing draft tests or source without regenerating the question."""
 
     draft: QuestionAIDraftContext
+    generation_settings: QuestionGenerationSettings | None = None
 
 
 class QuestionDraftRefinementResponse(BaseModel):

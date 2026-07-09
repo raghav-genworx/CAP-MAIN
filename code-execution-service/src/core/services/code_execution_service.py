@@ -1,5 +1,7 @@
 """Business logic for executing user-submitted code."""
 
+import logging
+
 from config.settings import Settings
 from constants.languages import (
     COMPILED_JUDGE0_LANGUAGE_IDS,
@@ -12,11 +14,15 @@ from schemas.execution import (
     BatchExecutionCaseResult,
     BatchExecutionRequest,
     BatchExecutionResponse,
+    BatchTestCase,
     ExecutionRequest,
     ExecutionResponse,
     Judge0Payload,
+    Judge0SubmissionResult,
     LanguageResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CodeExecutionService:
@@ -67,10 +73,8 @@ class CodeExecutionService:
     ) -> BatchExecutionResponse:
         """Execute one source against multiple stdin/expected-output pairs."""
 
-        results: list[BatchExecutionCaseResult] = []
-        passed_count = 0
-        for test_case in request.test_cases:
-            payload = self._build_payload(
+        payloads = [
+            self._build_payload(
                 ExecutionRequest(
                     source_code=request.source_code,
                     language_id=request.language_id,
@@ -81,44 +85,124 @@ class CodeExecutionService:
                     memory_limit=request.memory_limit,
                 )
             )
-            result = await self._judge0_client.execute(payload)
-            if result.status is None:
-                raise Judge0ServiceError(
-                    "Judge0 returned a result without execution status."
-                )
-            status = result.status.description
-            normalized_passed = self._outputs_match_with_safe_normalization(
-                result.stdout or "",
-                test_case.expected_output,
+            for test_case in request.test_cases
+        ]
+        try:
+            judge0_results = await self._judge0_client.execute_batch(payloads)
+        except Judge0ServiceError as exc:
+            logger.warning(
+                "judge0_batch_rejected_falling_back_to_single_submissions "
+                "run_type=%s case_count=%s message=%s",
+                request.run_type,
+                len(payloads),
+                exc.message,
             )
-            normalized_status = status.strip().lower()
-            passed = normalized_status == "accepted" or (
-                normalized_status == "wrong answer" and normalized_passed
+            return await self._execute_batch_individually(
+                request=request,
+                payloads=payloads,
             )
-            if normalized_passed and normalized_status == "wrong answer":
-                status = "Accepted (normalized trailing whitespace)"
-            if passed:
+
+        if len(judge0_results) != len(request.test_cases):
+            raise Judge0ServiceError("Judge0 returned an incomplete batch response.")
+
+        results: list[BatchExecutionCaseResult] = []
+        passed_count = 0
+        for test_case, result in zip(
+            request.test_cases,
+            judge0_results,
+            strict=True,
+        ):
+            case_result = self._case_result_from_judge0(test_case, result)
+            if case_result.passed:
                 passed_count += 1
-            results.append(
-                BatchExecutionCaseResult(
-                    input=test_case.input,
-                    expected_output=test_case.expected_output,
-                    actual_output=(result.stdout or "").strip(),
-                    status=status,
-                    passed=passed,
-                    stderr=(result.stderr or "").strip(),
-                    compile_output=(result.compile_output or "").strip(),
-                    message=(result.message or "").strip(),
-                    execution_time=str(result.time or ""),
-                    memory_kb=result.memory,
-                    token=result.token,
-                )
-            )
+            results.append(case_result)
         return BatchExecutionResponse(
             run_type=request.run_type,
             passed_count=passed_count,
             total_count=len(results),
             results=results,
+        )
+
+    async def _execute_batch_individually(
+        self,
+        *,
+        request: BatchExecutionRequest,
+        payloads: list[Judge0Payload],
+    ) -> BatchExecutionResponse:
+        """Retry a rejected batch one case at a time and preserve partial results."""
+
+        results: list[BatchExecutionCaseResult] = []
+        passed_count = 0
+        for test_case, payload in zip(request.test_cases, payloads, strict=True):
+            try:
+                judge0_result = await self._judge0_client.execute(payload)
+            except Judge0ServiceError as exc:
+                results.append(self._case_result_from_error(test_case, exc))
+                continue
+
+            case_result = self._case_result_from_judge0(test_case, judge0_result)
+            if case_result.passed:
+                passed_count += 1
+            results.append(case_result)
+
+        return BatchExecutionResponse(
+            run_type=request.run_type,
+            passed_count=passed_count,
+            total_count=len(results),
+            results=results,
+        )
+
+    def _case_result_from_judge0(
+        self,
+        test_case: BatchTestCase,
+        result: Judge0SubmissionResult,
+    ) -> BatchExecutionCaseResult:
+        """Normalize one Judge0 result into the public batch response shape."""
+
+        if result.status is None:
+            raise Judge0ServiceError(
+                "Judge0 returned a result without execution status."
+            )
+
+        status = result.status.description
+        normalized_passed = self._outputs_match_with_safe_normalization(
+            result.stdout or "",
+            test_case.expected_output,
+        )
+        normalized_status = status.strip().lower()
+        passed = normalized_status == "accepted" or (
+            normalized_status == "wrong answer" and normalized_passed
+        )
+        if normalized_passed and normalized_status == "wrong answer":
+            status = "Accepted (normalized trailing whitespace)"
+
+        return BatchExecutionCaseResult(
+            input=test_case.input,
+            expected_output=test_case.expected_output,
+            actual_output=(result.stdout or "").strip(),
+            status=status,
+            passed=passed,
+            stderr=(result.stderr or "").strip(),
+            compile_output=(result.compile_output or "").strip(),
+            message=(result.message or "").strip(),
+            execution_time=str(result.time or ""),
+            memory_kb=result.memory,
+            token=result.token,
+        )
+
+    @staticmethod
+    def _case_result_from_error(
+        test_case: BatchTestCase,
+        error: Judge0ServiceError,
+    ) -> BatchExecutionCaseResult:
+        """Represent a Judge0 submission rejection as a failed testcase result."""
+
+        return BatchExecutionCaseResult(
+            input=test_case.input,
+            expected_output=test_case.expected_output,
+            status="Execution Error",
+            passed=False,
+            message=error.message,
         )
 
     @staticmethod

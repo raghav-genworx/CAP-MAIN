@@ -125,14 +125,16 @@ def build_evaluation_payload(
                 candidate_assessment,
                 submitted_at,
             ),
-            "question_time_seconds": {},
+            "question_time_seconds": dict(
+                candidate_assessment.question_time_seconds or {}
+            ),
         },
         "integrity": {
             "proctoring_mode": getattr(assessment, "proctoring_mode", "") or "",
-            "tab_switches": None,
-            "copy_paste_count": None,
-            "fullscreen_exits": None,
-            "suspicious_activity": [],
+            "tab_switches": candidate_assessment.tab_switch_count,
+            "copy_paste_count": candidate_assessment.copy_paste_count,
+            "fullscreen_exits": candidate_assessment.fullscreen_exit_count,
+            "suspicious_activity": _integrity_activity(candidate_assessment),
             "plagiarism_similarity_score": None,
         },
         "submitted_at": submitted_at.isoformat(),
@@ -141,6 +143,30 @@ def build_evaluation_payload(
             submitted_at,
         ),
     }
+
+
+def _integrity_activity(
+    candidate_assessment: CandidateAssessmentModel,
+) -> list[str]:
+    activity: list[str] = []
+    if candidate_assessment.tab_switch_count:
+        activity.append(
+            f"{candidate_assessment.tab_switch_count} tab switch(es) detected"
+        )
+    if candidate_assessment.copy_paste_count:
+        activity.append(
+            f"{candidate_assessment.copy_paste_count} clipboard action(s) detected"
+        )
+    if candidate_assessment.fullscreen_exit_count:
+        activity.append(
+            f"{candidate_assessment.fullscreen_exit_count} fullscreen exit(s) detected"
+        )
+    if candidate_assessment.submission_tag:
+        activity.append(
+            candidate_assessment.submission_message
+            or candidate_assessment.submission_tag.replace("_", " ")
+        )
+    return activity
 
 
 def _points_per_hidden_case(

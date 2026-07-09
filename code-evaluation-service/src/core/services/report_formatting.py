@@ -111,12 +111,12 @@ def recruiter_recommendation(
         else 0
     )
     similarity = (
-        integrity.plagiarism_similarity_score
-        if integrity is not None
-        else None
+        integrity.plagiarism_similarity_score if integrity is not None else None
     )
-    if not candidate.hidden_total or suspicious_count or (
-        similarity is not None and similarity >= 70
+    if (
+        not candidate.hidden_total
+        or suspicious_count
+        or (similarity is not None and similarity >= 70)
     ):
         return {
             "label": "Manual Review Required",

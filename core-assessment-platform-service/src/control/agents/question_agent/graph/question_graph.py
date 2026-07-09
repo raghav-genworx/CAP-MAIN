@@ -13,10 +13,19 @@ from langgraph.graph import END, START, StateGraph
 from langsmith.run_trees import RunTree
 
 from config.settings import Settings
-from core.services.ai_gateway_service import AIGatewayService
-from core.services.execution_adapter_service import ExecutionAdapterService
+from core.question_tag_taxonomy import (
+    normalize_question_category,
+    normalize_question_tags,
+)
+from core.services.output_validation import (
+    default_checker_explanation,
+    normalize_answer_validation_mode,
+)
+from handlers.http_clients.ai_gateway import AIGatewayService
+from handlers.http_clients.execution import ExecutionAdapterService
 from observability.tracing.langsmith import langsmith_run
 from schemas.question_bank import (
+    AnswerValidationMode,
     DifficultyLevel,
     DifficultySource,
     MetadataStatus,
@@ -38,8 +47,13 @@ from schemas.question_bank import (
 
 from ..nodes.question_nodes import QuestionAgentNodesMixin
 from ..prompts.bruteforce_solution_prompt import build_bruteforce_solution_prompt
+from ..prompts.prompt_contract import build_task_system_prompt, build_task_user_prompt
 from ..prompts.question_prompts import SCOPE_NODE_SEQUENCE, SCOPE_SUMMARIES
-from ..states.question_state import QuestionGenerationState, SolutionOutput
+from ..states.question_state import (
+    QuestionGenerationState,
+    SolutionOutput,
+    ValidationOutput,
+)
 from ..tools.question_tools import validation_progress_events
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +74,9 @@ FULL_NODE_SEQUENCE = [
 ]
 
 QC_REFINEMENT_ROUNDS = 3
+FINAL_TEST_COUNT_REPAIR_ROUNDS = 3
+ORACLE_EXPECTED_OUTPUT_REPAIR_ROUNDS = 2
+ORACLE_RUNTIME_LIMIT_SECONDS = 30
 
 NODE_LABELS = {
     "orchestrator": "Preparing request",
@@ -92,6 +109,12 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self._current_recruiter_uid = ""
         self._current_workflow_mode = "interactive"
         self._graph = self._build_graph().compile()
+
+    @property
+    def current_ai_target(self) -> tuple[str, str]:
+        """Return the provider/model selected for the current generation request."""
+
+        return self._ai_gateway.current_target_metadata
 
     def generate(
         self,
@@ -157,43 +180,138 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self,
         recruiter_uid: str,
         draft: QuestionAIDraftContext,
+        generation_settings: QuestionGenerationSettings | None = None,
     ) -> QuestionDraftRefinementResponse:
         """QC existing tests with a brute-force oracle and repair tests or source."""
 
         self._current_recruiter_uid = recruiter_uid
         self._current_workflow_mode = "interactive"
-        state = self._build_refinement_state(draft, "tests")
-        sample_tests = list(draft.sample_test_cases)
-        hidden_tests = list(draft.hidden_test_cases)
+        state = self._build_refinement_state(draft, "tests", generation_settings)
+        sample_tests = [
+            case.model_copy(update={"is_sample": True})
+            for case in self._complete_test_cases(draft.sample_test_cases)
+        ]
+        hidden_tests = [
+            case.model_copy(update={"is_sample": False})
+            for case in self._complete_test_cases(draft.hidden_test_cases)
+        ]
         source_code = self._sanitize_reference_solution(draft.reference_solution)
-        brute_force_source = self._generate_bruteforce_solution(state)
         repaired_count = 0
         solution_changed = False
         qc_notes: list[str] = []
 
+        sample_tests, hidden_tests, added_count, count_notes = (
+            self._ensure_refinement_test_counts(
+                state=state,
+                sample_tests=sample_tests,
+                hidden_tests=hidden_tests,
+            )
+        )
+        repaired_count += added_count
+        qc_notes.extend(count_notes)
+        state = cast(
+            QuestionGenerationState,
+            {
+                **state,
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+                "reference_solution": source_code,
+            },
+        )
+
+        initial_report = self._validate_reference_solution(state)
+        targets_met = self._refinement_targets_met(state, sample_tests, hidden_tests)
+        if initial_report.status == "passed" and targets_met:
+            summary = (
+                "All requested test cases passed the first validation pass; no "
+                "oracle repair was required."
+            )
+            if added_count:
+                summary = (
+                    f"Added {added_count} missing testcase"
+                    f"{'' if added_count == 1 else 's'}, constraint-checked the "
+                    "suite, and all requested cases passed validation."
+                )
+            return QuestionDraftRefinementResponse(
+                draft=self._refined_draft(
+                    draft,
+                    sample_tests=sample_tests,
+                    hidden_tests=hidden_tests,
+                    reference_solution=source_code,
+                    report=initial_report,
+                ),
+                validation_report=initial_report,
+                summary=summary,
+                repaired_test_case_count=repaired_count,
+                solution_changed=False,
+            )
+
+        brute_force_source = self._generate_bruteforce_solution(state)
+        current_report = initial_report
+
         for round_number in range(1, QC_REFINEMENT_ROUNDS + 1):
-            round_state = cast(
+            failing_results = [
+                result for result in current_report.results if not result.passed
+            ]
+            if not failing_results:
+                break
+
+            failing_sample_indexes = {
+                result.index for result in failing_results if result.bucket == "sample"
+            }
+            failing_hidden_indexes = {
+                result.index for result in failing_results if result.bucket == "hidden"
+            }
+            focused_sample_tests, focused_hidden_tests = self._tests_for_results(
+                sample_tests,
+                hidden_tests,
+                failing_results,
+            )
+            focused_state = cast(
                 QuestionGenerationState,
                 {
                     **state,
-                    "sample_test_cases": sample_tests,
-                    "hidden_test_cases": hidden_tests,
+                    "sample_test_cases": focused_sample_tests,
+                    "hidden_test_cases": focused_hidden_tests,
                     "reference_solution": source_code,
                 },
             )
-            primary_report = self._validate_reference_solution(round_state)
+            primary_report = self._validate_reference_solution(focused_state)
             oracle_report = self._validate_oracle_solution(
-                round_state,
+                focused_state,
                 brute_force_source,
             )
-            sample_tests, hidden_tests, expected_output_changes = (
-                self._repair_expected_outputs_from_oracle(
-                    sample_tests,
-                    hidden_tests,
+            answer_mode = self._answer_validation_kwargs(state)[
+                "answer_validation_mode"
+            ]
+            if answer_mode in {
+                AnswerValidationMode.MULTIPLE_VALID.value,
+                AnswerValidationMode.CONSTRUCTIVE.value,
+            }:
+                repaired_focused_sample_tests = focused_sample_tests
+                repaired_focused_hidden_tests = focused_hidden_tests
+                expected_output_changes = 0
+            else:
+                (
+                    repaired_focused_sample_tests,
+                    repaired_focused_hidden_tests,
+                    expected_output_changes,
+                ) = self._repair_expected_outputs_from_oracle(
+                    focused_sample_tests,
+                    focused_hidden_tests,
                     oracle_report,
                 )
-            )
             if expected_output_changes:
+                sample_tests = self._replace_failed_test_cases(
+                    sample_tests,
+                    failing_sample_indexes,
+                    repaired_focused_sample_tests,
+                )
+                hidden_tests = self._replace_failed_test_cases(
+                    hidden_tests,
+                    failing_hidden_indexes,
+                    repaired_focused_hidden_tests,
+                )
                 repaired_count += expected_output_changes
                 qc_notes.append(
                     (
@@ -202,6 +320,25 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                         f"{'' if expected_output_changes == 1 else 's'}."
                     ),
                 )
+                focused_repair_report = self._validate_reference_solution(
+                    cast(
+                        QuestionGenerationState,
+                        {
+                            **state,
+                            "sample_test_cases": repaired_focused_sample_tests,
+                            "hidden_test_cases": repaired_focused_hidden_tests,
+                            "reference_solution": source_code,
+                        },
+                    )
+                )
+                current_report = self._merge_focused_validation_report(
+                    current_report,
+                    focused_repair_report,
+                    sample_indexes=failing_sample_indexes,
+                    hidden_indexes=failing_hidden_indexes,
+                )
+                if current_report.status == "passed":
+                    break
                 continue
 
             solution_repair_results = self._solution_repair_results_from_oracle(
@@ -214,12 +351,12 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                     solution_repair_results,
                 )
                 repair_sample_tests, repair_hidden_tests = self._tests_for_results(
-                    sample_tests,
-                    hidden_tests,
+                    focused_sample_tests,
+                    focused_hidden_tests,
                     solution_repair_results,
                 )
                 repaired_source = self._repair_reference_solution(
-                    state=round_state,
+                    state=focused_state,
                     source_code=source_code,
                     validation_report=repair_report,
                     sample_tests=repair_sample_tests,
@@ -235,6 +372,19 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                             "brute-force oracle, so the solution was repaired."
                         ),
                     )
+                    current_report = self._validate_reference_solution(
+                        cast(
+                            QuestionGenerationState,
+                            {
+                                **state,
+                                "sample_test_cases": sample_tests,
+                                "hidden_test_cases": hidden_tests,
+                                "reference_solution": source_code,
+                            },
+                        )
+                    )
+                    if current_report.status == "passed":
+                        break
                     continue
 
             qc_notes.append(
@@ -242,32 +392,32 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             )
             break
 
-        refined_state = cast(
-            QuestionGenerationState,
-            {
-                **state,
-                "sample_test_cases": sample_tests,
-                "hidden_test_cases": hidden_tests,
-                "reference_solution": source_code,
-            },
-        )
-        final_report = self._validate_reference_solution(refined_state)
+        final_report = current_report
+        targets_met = self._refinement_targets_met(state, sample_tests, hidden_tests)
         if final_report.status == "passed" and repaired_count and solution_changed:
             summary = (
-                f"QC repaired {repaired_count} expected output"
+                f"QC repaired {repaired_count} testcase"
                 f"{'' if repaired_count == 1 else 's'}, repaired the solution, "
                 "and re-ran all tests successfully."
             )
         elif final_report.status == "passed" and repaired_count:
             summary = (
-                f"QC repaired {repaired_count} expected output"
-                f"{'' if repaired_count == 1 else 's'} with the brute-force "
-                "oracle and re-ran all tests successfully."
+                f"QC repaired {repaired_count} testcase"
+                f"{'' if repaired_count == 1 else 's'} with constraint checks "
+                "and the brute-force oracle, then re-ran validation successfully."
             )
         elif final_report.status == "passed" and solution_changed:
             summary = (
                 "QC kept expected outputs unchanged, repaired the solution using "
                 "the brute-force oracle evidence, and re-ran all tests successfully."
+            )
+        elif not targets_met:
+            settings = state["generation_settings"]
+            summary = (
+                "QC completed but could not reach the requested testcase count. "
+                f"Current suite: {len(sample_tests)}/{settings.sample_test_case_count} "
+                f"sample and {len(hidden_tests)}/{settings.hidden_test_case_count} "
+                "hidden after constraint filtering. " + " ".join(qc_notes[-2:])
             )
         else:
             summary = (
@@ -292,12 +442,13 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self,
         recruiter_uid: str,
         draft: QuestionAIDraftContext,
+        generation_settings: QuestionGenerationSettings | None = None,
     ) -> QuestionDraftRefinementResponse:
         """Repair source from the problem contract, using failures as evidence."""
 
         self._current_recruiter_uid = recruiter_uid
         self._current_workflow_mode = "interactive"
-        state = self._build_refinement_state(draft, "solution")
+        state = self._build_refinement_state(draft, "solution", generation_settings)
         initial_report = self._validate_reference_solution(state)
         sample_tests = list(draft.sample_test_cases)
         hidden_tests = list(draft.hidden_test_cases)
@@ -419,8 +570,315 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 state.get("hidden_test_cases", []),
             ),
             rounds=[],
-            time_limit_seconds=state.get("execution_time_limit_seconds"),
+            time_limit_seconds=ORACLE_RUNTIME_LIMIT_SECONDS,
             memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+            **self._answer_validation_kwargs(state),
+        )
+
+    def _normalize_expected_outputs_with_oracle(
+        self,
+        state: QuestionGenerationState,
+    ) -> QuestionGenerationState:
+        """Replace testcase expected outputs with brute-force oracle stdout."""
+
+        sample_tests = [
+            case.model_copy(update={"is_sample": True})
+            for case in self._complete_test_cases(state.get("sample_test_cases", []))
+        ]
+        hidden_tests = [
+            case.model_copy(update={"is_sample": False})
+            for case in self._complete_test_cases(state.get("hidden_test_cases", []))
+        ]
+        if not sample_tests and not hidden_tests:
+            return {
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+            }
+
+        notes: list[str] = []
+        working_state = cast(
+            QuestionGenerationState,
+            {
+                **state,
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+            },
+        )
+        oracle_source = self._generate_bruteforce_solution(working_state)
+        last_sample_tests = sample_tests
+        last_hidden_tests = hidden_tests
+
+        for attempt in range(1, ORACLE_EXPECTED_OUTPUT_REPAIR_ROUNDS + 1):
+            oracle_state = cast(
+                QuestionGenerationState,
+                {
+                    **working_state,
+                    "sample_test_cases": last_sample_tests,
+                    "hidden_test_cases": last_hidden_tests,
+                },
+            )
+            oracle_report = self._validate_oracle_solution(oracle_state, oracle_source)
+            if not self._oracle_report_has_complete_outputs(oracle_report):
+                notes.append(
+                    (
+                        f"Oracle attempt {attempt}: execution did not produce "
+                        "usable output for every testcase; refining oracle."
+                    ),
+                )
+                oracle_source = self._refine_oracle_solution_from_review(
+                    state=oracle_state,
+                    oracle_source=oracle_source,
+                    review_notes=[
+                        oracle_report.summary,
+                        *oracle_report.runner_notes,
+                        *[
+                            result.message or result.status
+                            for result in oracle_report.results
+                            if not result.passed
+                        ],
+                    ],
+                    attempt=attempt,
+                )
+                continue
+
+            last_sample_tests, last_hidden_tests, changed_count = (
+                self._replace_expected_outputs_from_oracle_actuals(
+                    last_sample_tests,
+                    last_hidden_tests,
+                    oracle_report,
+                )
+            )
+            review = self._review_oracle_backed_test_cases(
+                state=oracle_state,
+                oracle_source=oracle_source,
+                sample_tests=last_sample_tests,
+                hidden_tests=last_hidden_tests,
+            )
+            if review.warnings:
+                notes.extend(
+                    f"Oracle testcase review: {warning}" for warning in review.warnings
+                )
+                oracle_source = self._refine_oracle_solution_from_review(
+                    state=oracle_state,
+                    oracle_source=oracle_source,
+                    review_notes=review.warnings,
+                    attempt=attempt,
+                )
+                continue
+
+            notes.append(
+                (
+                    "Oracle normalized expected outputs for "
+                    f"{changed_count} testcase"
+                    f"{'' if changed_count == 1 else 's'} using a "
+                    f"{ORACLE_RUNTIME_LIMIT_SECONDS}s brute-force run."
+                ),
+            )
+            return {
+                "sample_test_cases": last_sample_tests,
+                "hidden_test_cases": last_hidden_tests,
+                "notes": self._append_notes(state.get("notes", []), *notes),
+                "execution_history": self._append_notes(
+                    state.get("execution_history", []),
+                    "Oracle: normalized testcase expected outputs",
+                ),
+            }
+
+        notes.append(
+            (
+                "Oracle review still reported issues after refinement; using the "
+                "latest oracle-backed expected outputs for validation."
+            ),
+        )
+        return {
+            "sample_test_cases": last_sample_tests,
+            "hidden_test_cases": last_hidden_tests,
+            "notes": self._append_notes(state.get("notes", []), *notes),
+            "execution_history": self._append_notes(
+                state.get("execution_history", []),
+                "Oracle: normalized testcase expected outputs with warnings",
+            ),
+        }
+
+    @staticmethod
+    def _oracle_report_has_complete_outputs(
+        oracle_report: SolutionValidationReport,
+    ) -> bool:
+        if not oracle_report.results:
+            return False
+        return all(
+            result.passed
+            or QuestionGenerationWorkflow._is_expected_output_repair_candidate(
+                result,
+            )
+            for result in oracle_report.results
+        )
+
+    @staticmethod
+    def _replace_expected_outputs_from_oracle_actuals(
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+        oracle_report: SolutionValidationReport,
+    ) -> tuple[list[TestCase], list[TestCase], int]:
+        repaired_sample_tests = list(sample_tests)
+        repaired_hidden_tests = list(hidden_tests)
+        changed_count = 0
+        for result in oracle_report.results:
+            if not (
+                result.passed
+                or QuestionGenerationWorkflow._is_expected_output_repair_candidate(
+                    result,
+                )
+            ):
+                continue
+            target_tests = (
+                repaired_sample_tests
+                if result.bucket == "sample"
+                else repaired_hidden_tests
+            )
+            target_index = result.index - 1
+            if target_index < 0 or target_index >= len(target_tests):
+                continue
+            original = target_tests[target_index]
+            if original.expected_output == result.actual_output:
+                continue
+            target_tests[target_index] = original.model_copy(
+                update={"expected_output": result.actual_output},
+            )
+            changed_count += 1
+        return repaired_sample_tests, repaired_hidden_tests, changed_count
+
+    def _review_oracle_backed_test_cases(
+        self,
+        *,
+        state: QuestionGenerationState,
+        oracle_source: str,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+    ) -> ValidationOutput:
+        system_prompt = build_task_system_prompt(
+            role="oracle-backed testcase correctness auditor",
+            objective=(
+                "Verify whether oracle-produced expected outputs follow the "
+                "problem contract for every testcase input."
+            ),
+            rules=(
+                "Treat testcase inputs as fixed.",
+                "Warn only about concrete incorrect, ambiguous, or impossible cases.",
+                "Do not ask for optimized-solution behavior.",
+            ),
+        )
+        user_prompt = build_task_user_prompt(
+            task="Review the oracle-backed expected outputs for correctness.",
+            context={
+                "problem_contract": {
+                    "title": state.get("title", ""),
+                    "problem_statement": state.get("problem_statement", ""),
+                    "input_format": state.get("input_format", ""),
+                    "output_format": state.get("output_format", ""),
+                    "constraints": state.get("constraints", ""),
+                },
+                "answer_validation": {
+                    "mode": state.get("answer_validation_mode", "exact"),
+                    "explanation": state.get("output_checker_explanation", ""),
+                },
+                "oracle_source": oracle_source,
+                "oracle_runtime_seconds": ORACLE_RUNTIME_LIMIT_SECONDS,
+                "testcases": {
+                    "sample": self._prompt_cases(sample_tests),
+                    "hidden": self._prompt_cases(hidden_tests),
+                },
+            },
+            requirements=(
+                (
+                    "If every expected_output is correct, put a concise success "
+                    "statement in checks and leave warnings empty."
+                ),
+                (
+                    "If any expected_output appears wrong, ambiguous, or produced "
+                    "by flawed oracle logic, name the exact testcase bucket and "
+                    "index in warnings."
+                ),
+                (
+                    "For non-exact answer validation, verify that expected_output "
+                    "is at least one valid exemplar accepted by the problem rules."
+                ),
+            ),
+        )
+        return self._structured_completion(
+            schema_name="oracle_testcase_review",
+            schema_model=ValidationOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+    def _refine_oracle_solution_from_review(
+        self,
+        *,
+        state: QuestionGenerationState,
+        oracle_source: str,
+        review_notes: list[str],
+        attempt: int,
+    ) -> str:
+        language = self._normalize_solution_language(
+            state.get("reference_language", "python"),
+        )
+        system_prompt = build_task_system_prompt(
+            role="brute-force oracle repair engineer",
+            objective=(
+                "Repair the correctness-first oracle so it computes testcase "
+                "outputs from the problem contract."
+            ),
+            rules=(
+                "Do not hard-code testcase outputs.",
+                "Prefer simple exhaustive or direct simulation logic.",
+                "Keep complete STDIN/STDOUT source code only in reference_solution.",
+            ),
+        )
+        user_prompt = build_task_user_prompt(
+            task="Repair the oracle source using the review notes.",
+            context={
+                "problem_contract": {
+                    "title": state.get("title", ""),
+                    "problem_statement": state.get("problem_statement", ""),
+                    "input_format": state.get("input_format", ""),
+                    "output_format": state.get("output_format", ""),
+                    "constraints": state.get("constraints", ""),
+                },
+                "oracle_language": language,
+                "current_oracle_source": oracle_source,
+                "review_notes": review_notes,
+                "testcase_inputs": {
+                    "sample": [
+                        case.input for case in state.get("sample_test_cases", [])
+                    ],
+                    "hidden": [
+                        case.input for case in state.get("hidden_test_cases", [])
+                    ],
+                },
+            },
+            requirements=(
+                self._strict_solution_contract_guidance(language),
+                self._solution_contract_guidance(language),
+                "Set reference_solution to repaired complete source code only.",
+                "Set supported_languages to only oracle_language.",
+                "Set reference_solutions to an empty object.",
+            ),
+        )
+        model = self._structured_completion(
+            schema_name=f"oracle_solution_repair_{attempt}",
+            schema_model=SolutionOutput,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return self._ensure_runnable_reference_solution(
+            state=state,
+            candidate=model.reference_solution,
+            language=language,
+            schema_name=f"oracle_solution_repair_contract_{attempt}",
+            rejection_context=(
+                "Oracle repair did not satisfy the runnable-code contract."
+            ),
         )
 
     def _repair_expected_outputs_from_oracle(
@@ -523,9 +981,11 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self,
         draft: QuestionAIDraftContext,
         scope: Literal["tests", "solution"],
+        generation_settings: QuestionGenerationSettings | None = None,
     ) -> QuestionGenerationState:
         """Build normal agent state while preserving the complete current draft."""
 
+        settings = generation_settings or QuestionGenerationSettings()
         request = QuestionAIDraftRequest(
             prompt=(
                 "Refine the existing draft using execution evidence while preserving "
@@ -537,23 +997,161 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             focus_tags=draft.tags,
             current_draft=draft,
             generation_settings=QuestionGenerationSettings(
-                topics=draft.topics,
-                supported_languages=draft.supported_languages,
-                candidate_solve_time_minutes=draft.candidate_solve_time_minutes,
-                time_limit_minutes=draft.candidate_solve_time_minutes,
-                execution_time_limit_seconds=draft.execution_time_limit_seconds,
-                memory_limit_mb=draft.memory_limit_mb,
-                sample_test_case_count=min(
-                    10,
-                    max(1, len(draft.sample_test_cases)),
+                topics=settings.topics or draft.topics,
+                supported_languages=settings.supported_languages
+                or draft.supported_languages,
+                candidate_solve_time_minutes=(
+                    settings.candidate_solve_time_minutes
+                    or draft.candidate_solve_time_minutes
                 ),
-                hidden_test_case_count=min(
-                    50,
-                    max(1, len(draft.hidden_test_cases)),
+                time_limit_minutes=(
+                    settings.time_limit_minutes or draft.candidate_solve_time_minutes
                 ),
+                execution_time_limit_seconds=(
+                    settings.execution_time_limit_seconds
+                    or draft.execution_time_limit_seconds
+                ),
+                memory_limit_mb=settings.memory_limit_mb or draft.memory_limit_mb,
+                sample_test_case_count=max(1, settings.sample_test_case_count),
+                hidden_test_case_count=max(1, settings.hidden_test_case_count),
+                edge_case_count=settings.edge_case_count,
+                stress_test_count=settings.stress_test_count,
+                interview_style=settings.interview_style,
+                company_style=settings.company_style,
+                question_count=settings.question_count,
+                easy_count=settings.easy_count,
+                medium_count=settings.medium_count,
+                hard_count=settings.hard_count,
             ),
         )
         return self._build_initial_state(request, [])
+
+    def _refinement_targets_met(
+        self,
+        state: QuestionGenerationState,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+    ) -> bool:
+        settings = state["generation_settings"]
+        return len(self._complete_test_cases(sample_tests)) >= max(
+            1, settings.sample_test_case_count
+        ) and len(self._complete_test_cases(hidden_tests)) >= max(
+            1, settings.hidden_test_case_count
+        )
+
+    def _ensure_refinement_test_counts(
+        self,
+        *,
+        state: QuestionGenerationState,
+        sample_tests: list[TestCase],
+        hidden_tests: list[TestCase],
+    ) -> tuple[list[TestCase], list[TestCase], int, list[str]]:
+        """Generate missing tests, constraint-check them, and preserve exact targets."""
+
+        settings = state["generation_settings"]
+        target_sample_count = max(1, settings.sample_test_case_count)
+        target_hidden_count = max(1, settings.hidden_test_case_count)
+        sample_tests = self._complete_test_cases(sample_tests)
+        hidden_tests = self._complete_test_cases(hidden_tests)
+        original_total = len(sample_tests) + len(hidden_tests)
+        notes: list[str] = []
+
+        for attempt in range(1, 3):
+            working_state = cast(
+                QuestionGenerationState,
+                {
+                    **state,
+                    "sample_test_cases": sample_tests,
+                    "hidden_test_cases": hidden_tests,
+                    "generation_settings": settings,
+                },
+            )
+
+            if len(sample_tests) < target_sample_count:
+                generated = self._example_node(working_state)
+                sample_tests = self._merge_unique_test_cases(
+                    sample_tests,
+                    [
+                        case.model_copy(update={"is_sample": True})
+                        for case in self._complete_test_cases(
+                            generated.get("sample_test_cases", []),
+                        )
+                    ],
+                )
+                notes.append(
+                    (
+                        f"Attempt {attempt}: generated sample cases "
+                        f"({len(sample_tests)}/{target_sample_count})."
+                    ),
+                )
+
+            working_state = cast(
+                QuestionGenerationState,
+                {
+                    **working_state,
+                    "sample_test_cases": sample_tests,
+                    "hidden_test_cases": hidden_tests,
+                },
+            )
+            if len(hidden_tests) < target_hidden_count:
+                generated = self._hidden_test_node(working_state)
+                hidden_tests = self._merge_unique_test_cases(
+                    hidden_tests,
+                    [
+                        case.model_copy(update={"is_sample": False})
+                        for case in self._complete_test_cases(
+                            generated.get("hidden_test_cases", []),
+                        )
+                    ],
+                )
+                notes.append(
+                    (
+                        f"Attempt {attempt}: generated hidden cases "
+                        f"({len(hidden_tests)}/{target_hidden_count})."
+                    ),
+                )
+
+            checked = self._constraint_script_node(
+                cast(
+                    QuestionGenerationState,
+                    {
+                        **working_state,
+                        "sample_test_cases": sample_tests,
+                        "hidden_test_cases": hidden_tests,
+                    },
+                ),
+            )
+            sample_tests = [
+                case.model_copy(update={"is_sample": True})
+                for case in self._complete_test_cases(
+                    checked.get("sample_test_cases", sample_tests),
+                )
+            ]
+            hidden_tests = [
+                case.model_copy(update={"is_sample": False})
+                for case in self._complete_test_cases(
+                    checked.get("hidden_test_cases", hidden_tests),
+                )
+            ]
+            notes.extend(checked.get("constraint_validation_warnings", []))
+            if (
+                len(sample_tests) >= target_sample_count
+                and len(hidden_tests) >= target_hidden_count
+            ):
+                break
+
+        sample_tests = sample_tests[:target_sample_count]
+        hidden_tests = hidden_tests[:target_hidden_count]
+        added_count = max(0, len(sample_tests) + len(hidden_tests) - original_total)
+        if not self._refinement_targets_met(state, sample_tests, hidden_tests):
+            notes.append(
+                (
+                    "Could not reach requested testcase count after constraint "
+                    f"checks: {len(sample_tests)}/{target_sample_count} sample, "
+                    f"{len(hidden_tests)}/{target_hidden_count} hidden."
+                ),
+            )
+        return sample_tests, hidden_tests, added_count, notes
 
     @staticmethod
     def _count_expected_output_changes(
@@ -576,6 +1174,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         report: SolutionValidationReport,
     ) -> QuestionCreateRequest:
         payload = draft.model_dump()
+        tags = normalize_question_tags([*draft.tags, *draft.topics], limit=6)
         primary_language = QuestionGenerationWorkflow._normalize_solution_language(
             draft.reference_language,
         )
@@ -594,6 +1193,9 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 "hidden_test_cases": hidden_tests,
                 "reference_solution": reference_solution,
                 "reference_solutions": reference_solutions,
+                "topics": [],
+                "tags": tags,
+                "category": normalize_question_category(draft.category, tags),
                 "validation_report": report,
                 "validation_status": report.status,
                 "validation_updated_at": datetime.now(UTC),
@@ -787,8 +1389,10 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             if request.title_hint
             else (current_draft.title.strip() if current_draft else "")
         )
-        focus_tags = self._normalize_tokens(
-            request.focus_tags or (current_draft.tags if current_draft else [])
+        focus_tags = normalize_question_tags(
+            request.focus_tags
+            or ([*current_draft.tags, *current_draft.topics] if current_draft else []),
+            limit=6,
         )
         settings = request.generation_settings
         state: QuestionGenerationState = {
@@ -821,6 +1425,11 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             "memory_limit_mb": settings.memory_limit_mb,
             "metadata_status": MetadataStatus.PENDING.value,
             "difficulty_source": DifficultySource.LEGACY.value,
+            "answer_validation_mode": AnswerValidationMode.EXACT.value,
+            "output_checker": "",
+            "output_checker_explanation": default_checker_explanation(
+                AnswerValidationMode.EXACT,
+            ),
             "notes": [
                 "Question orchestrator received the recruiter description.",
                 (
@@ -848,12 +1457,25 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 state["output_format"] = current_draft.output_format.strip()
             if current_draft.output_explanation.strip():
                 state["output_explanation"] = current_draft.output_explanation.strip()
-            if current_draft.topics:
-                state["topics"] = self._normalize_tokens(current_draft.topics)
-            if current_draft.tags:
-                state["tags"] = self._normalize_tokens(current_draft.tags)
-            if current_draft.category.strip():
-                state["category"] = current_draft.category.strip().lower()
+            answer_mode = normalize_answer_validation_mode(
+                current_draft.answer_validation_mode,
+            )
+            state["answer_validation_mode"] = answer_mode
+            state["output_checker"] = current_draft.output_checker.strip()
+            state["output_checker_explanation"] = (
+                current_draft.output_checker_explanation.strip()
+                or default_checker_explanation(answer_mode)
+            )
+            current_tags = normalize_question_tags(
+                [*current_draft.tags, *current_draft.topics],
+                limit=6,
+            )
+            state["topics"] = []
+            state["tags"] = current_tags
+            state["category"] = normalize_question_category(
+                current_draft.category,
+                current_tags,
+            )
             if current_draft.sample_test_cases:
                 state["sample_test_cases"] = current_draft.sample_test_cases
             if current_draft.hidden_test_cases:
@@ -936,6 +1558,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         result: QuestionGenerationState,
         request: QuestionAIDraftRequest,
     ) -> QuestionAIDraftResponse:
+        self._assert_final_test_counts(result, request)
         draft = self._build_draft_from_state(result, request)
         notes = self._append_notes(
             result.get("notes", []),
@@ -969,79 +1592,306 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         result: QuestionGenerationState,
         request: QuestionAIDraftRequest,
     ) -> QuestionGenerationState:
-        """Keep generated testcase counts aligned with recruiter settings."""
+        """Deterministically enforce final testcase counts for testcase scopes."""
 
-        count_scopes = {
+        normalized = cast(QuestionGenerationState, dict(result))
+        if not self._scope_returns_test_cases(request.generation_scope):
+            return normalized
+
+        settings = request.generation_settings
+        target_sample_count = max(1, settings.sample_test_case_count)
+        target_hidden_count = max(1, settings.hidden_test_case_count)
+        require_sample, require_hidden = self._test_count_requirements(
+            request.generation_scope,
+        )
+        sample_cases = self._dedupe_test_cases_by_input(
+            [
+                case.model_copy(update={"is_sample": True})
+                for case in self._complete_test_cases(
+                    normalized.get("sample_test_cases", []),
+                )
+            ],
+        )
+        hidden_cases = self._dedupe_test_cases_by_input(
+            [
+                case.model_copy(update={"is_sample": False})
+                for case in self._complete_test_cases(
+                    normalized.get("hidden_test_cases", []),
+                )
+            ],
+        )
+        current_draft = request.current_draft
+        if current_draft is not None and "constraint_validation_script" not in result:
+            sample_cases = self._dedupe_test_cases_by_input(
+                self._merge_unique_test_cases(
+                    sample_cases,
+                    [
+                        case.model_copy(update={"is_sample": True})
+                        for case in self._complete_test_cases(
+                            current_draft.sample_test_cases,
+                        )
+                    ],
+                ),
+            )
+            hidden_cases = self._dedupe_test_cases_by_input(
+                self._merge_unique_test_cases(
+                    hidden_cases,
+                    [
+                        case.model_copy(update={"is_sample": False})
+                        for case in self._complete_test_cases(
+                            current_draft.hidden_test_cases,
+                        )
+                    ],
+                ),
+            )
+
+        notes: list[str] = list(normalized.get("notes", []))
+        sample_cases, hidden_cases, repair_notes = self._repair_final_test_counts(
+            result=normalized,
+            settings=settings,
+            sample_cases=sample_cases,
+            hidden_cases=hidden_cases,
+            require_sample=require_sample,
+            require_hidden=require_hidden,
+            target_sample_count=target_sample_count,
+            target_hidden_count=target_hidden_count,
+        )
+        notes.extend(repair_notes)
+
+        if require_sample:
+            sample_cases = sample_cases[:target_sample_count]
+        if require_hidden:
+            hidden_cases = hidden_cases[:target_hidden_count]
+
+        normalized["sample_test_cases"] = sample_cases
+        normalized["hidden_test_cases"] = hidden_cases
+        normalized["notes"] = notes
+        normalized_state = normalized
+        self._assert_final_test_counts(normalized_state, request)
+
+        notes = list(normalized_state.get("notes", []))
+        notes.append(
+            self._final_count_note(
+                sample_cases=sample_cases,
+                hidden_cases=hidden_cases,
+                require_sample=require_sample,
+                require_hidden=require_hidden,
+                target_sample_count=target_sample_count,
+                target_hidden_count=target_hidden_count,
+            ),
+        )
+        normalized_state["notes"] = notes
+        return normalized_state
+
+    @staticmethod
+    def _scope_returns_test_cases(scope: str) -> bool:
+        return scope in {
             "full",
             "examples",
             "tests",
             "tests_solution",
             "solution",
         }
-        if request.generation_scope not in count_scopes:
-            return result
 
-        settings = request.generation_settings
-        current_draft = request.current_draft
-        sample_cases = [
-            case.model_copy(update={"is_sample": True})
-            for case in self._complete_test_cases(result.get("sample_test_cases", []))
-        ]
-        hidden_cases = [
-            case.model_copy(update={"is_sample": False})
-            for case in self._complete_test_cases(result.get("hidden_test_cases", []))
-        ]
-        if current_draft is not None and "constraint_validation_script" not in result:
-            sample_cases = self._merge_unique_test_cases(
-                sample_cases,
+    @staticmethod
+    def _test_count_requirements(scope: str) -> tuple[bool, bool]:
+        if scope == "examples":
+            return True, False
+        if scope in {"full", "tests", "tests_solution"}:
+            return True, True
+        return False, False
+
+    @staticmethod
+    def _dedupe_test_cases_by_input(test_cases: list[TestCase]) -> list[TestCase]:
+        unique_cases: list[TestCase] = []
+        seen_inputs: set[str] = set()
+        for test_case in test_cases:
+            normalized_input = test_case.input.strip()
+            if not normalized_input or normalized_input in seen_inputs:
+                continue
+            unique_cases.append(test_case)
+            seen_inputs.add(normalized_input)
+        return unique_cases
+
+    def _repair_final_test_counts(
+        self,
+        *,
+        result: QuestionGenerationState,
+        settings: QuestionGenerationSettings,
+        sample_cases: list[TestCase],
+        hidden_cases: list[TestCase],
+        require_sample: bool,
+        require_hidden: bool,
+        target_sample_count: int,
+        target_hidden_count: int,
+    ) -> tuple[list[TestCase], list[TestCase], list[str]]:
+        """Generate missing final rows with bounded attempts before hard failure."""
+
+        notes: list[str] = []
+        for attempt in range(1, FINAL_TEST_COUNT_REPAIR_ROUNDS + 1):
+            sample_missing = require_sample and len(sample_cases) < target_sample_count
+            hidden_missing = require_hidden and len(hidden_cases) < target_hidden_count
+            if not sample_missing and not hidden_missing:
+                break
+
+            working_state = cast(
+                QuestionGenerationState,
+                {
+                    **result,
+                    "generation_settings": settings,
+                    "sample_test_cases": sample_cases,
+                    "hidden_test_cases": hidden_cases,
+                },
+            )
+            if sample_missing:
+                generated = self._example_node(working_state)
+                sample_cases = self._dedupe_test_cases_by_input(
+                    self._merge_unique_test_cases(
+                        sample_cases,
+                        [
+                            case.model_copy(update={"is_sample": True})
+                            for case in self._complete_test_cases(
+                                generated.get("sample_test_cases", []),
+                            )
+                        ],
+                    ),
+                )
+                notes.append(
+                    (
+                        f"Final testcase guardrail repair {attempt}: "
+                        f"{len(sample_cases)}/{target_sample_count} sample cases."
+                    ),
+                )
+
+            if hidden_missing:
+                working_state = cast(
+                    QuestionGenerationState,
+                    {
+                        **working_state,
+                        "sample_test_cases": sample_cases,
+                        "hidden_test_cases": hidden_cases,
+                    },
+                )
+                generated = self._hidden_test_node(working_state)
+                hidden_cases = self._dedupe_test_cases_by_input(
+                    self._merge_unique_test_cases(
+                        hidden_cases,
+                        [
+                            case.model_copy(update={"is_sample": False})
+                            for case in self._complete_test_cases(
+                                generated.get("hidden_test_cases", []),
+                            )
+                        ],
+                    ),
+                )
+                notes.append(
+                    (
+                        f"Final testcase guardrail repair {attempt}: "
+                        f"{len(hidden_cases)}/{target_hidden_count} hidden cases."
+                    ),
+                )
+
+            checked = self._constraint_script_node(
+                cast(
+                    QuestionGenerationState,
+                    {
+                        **working_state,
+                        "sample_test_cases": sample_cases,
+                        "hidden_test_cases": hidden_cases,
+                    },
+                ),
+            )
+            sample_cases = self._dedupe_test_cases_by_input(
                 [
                     case.model_copy(update={"is_sample": True})
                     for case in self._complete_test_cases(
-                        current_draft.sample_test_cases,
+                        checked.get("sample_test_cases", sample_cases),
                     )
                 ],
             )
-            hidden_cases = self._merge_unique_test_cases(
-                hidden_cases,
+            hidden_cases = self._dedupe_test_cases_by_input(
                 [
                     case.model_copy(update={"is_sample": False})
                     for case in self._complete_test_cases(
-                        current_draft.hidden_test_cases,
+                        checked.get("hidden_test_cases", hidden_cases),
                     )
                 ],
             )
+            notes.extend(checked.get("constraint_validation_warnings", []))
 
+        return sample_cases, hidden_cases, notes
+
+    def _assert_final_test_counts(
+        self,
+        result: QuestionGenerationState,
+        request: QuestionAIDraftRequest,
+    ) -> None:
+        """Hard guardrail: never return a testcase response with wrong counts."""
+
+        require_sample, require_hidden = self._test_count_requirements(
+            request.generation_scope,
+        )
+        if not require_sample and not require_hidden:
+            return
+
+        settings = request.generation_settings
         target_sample_count = max(1, settings.sample_test_case_count)
         target_hidden_count = max(1, settings.hidden_test_case_count)
-        sample_cases = sample_cases[:target_sample_count]
-        hidden_cases = hidden_cases[:target_hidden_count]
+        sample_count = len(
+            self._complete_test_cases(result.get("sample_test_cases", [])),
+        )
+        hidden_count = len(
+            self._complete_test_cases(result.get("hidden_test_cases", [])),
+        )
+        sample_ok = not require_sample or sample_count == target_sample_count
+        hidden_ok = not require_hidden or hidden_count == target_hidden_count
+        if sample_ok and hidden_ok:
+            return
 
-        notes = list(result.get("notes", []))
-        if (
-            len(sample_cases) == target_sample_count
-            and len(hidden_cases) == target_hidden_count
-        ):
-            notes.append(
-                (
-                    "Exact testcase count verified: "
-                    f"{target_sample_count} sample and {target_hidden_count} hidden."
-                ),
-            )
-        else:
-            notes.append(
-                (
-                    "Testcase count needs recruiter review: generated "
-                    f"{len(sample_cases)}/{target_sample_count} sample and "
-                    f"{len(hidden_cases)}/{target_hidden_count} hidden after "
-                    "constraint filtering."
-                ),
-            )
+        expected_parts: list[str] = []
+        actual_parts: list[str] = []
+        if require_sample:
+            expected_parts.append(f"{target_sample_count} sample")
+            actual_parts.append(f"{sample_count} sample")
+        if require_hidden:
+            expected_parts.append(f"{target_hidden_count} hidden")
+            actual_parts.append(f"{hidden_count} hidden")
+        raise ValueError(
+            (
+                "Question generation guardrail failed: expected exactly "
+                f"{' and '.join(expected_parts)} testcase"
+                f"{'s' if len(expected_parts) > 1 else ''}, but prepared "
+                f"{' and '.join(actual_parts)}."
+            ),
+        )
 
-        normalized = dict(result)
-        normalized["sample_test_cases"] = sample_cases
-        normalized["hidden_test_cases"] = hidden_cases
-        normalized["notes"] = notes
-        return cast(QuestionGenerationState, normalized)
+    @staticmethod
+    def _final_count_note(
+        *,
+        sample_cases: list[TestCase],
+        hidden_cases: list[TestCase],
+        require_sample: bool,
+        require_hidden: bool,
+        target_sample_count: int,
+        target_hidden_count: int,
+    ) -> str:
+        if require_sample and require_hidden:
+            return (
+                "Exact testcase count verified: "
+                f"{target_sample_count} sample and {target_hidden_count} hidden."
+            )
+        if require_sample:
+            return (
+                f"Exact sample testcase count verified: {target_sample_count} sample."
+            )
+        if require_hidden:
+            return (
+                f"Exact hidden testcase count verified: {target_hidden_count} hidden."
+            )
+        return (
+            "Testcase count carried through without generation: "
+            f"{len(sample_cases)} sample and {len(hidden_cases)} hidden."
+        )
 
     def _build_draft_from_state(
         self,
@@ -1069,13 +1919,25 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             supported_languages,
             reference_language,
         )
+        tags = normalize_question_tags(
+            [*result.get("tags", []), *result.get("topics", [])],
+            limit=6,
+        )
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(
+                result.get("answer_validation_mode", AnswerValidationMode.EXACT.value),
+            ),
+        )
+        checker_explanation = result.get(
+            "output_checker_explanation", ""
+        ).strip() or default_checker_explanation(answer_mode)
         return QuestionCreateRequest(
             title=result.get("title") or request.title_hint or "Untitled Question",
             problem_statement=result.get("problem_statement", ""),
             difficulty=DifficultyLevel(difficulty_value),
-            topics=result.get("topics", []),
-            tags=result.get("tags", []),
-            category=result.get("category", ""),
+            topics=[],
+            tags=tags,
+            category=normalize_question_category(result.get("category", ""), tags),
             constraints=result.get("constraints", ""),
             input_format=result.get("input_format", ""),
             input_explanation=result.get("input_explanation", ""),
@@ -1112,6 +1974,9 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 result.get("validation_status", ValidationStatus.NOT_RUN.value),
             ),
             reference_solutions=reference_solutions,
+            answer_validation_mode=answer_mode,
+            output_checker=result.get("output_checker", "").strip(),
+            output_checker_explanation=checker_explanation,
             solution_approach=result.get("solution_approach", ""),
             time_complexity=result.get("time_complexity", ""),
             space_complexity=result.get("space_complexity", ""),

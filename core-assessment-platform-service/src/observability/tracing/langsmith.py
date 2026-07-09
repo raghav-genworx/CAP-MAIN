@@ -76,23 +76,26 @@ def langsmith_run(
         settings.langsmith_endpoint,
         settings.langsmith_api_key.strip(),
     )
-    with tracing_context(
-        project_name=settings.langsmith_project,
-        tags=tags,
-        metadata=dict(metadata or {}),
-        parent=parent,
-        enabled=True,
-        client=client,
-    ), trace(
-        name,
-        run_type=run_type,
-        inputs=inputs,
-        project_name=settings.langsmith_project,
-        parent=parent,
-        tags=tags,
-        metadata=metadata,
-        client=client,
-    ) as run:
+    with (
+        tracing_context(
+            project_name=settings.langsmith_project,
+            tags=tags,
+            metadata=dict(metadata or {}),
+            parent=parent,
+            enabled=True,
+            client=client,
+        ),
+        trace(
+            name,
+            run_type=run_type,
+            inputs=inputs,
+            project_name=settings.langsmith_project,
+            parent=parent,
+            tags=tags,
+            metadata=metadata,
+            client=client,
+        ) as run,
+    ):
         yield run
         if outputs is not None:
             run.end(outputs=outputs)

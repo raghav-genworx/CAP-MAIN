@@ -50,7 +50,7 @@ class ExecutionAdapterService:
                     "expected_output": case.expected_output,
                 }
                 for case in test_cases
-                if case.input.strip() and case.expected_output.strip()
+                if case.expected_output.strip()
             ],
         }
         if not payload["test_cases"]:

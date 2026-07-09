@@ -14,14 +14,14 @@ HIDDEN_CHECK_COOLDOWN_SECONDS = 5
 def complete_test_cases(
     raw_cases: list[dict[str, Any]] | list[TestCase],
 ) -> list[TestCase]:
-    """Validate test cases and retain only executable input/output pairs."""
+    """Validate test cases and retain executable expected-output pairs."""
 
     cases = [
         case if isinstance(case, TestCase) else TestCase.model_validate(case)
         for case in raw_cases
     ]
     return [
-        case for case in cases if case.input.strip() and case.expected_output.strip()
+        case for case in cases if case.expected_output.strip()
     ]
 
 

@@ -1,1 +1,0 @@
-# Development dependencies are managed in pyproject.toml dependency groups.

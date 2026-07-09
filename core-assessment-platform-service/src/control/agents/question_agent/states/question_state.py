@@ -7,6 +7,7 @@ from typing import Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.question_bank import (
+    AnswerValidationMode,
     DifficultyLevel,
     QuestionGenerationSettings,
     ReferenceSolutionArtifact,
@@ -30,8 +31,20 @@ class ProblemStatementOutput(BaseModel):
     output_format: str = Field(min_length=3)
     output_explanation: str = ""
     constraints: str = ""
+    answer_validation_mode: AnswerValidationMode = AnswerValidationMode.EXACT
+    output_checker: str = ""
+    output_checker_explanation: str = ""
     sample_test_cases: list[TestCase] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class CheckerOutput(BaseModel):
+    """Structured output for the output checker generator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    output_checker: str = Field(min_length=10)
+    output_checker_explanation: str = Field(min_length=10)
 
 
 class MetadataOutput(BaseModel):
@@ -40,8 +53,8 @@ class MetadataOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     difficulty: DifficultyLevel
-    topics: list[str] = Field(min_length=3, max_length=6)
-    tags: list[str] = Field(min_length=3, max_length=6)
+    topics: list[str] = Field(default_factory=list, max_length=0)
+    tags: list[str] = Field(min_length=1, max_length=6)
     category: str = Field(min_length=2, max_length=80)
     expected_solve_time_minutes: int = Field(ge=1, le=180)
     rationale: str
@@ -82,7 +95,7 @@ class HiddenTestOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    hidden_test_cases: list[TestCase] = Field(max_length=50)
+    hidden_test_cases: list[TestCase] = Field(min_length=1, max_length=50)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -238,6 +251,9 @@ class QuestionGenerationState(TypedDict, total=False):
     input_explanation: str
     output_format: str
     output_explanation: str
+    answer_validation_mode: AnswerValidationMode | str
+    output_checker: str
+    output_checker_explanation: str
     difficulty: str
     expected_solve_time_minutes: int
     candidate_solve_time_minutes: int

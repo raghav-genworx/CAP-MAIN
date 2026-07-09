@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,32 @@ class Settings(BaseSettings):
         min_length=24,
         description="Shared secret used to validate candidate session JWTs.",
     )
+    firebase_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("FIREBASE_API_KEY", "VITE_FIREBASE_API_KEY"),
+        description="Firebase API key used by the frontend.",
+    )
+    firebase_auth_domain: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "FIREBASE_AUTH_DOMAIN",
+            "VITE_FIREBASE_AUTH_DOMAIN",
+        ),
+        description="Firebase auth domain used by the frontend.",
+    )
+    firebase_project_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "FIREBASE_PROJECT_ID",
+            "VITE_FIREBASE_PROJECT_ID",
+        ),
+        description="Firebase project ID used to verify ID tokens.",
+    )
+    firebase_app_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("FIREBASE_APP_ID", "VITE_FIREBASE_APP_ID"),
+        description="Firebase app ID used by the frontend.",
+    )
     upstream_request_timeout_seconds: float = Field(
         default=10.0,
         ge=1.0,
@@ -76,13 +102,13 @@ class Settings(BaseSettings):
             ),
         }
         invalid_secrets = [
-            name for name, (value, local_value) in local_secrets.items()
+            name
+            for name, (value, local_value) in local_secrets.items()
             if value == local_value
         ]
         if invalid_secrets:
             raise ValueError(
-                "Production secrets must be configured: "
-                + ", ".join(invalid_secrets)
+                "Production secrets must be configured: " + ", ".join(invalid_secrets)
             )
         return self
 

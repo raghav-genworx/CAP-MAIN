@@ -157,9 +157,19 @@ async def stream_ai_draft(
     """Stream graph movement and final draft as server-sent events."""
 
     def event_stream() -> Iterator[str]:
-        for event in service.stream_ai_draft_events(current_user.uid, payload):
-            event_type = event.get("type", "progress")
-            yield f"event: {event_type}\ndata: {json.dumps(event)}\n\n"
+        try:
+            for event in service.stream_ai_draft_events(current_user.uid, payload):
+                event_type = event.get("type", "progress")
+                yield f"event: {event_type}\ndata: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            message = getattr(exc, "message", str(exc))
+            event = {
+                "type": "error",
+                "scope": payload.generation_scope,
+                "message": message,
+                "progress": 100,
+            }
+            yield f"event: error\ndata: {json.dumps(event)}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -193,10 +203,11 @@ async def validate_question_draft(
 @router.post(
     "/questions/refine-test-cases",
     response_model=QuestionDraftRefinementResponse,
-    summary="Repair existing testcase expected outputs",
+    summary="Repair and complete existing test cases",
     description=(
-        "Executes the current solution, semantically reviews mismatches against the "
-        "problem contract, and repairs only incorrect expected outputs."
+        "Completes the requested testcase count, checks the suite against generated "
+        "constraints, executes the reference solution, and repairs mismatches with "
+        "oracle evidence."
     ),
 )
 async def refine_question_test_cases(

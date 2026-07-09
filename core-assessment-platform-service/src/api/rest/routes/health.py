@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import settings_dependency
 from config.settings import Settings
-from data.database import database_is_ready
+from data.clients.database import database_is_ready
 from schemas.health import HealthResponse
 
 router = APIRouter(tags=["health"])

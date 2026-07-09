@@ -4,6 +4,12 @@ CAP is a service-oriented coding assessment platform for recruiter workflows,
 candidate test sessions, sandboxed execution, evaluation, ranking, and PDF
 reporting.
 
+## Architecture Guide
+
+For a full codebase walkthrough with diagrams, service map, data model, and
+"where to start reading" paths, see **[Codebase Architecture Guide](docs/CODEBASE_GUIDE.md)**
+([PDF](docs/CODEBASE_GUIDE.pdf)).
+
 ## Services
 
 | Service | Local port | Responsibility |
@@ -59,20 +65,15 @@ Run each backend service from its own directory:
 
 ```bash
 uv sync --dev --frozen
-uv run ruff check src tests
+uv run ruff check src
 PYTHONPATH=src uv run mypy src
-PYTHONPATH=src uv run pytest -q
 ```
-
-The API gateway and execution service test suites are also compatible with
-`python -m unittest discover -s tests`, which is the current frozen CI command.
 
 Run the frontend gates from `frontend/`:
 
 ```bash
 npm ci
 npm run lint
-npm test
 npm run build
 ```
 

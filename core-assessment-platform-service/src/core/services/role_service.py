@@ -127,9 +127,7 @@ class RoleService:
                 role=UserRole(role_model.role),
                 is_active=role_model.is_active,
                 email=role_model.email,
-                subscription_status=SubscriptionStatus(
-                    role_model.subscription_status
-                ),
+                subscription_status=SubscriptionStatus(role_model.subscription_status),
                 trial_started_at=role_model.trial_started_at,
                 created_at=role_model.created_at,
                 updated_at=role_model.updated_at,

@@ -15,7 +15,7 @@ class ExecutionRequest(BaseModel):
     expected_output: str | None = Field(default=None, max_length=100_000)
     compiler_options: str | None = Field(default=None, max_length=512)
     command_line_arguments: str | None = Field(default=None, max_length=512)
-    cpu_time_limit: float | None = Field(default=None, gt=0, le=15)
+    cpu_time_limit: float | None = Field(default=None, gt=0, le=30)
     memory_limit: int | None = Field(default=None, ge=1024, le=512_000)
 
     @model_validator(mode="after")
@@ -74,7 +74,7 @@ class BatchExecutionRequest(BaseModel):
     test_cases: list[BatchTestCase] = Field(
         default_factory=list, min_length=1, max_length=200
     )
-    cpu_time_limit: float | None = Field(default=None, gt=0, le=15)
+    cpu_time_limit: float | None = Field(default=None, gt=0, le=30)
     memory_limit: int | None = Field(default=None, ge=1024, le=512_000)
 
     @model_validator(mode="after")

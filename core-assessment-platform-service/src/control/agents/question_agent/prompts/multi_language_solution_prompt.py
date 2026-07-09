@@ -112,6 +112,10 @@ def build_focused_language_solution_prompt(
             "output_format": state.get("output_format", ""),
             "sample_test_cases": sample_cases,
             "hidden_test_cases": hidden_cases,
+            "answer_validation": {
+                "mode": state.get("answer_validation_mode", "exact"),
+                "explanation": state.get("output_checker_explanation", ""),
+            },
             "recruiter_instruction": state.get("prompt", ""),
         },
         requirements=(
@@ -121,6 +125,11 @@ def build_focused_language_solution_prompt(
             (
                 "The program must satisfy every sample and the full constrained "
                 "input domain, including edge cases."
+            ),
+            (
+                "If answer_validation.mode is multiple_valid or constructive, "
+                "the program may print any valid answer accepted by the checker "
+                "rather than matching the exemplar output byte-for-byte."
             ),
             "Do not return any fields other than source_code.",
             f"Do not generate any language other than {target_language}.",

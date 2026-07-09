@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from data.models.postgres.base import Base
@@ -65,6 +66,18 @@ class CandidateAssessmentModel(Base):
     )
     submission_message: Mapped[str] = mapped_column(
         Text, nullable=False, default="", server_default=""
+    )
+    tab_switch_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    copy_paste_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    fullscreen_exit_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    question_time_seconds: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
     )
     last_hidden_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)

@@ -88,7 +88,7 @@ async def proxy_request(
     """Authorize one request and relay its response without buffering."""
 
     authorization = request.headers.get("authorization")
-    await auth_service.authorize(
+    extra_headers = await auth_service.authorize(
         service_name=service_name,
         path=path,
         method=request.method,
@@ -101,6 +101,7 @@ async def proxy_request(
         query=request.url.query,
         headers=request.headers,
         body=await request.body(),
+        extra_headers=extra_headers,
     )
     upstream_content_type = upstream.headers.get("content-type")
     return StreamingResponse(

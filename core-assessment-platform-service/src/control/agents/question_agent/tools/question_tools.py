@@ -14,12 +14,20 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from core.services.execution_adapter_service import ExecutionAdapterService
+from core.exceptions.assessment import ExecutionAdapterError
+from core.services.output_validation import (
+    apply_answer_validation,
+    default_checker_explanation,
+    normalize_answer_validation_mode,
+)
+from handlers.http_clients.execution import ExecutionAdapterService
 from schemas.question_bank import (
+    AnswerValidationMode,
     SolutionValidationCaseResult,
     SolutionValidationReport,
     SolutionValidationRound,
     TestCase,
+    ValidationStatus,
 )
 
 from ..prompts.adversarial_test_prompt import build_adversarial_test_prompt
@@ -87,6 +95,21 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
     """Execution validation, repair, and testcase helper routines."""
 
     _execution_adapter: ExecutionAdapterService
+
+    @staticmethod
+    def _answer_validation_kwargs(
+        state: QuestionGenerationState,
+    ) -> dict[str, str]:
+        answer_mode = normalize_answer_validation_mode(
+            state.get("answer_validation_mode", AnswerValidationMode.EXACT.value),
+        )
+        return {
+            "answer_validation_mode": answer_mode,
+            "output_checker": state.get("output_checker", "") or "",
+            "output_checker_explanation": (
+                state.get("output_checker_explanation", "") or ""
+            ),
+        }
 
     def _generate_constraint_validation_script(
         self,
@@ -491,41 +514,35 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 "solution_validation": report,
             }
 
+        initial_report = self._validate_source_against_tests(
+            language=language,
+            source_code=source_code,
+            sample_tests=sample_tests,
+            hidden_tests=hidden_tests,
+            rounds=[],
+            time_limit_seconds=state.get("execution_time_limit_seconds"),
+            memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+            **self._answer_validation_kwargs(state),
+        )
+        if initial_report.failed_count == 0:
+            return {
+                "reference_solution": source_code,
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+                "solution_validation": initial_report,
+            }
+
+        validation_report = initial_report
         for round_number in range(1, ADVERSARIAL_VALIDATION_ROUNDS + 1):
-            challenger_tests = self._generate_adversarial_test_cases(
-                state=state,
-                source_code=source_code,
-                existing_sample_tests=sample_tests,
-                existing_hidden_tests=hidden_tests,
-                round_number=round_number,
-            )
-            hidden_tests = self._merge_unique_test_cases(
-                hidden_tests,
-                challenger_tests,
-            )
-            hidden_tests = self._cap_hidden_tests_for_generation_settings(
-                state,
-                hidden_tests,
-                recently_added_count=len(challenger_tests),
-            )
-            validation_report = self._validate_source_against_tests(
-                language=language,
-                source_code=source_code,
-                sample_tests=sample_tests,
-                hidden_tests=hidden_tests,
-                rounds=[],
-                time_limit_seconds=state.get("execution_time_limit_seconds"),
-                memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
-            )
             round_status: SolutionValidationRound = SolutionValidationRound(
                 round_number=round_number,
                 status="passed" if validation_report.failed_count == 0 else "failed",
                 summary=validation_report.summary,
-                challenger_summary=self._challenger_summary(
-                    round_number,
-                    challenger_tests,
+                challenger_summary=(
+                    "Used the failing sample and hidden cases from the first "
+                    "validation pass."
                 ),
-                added_hidden_test_cases=challenger_tests,
+                added_hidden_test_cases=[],
                 passed_count=validation_report.passed_count,
                 failed_count=validation_report.failed_count,
                 results=validation_report.results,
@@ -555,6 +572,9 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 repair_target = repair_decision.repair_target
                 repair_summary = repair_decision.rationale
                 if repair_target == "testcase":
+                    failing_sample_indexes, failing_hidden_indexes = (
+                        self._failed_result_indexes(validation_report)
+                    )
                     sample_tests, hidden_tests = self._repair_failed_test_cases(
                         state=state,
                         source_code=source_code,
@@ -562,6 +582,30 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                         sample_tests=sample_tests,
                         hidden_tests=hidden_tests,
                         round_number=round_number,
+                    )
+                    focused_sample_tests = self._select_tests_by_indexes(
+                        sample_tests,
+                        failing_sample_indexes,
+                    )
+                    focused_hidden_tests = self._select_tests_by_indexes(
+                        hidden_tests,
+                        failing_hidden_indexes,
+                    )
+                    focused_report = self._validate_source_against_tests(
+                        language=language,
+                        source_code=source_code,
+                        sample_tests=focused_sample_tests,
+                        hidden_tests=focused_hidden_tests,
+                        rounds=[],
+                        time_limit_seconds=state.get("execution_time_limit_seconds"),
+                        memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+                        **self._answer_validation_kwargs(state),
+                    )
+                    repaired_report = self._merge_focused_validation_report(
+                        validation_report,
+                        focused_report,
+                        sample_indexes=failing_sample_indexes,
+                        hidden_indexes=failing_hidden_indexes,
                     )
                 else:
                     repaired_solution = self._repair_reference_solution(
@@ -573,15 +617,16 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                         round_number=round_number,
                     )
                     source_code = repaired_solution
-                repaired_report = self._validate_source_against_tests(
-                    language=language,
-                    source_code=source_code,
-                    sample_tests=sample_tests,
-                    hidden_tests=hidden_tests,
-                    rounds=[],
-                    time_limit_seconds=state.get("execution_time_limit_seconds"),
-                    memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
-                )
+                    repaired_report = self._validate_source_against_tests(
+                        language=language,
+                        source_code=source_code,
+                        sample_tests=sample_tests,
+                        hidden_tests=hidden_tests,
+                        rounds=[],
+                        time_limit_seconds=state.get("execution_time_limit_seconds"),
+                        memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+                        **self._answer_validation_kwargs(state),
+                    )
                 round_status = round_status.model_copy(
                     update={
                         "status": (
@@ -604,30 +649,26 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 )
                 rounds.append(round_status)
                 if repaired_report.failed_count > 0:
-                    (
-                        sample_tests,
-                        hidden_tests,
-                        final_report,
-                        rounds,
-                    ) = self._run_final_testcase_repair_if_needed(
-                        state=state,
-                        source_code=source_code,
-                        language=language,
-                        validation_report=repaired_report,
-                        sample_tests=sample_tests,
-                        hidden_tests=hidden_tests,
-                        rounds=rounds,
-                        round_number=round_number + 1,
-                    )
-                    return {
-                        "reference_solution": source_code,
-                        "sample_test_cases": sample_tests,
-                        "hidden_test_cases": hidden_tests,
-                        "solution_validation": final_report,
-                    }
-                continue
+                    validation_report = repaired_report
+                    continue
+                return {
+                    "reference_solution": source_code,
+                    "sample_test_cases": sample_tests,
+                    "hidden_test_cases": hidden_tests,
+                    "solution_validation": repaired_report.model_copy(
+                        update={"rounds": rounds},
+                    ),
+                }
 
             rounds.append(round_status)
+            return {
+                "reference_solution": source_code,
+                "sample_test_cases": sample_tests,
+                "hidden_test_cases": hidden_tests,
+                "solution_validation": validation_report.model_copy(
+                    update={"rounds": rounds},
+                ),
+            }
 
         final_report = self._validate_source_against_tests(
             language=language,
@@ -637,6 +678,7 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             rounds=rounds,
             time_limit_seconds=state.get("execution_time_limit_seconds"),
             memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+            **self._answer_validation_kwargs(state),
         )
         if final_report.failed_count > 0:
             (
@@ -689,6 +731,9 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             )
 
         final_round_number = min(round_number, ADVERSARIAL_VALIDATION_ROUNDS + 1)
+        failing_sample_indexes, failing_hidden_indexes = self._failed_result_indexes(
+            validation_report,
+        )
         repaired_sample_tests, repaired_hidden_tests = self._repair_failed_test_cases(
             state=state,
             source_code=source_code,
@@ -697,21 +742,34 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             hidden_tests=hidden_tests,
             round_number=final_round_number,
         )
-        repaired_report = self._validate_source_against_tests(
+        focused_sample_tests = self._select_tests_by_indexes(
+            repaired_sample_tests,
+            failing_sample_indexes,
+        )
+        focused_hidden_tests = self._select_tests_by_indexes(
+            repaired_hidden_tests,
+            failing_hidden_indexes,
+        )
+        focused_report = self._validate_source_against_tests(
             language=language,
             source_code=source_code,
-            sample_tests=repaired_sample_tests,
-            hidden_tests=repaired_hidden_tests,
+            sample_tests=focused_sample_tests,
+            hidden_tests=focused_hidden_tests,
             rounds=[],
             time_limit_seconds=state.get("execution_time_limit_seconds"),
             memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+            **self._answer_validation_kwargs(state),
+        )
+        repaired_report = self._merge_focused_validation_report(
+            validation_report,
+            focused_report,
+            sample_indexes=failing_sample_indexes,
+            hidden_indexes=failing_hidden_indexes,
         )
         final_round = SolutionValidationRound(
             round_number=final_round_number,
             status=(
-                "testcase_repaired"
-                if repaired_report.failed_count == 0
-                else "failed"
+                "testcase_repaired" if repaired_report.failed_count == 0 else "failed"
             ),
             summary=repaired_report.summary,
             challenger_summary=(
@@ -915,6 +973,92 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 failing_hidden_indexes,
                 repaired_hidden_cases,
             ),
+        )
+
+    @staticmethod
+    def _failed_result_indexes(
+        validation_report: SolutionValidationReport,
+    ) -> tuple[set[int], set[int]]:
+        return (
+            {
+                result.index
+                for result in validation_report.results
+                if result.bucket == "sample" and not result.passed
+            },
+            {
+                result.index
+                for result in validation_report.results
+                if result.bucket == "hidden" and not result.passed
+            },
+        )
+
+    @staticmethod
+    def _select_tests_by_indexes(
+        test_cases: list[TestCase],
+        indexes: set[int],
+    ) -> list[TestCase]:
+        return [
+            test_case
+            for index, test_case in enumerate(test_cases, start=1)
+            if index in indexes
+        ]
+
+    @staticmethod
+    def _merge_focused_validation_report(
+        previous_report: SolutionValidationReport,
+        focused_report: SolutionValidationReport,
+        *,
+        sample_indexes: set[int],
+        hidden_indexes: set[int],
+    ) -> SolutionValidationReport:
+        sample_index_list = sorted(sample_indexes)
+        hidden_index_list = sorted(hidden_indexes)
+        merged_results = {
+            (result.bucket, result.index): result for result in previous_report.results
+        }
+
+        for result in focused_report.results:
+            if result.bucket == "sample":
+                if result.index < 1 or result.index > len(sample_index_list):
+                    continue
+                original_index = sample_index_list[result.index - 1]
+            else:
+                if result.index < 1 or result.index > len(hidden_index_list):
+                    continue
+                original_index = hidden_index_list[result.index - 1]
+            merged_results[(result.bucket, original_index)] = result.model_copy(
+                update={"index": original_index},
+            )
+
+        ordered_results = [
+            merged_results[key]
+            for key in sorted(
+                merged_results,
+                key=lambda item: (0 if item[0] == "sample" else 1, item[1]),
+            )
+        ]
+        passed_count = sum(1 for result in ordered_results if result.passed)
+        failed_count = len(ordered_results) - passed_count
+        status: Literal["passed", "failed"] = (
+            "passed" if failed_count == 0 else "failed"
+        )
+        summary = (
+            f"Reference solution passed {passed_count}/{len(ordered_results)} "
+            "execution checks."
+            if status == "passed"
+            else (
+                f"Reference solution failed {failed_count} of "
+                f"{len(ordered_results)} execution checks."
+            )
+        )
+        return previous_report.model_copy(
+            update={
+                "status": status,
+                "summary": summary,
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+                "results": ordered_results,
+            },
         )
 
     def _repair_reference_solution(
@@ -1285,6 +1429,7 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
             rounds=[],
             time_limit_seconds=state.get("execution_time_limit_seconds"),
             memory_limit_kb=(state.get("memory_limit_mb", 256) * 1024),
+            **self._answer_validation_kwargs(state),
         )
 
     def _validate_source_against_tests(
@@ -1297,6 +1442,9 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
         rounds: list[SolutionValidationRound],
         time_limit_seconds: float | None = None,
         memory_limit_kb: int | None = None,
+        answer_validation_mode: str | AnswerValidationMode = AnswerValidationMode.EXACT,
+        output_checker: str = "",
+        output_checker_explanation: str = "",
     ) -> SolutionValidationReport:
         contract_error = self._reference_solution_contract_error(source_code, language)
         if contract_error:
@@ -1307,97 +1455,141 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                 rounds=rounds,
                 contract_error=contract_error,
             )
-        runner_notes = self._runner_contract_notes(language, source_code)
-        results: list[SolutionValidationCaseResult] = []
-        progress_context = _VALIDATION_PROGRESS_CONTEXT.get()
-        if progress_context is not None:
-            progress_context.validation_pass += 1
-            validation_pass = progress_context.validation_pass
-            total_cases = len(sample_tests) + len(hidden_tests)
-            results.extend(
-                self._execute_streamed_validation_cases(
-                    progress_context=progress_context,
-                    validation_pass=validation_pass,
-                    bucket="sample",
-                    test_cases=sample_tests,
-                    source_code=source_code,
-                    language=language,
-                    run_type="sample_run",
-                    total_cases=total_cases,
-                    overall_offset=0,
-                    time_limit_seconds=time_limit_seconds,
-                    memory_limit_kb=memory_limit_kb,
-                )
-            )
-            results.extend(
-                self._execute_streamed_validation_cases(
-                    progress_context=progress_context,
-                    validation_pass=validation_pass,
-                    bucket="hidden",
-                    test_cases=hidden_tests,
-                    source_code=source_code,
-                    language=language,
-                    run_type="final_hidden",
-                    total_cases=total_cases,
-                    overall_offset=len(sample_tests),
-                    time_limit_seconds=time_limit_seconds,
-                    memory_limit_kb=memory_limit_kb,
-                )
-            )
-        elif sample_tests:
-            sample_results, _, _ = self._execution_adapter.execute_batch(
-                source_code=source_code,
-                language=language,
-                test_cases=sample_tests,
-                run_type="sample_run",
-                time_limit_seconds=time_limit_seconds,
-                memory_limit_kb=memory_limit_kb,
-            )
-            for index, result in enumerate(sample_results, start=1):
-                results.append(
-                    SolutionValidationCaseResult(
+        normalized_answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(answer_validation_mode),
+        )
+        checker_source = output_checker.strip()
+        checker_explanation = (
+            output_checker_explanation.strip()
+            or default_checker_explanation(normalized_answer_mode)
+        )
+        runner_notes = [
+            *self._runner_contract_notes(language, source_code),
+            f"Answer validation mode: {normalized_answer_mode.value}.",
+            checker_explanation,
+        ]
+        try:
+            results: list[SolutionValidationCaseResult] = []
+            progress_context = _VALIDATION_PROGRESS_CONTEXT.get()
+            if progress_context is not None:
+                progress_context.validation_pass += 1
+                validation_pass = progress_context.validation_pass
+                total_cases = len(sample_tests) + len(hidden_tests)
+                results.extend(
+                    self._execute_streamed_validation_cases(
+                        progress_context=progress_context,
+                        validation_pass=validation_pass,
                         bucket="sample",
-                        index=index,
-                        passed=result.passed,
-                        status=result.status,
-                        stdin=result.input,
-                        expected_output=result.expected_output,
-                        actual_output=result.actual_output,
-                        stderr=result.stderr,
-                        compile_output=result.compile_output,
-                        message=result.message,
-                        token=result.token,
-                        execution_time=result.execution_time,
-                        memory_kb=result.memory_kb,
+                        test_cases=sample_tests,
+                        source_code=source_code,
+                        language=language,
+                        run_type="sample_run",
+                        total_cases=total_cases,
+                        overall_offset=0,
+                        time_limit_seconds=time_limit_seconds,
+                        memory_limit_kb=memory_limit_kb,
+                        answer_validation_mode=normalized_answer_mode,
+                        output_checker=checker_source,
                     )
                 )
-        if progress_context is None and hidden_tests:
-            hidden_results, _, _ = self._execution_adapter.execute_batch(
-                source_code=source_code,
-                language=language,
-                test_cases=hidden_tests,
-                run_type="final_hidden",
-                time_limit_seconds=time_limit_seconds,
-                memory_limit_kb=memory_limit_kb,
-            )
-            for index, result in enumerate(hidden_results, start=1):
-                results.append(
-                    SolutionValidationCaseResult(
+                results.extend(
+                    self._execute_streamed_validation_cases(
+                        progress_context=progress_context,
+                        validation_pass=validation_pass,
                         bucket="hidden",
-                        index=index,
-                        passed=result.passed,
-                        status=result.status,
-                        stdin=result.input,
-                        expected_output=result.expected_output,
-                        actual_output=result.actual_output,
-                        stderr=result.stderr,
-                        compile_output=result.compile_output,
-                        message=result.message,
-                        token=result.token,
-                        execution_time=result.execution_time,
-                        memory_kb=result.memory_kb,
+                        test_cases=hidden_tests,
+                        source_code=source_code,
+                        language=language,
+                        run_type="final_hidden",
+                        total_cases=total_cases,
+                        overall_offset=len(sample_tests),
+                        time_limit_seconds=time_limit_seconds,
+                        memory_limit_kb=memory_limit_kb,
+                        answer_validation_mode=normalized_answer_mode,
+                        output_checker=checker_source,
                     )
                 )
+            elif sample_tests:
+                sample_results, _, _ = self._execution_adapter.execute_batch(
+                    source_code=source_code,
+                    language=language,
+                    test_cases=sample_tests,
+                    run_type="sample_run",
+                    time_limit_seconds=time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
+                )
+                for index, result in enumerate(sample_results, start=1):
+                    scored_result = apply_answer_validation(
+                        result,
+                        mode=normalized_answer_mode,
+                        checker_source=checker_source,
+                    )
+                    results.append(
+                        SolutionValidationCaseResult(
+                            bucket="sample",
+                            index=index,
+                            passed=scored_result.passed,
+                            status=scored_result.status,
+                            stdin=scored_result.input,
+                            expected_output=scored_result.expected_output,
+                            actual_output=scored_result.actual_output,
+                            stderr=scored_result.stderr,
+                            compile_output=scored_result.compile_output,
+                            message=scored_result.message,
+                            checker_message=scored_result.checker_message,
+                            token=scored_result.token,
+                            execution_time=scored_result.execution_time,
+                            memory_kb=scored_result.memory_kb,
+                        )
+                    )
+            if progress_context is None and hidden_tests:
+                hidden_results, _, _ = self._execution_adapter.execute_batch(
+                    source_code=source_code,
+                    language=language,
+                    test_cases=hidden_tests,
+                    run_type="final_hidden",
+                    time_limit_seconds=time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
+                )
+                for index, result in enumerate(hidden_results, start=1):
+                    scored_result = apply_answer_validation(
+                        result,
+                        mode=normalized_answer_mode,
+                        checker_source=checker_source,
+                    )
+                    results.append(
+                        SolutionValidationCaseResult(
+                            bucket="hidden",
+                            index=index,
+                            passed=scored_result.passed,
+                            status=scored_result.status,
+                            stdin=scored_result.input,
+                            expected_output=scored_result.expected_output,
+                            actual_output=scored_result.actual_output,
+                            stderr=scored_result.stderr,
+                            compile_output=scored_result.compile_output,
+                            message=scored_result.message,
+                            checker_message=scored_result.checker_message,
+                            token=scored_result.token,
+                            execution_time=scored_result.execution_time,
+                            memory_kb=scored_result.memory_kb,
+                        )
+                    )
+        except ExecutionAdapterError as exc:
+            return SolutionValidationReport(
+                status=ValidationStatus.FAILED.value,
+                summary=f"Execution validation failed: {str(exc)}",
+                passed_count=0,
+                failed_count=len(sample_tests) + len(hidden_tests),
+                sample_count=len(sample_tests),
+                hidden_count=len(hidden_tests),
+                runner_notes=[
+                    str(exc),
+                    "Ensure the code-execution-service is running and healthy.",
+                ],
+                results=[],
+                rounds=rounds,
+            )
 
         passed_count = sum(1 for item in results if item.passed)
         failed_count = len(results) - passed_count
@@ -1438,27 +1630,27 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
         overall_offset: int,
         time_limit_seconds: float | None,
         memory_limit_kb: int | None,
+        answer_validation_mode: str | AnswerValidationMode,
+        output_checker: str,
     ) -> list[SolutionValidationCaseResult]:
-        """Execute and publish one validation case at a time for live SSE updates."""
+        """Execute a testcase bucket in one batch while streaming case updates."""
 
         case_results: list[SolutionValidationCaseResult] = []
         bucket_label = "Sample" if bucket == "sample" else "Hidden"
         for index, test_case in enumerate(test_cases, start=1):
             overall_index = overall_offset + index
-            base_event = {
-                "validation_pass": validation_pass,
-                "test_bucket": bucket,
-                "test_index": index,
-                "bucket_total": len(test_cases),
-                "overall_index": overall_index,
-                "overall_total": total_cases,
-                "test_language": language,
-                "test_input": test_case.input,
-                "expected_output": test_case.expected_output,
-            }
             progress_context.callback(
                 {
-                    **base_event,
+                    **self._validation_case_base_event(
+                        validation_pass=validation_pass,
+                        bucket=bucket,
+                        index=index,
+                        bucket_total=len(test_cases),
+                        overall_index=overall_index,
+                        overall_total=total_cases,
+                        language=language,
+                        test_case=test_case,
+                    ),
                     "type": "validation_case_start",
                     "message": (
                         f"Running {bucket_label.lower()} test {index} of "
@@ -1468,19 +1660,30 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                     "test_status": "Running",
                 }
             )
-            try:
-                raw_results, _, _ = self._execution_adapter.execute_batch(
-                    source_code=source_code,
-                    language=language,
-                    test_cases=[test_case],
-                    run_type=run_type,
-                    time_limit_seconds=time_limit_seconds,
-                    memory_limit_kb=memory_limit_kb,
-                )
-            except Exception as exc:
+
+        try:
+            raw_results, _, _ = self._execution_adapter.execute_batch(
+                source_code=source_code,
+                language=language,
+                test_cases=test_cases,
+                run_type=run_type,
+                time_limit_seconds=time_limit_seconds,
+                memory_limit_kb=memory_limit_kb,
+            )
+        except Exception as exc:
+            for index, test_case in enumerate(test_cases, start=1):
                 progress_context.callback(
                     {
-                        **base_event,
+                        **self._validation_case_base_event(
+                            validation_pass=validation_pass,
+                            bucket=bucket,
+                            index=index,
+                            bucket_total=len(test_cases),
+                            overall_index=overall_offset + index,
+                            overall_total=total_cases,
+                            language=language,
+                            test_case=test_case,
+                        ),
                         "type": "validation_case_result",
                         "message": f"{bucket_label} test {index} could not run.",
                         "test_outcome": "error",
@@ -1489,9 +1692,22 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                         "error_message": str(exc),
                     }
                 )
-                raise
+            raise
 
-            if not raw_results:
+        raw_result_by_index = {result.index: result for result in raw_results}
+        for index, test_case in enumerate(test_cases, start=1):
+            base_event = self._validation_case_base_event(
+                validation_pass=validation_pass,
+                bucket=bucket,
+                index=index,
+                bucket_total=len(test_cases),
+                overall_index=overall_offset + index,
+                overall_total=total_cases,
+                language=language,
+                test_case=test_case,
+            )
+            raw_result = raw_result_by_index.get(index)
+            if raw_result is None:
                 case_result = SolutionValidationCaseResult(
                     bucket=bucket,
                     index=index,
@@ -1502,7 +1718,11 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                     message="Execution service returned no result for this test case.",
                 )
             else:
-                result = raw_results[0]
+                result = apply_answer_validation(
+                    raw_result,
+                    mode=answer_validation_mode,
+                    checker_source=output_checker,
+                )
                 case_result = SolutionValidationCaseResult(
                     bucket=bucket,
                     index=index,
@@ -1514,10 +1734,11 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                     stderr=result.stderr,
                     compile_output=result.compile_output,
                     message=result.message,
+                    checker_message=result.checker_message,
                     token=result.token,
                     execution_time=result.execution_time,
                     memory_kb=result.memory_kb,
-                )
+            )
             case_results.append(case_result)
             outcome = self._validation_case_outcome(case_result)
             progress_context.callback(
@@ -1537,13 +1758,39 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                     "test_status": case_result.status,
                     "actual_output": case_result.actual_output,
                     "error_message": (
-                        case_result.message
+                        case_result.checker_message
+                        or case_result.message
                         or case_result.stderr
                         or case_result.compile_output
                     ),
+                    "checker_message": case_result.checker_message,
                 }
             )
         return case_results
+
+    @staticmethod
+    def _validation_case_base_event(
+        *,
+        validation_pass: int,
+        bucket: Literal["sample", "hidden"],
+        index: int,
+        bucket_total: int,
+        overall_index: int,
+        overall_total: int,
+        language: str,
+        test_case: TestCase,
+    ) -> dict[str, Any]:
+        return {
+            "validation_pass": validation_pass,
+            "test_bucket": bucket,
+            "test_index": index,
+            "bucket_total": bucket_total,
+            "overall_index": overall_index,
+            "overall_total": overall_total,
+            "test_language": language,
+            "test_input": test_case.input,
+            "expected_output": test_case.expected_output,
+        }
 
     @staticmethod
     def _validation_case_outcome(
