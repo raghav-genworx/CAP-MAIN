@@ -25,3 +25,7 @@ export type {
   SlotStatus,
 } from "./types/Assessment";
 export type { QuestionRecord } from "./types/QuestionBank";
+export {
+  assessmentPath,
+  assessmentTestPath,
+} from "./utils/assessmentRoutes";

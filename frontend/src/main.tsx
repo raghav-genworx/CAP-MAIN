@@ -6,7 +6,7 @@ import { AppProviders } from "./app/providers";
 import { AppErrorBoundary } from "./components/common/AppErrorBoundary";
 import "./lib/monaco";
 import "./styles/globals.css";
-import "./features/codeEvaluation/styles/codeEvaluation.css";
+import "./features/assessments/styles/evaluation.css";
 
 const rootElement = document.getElementById("root");
 

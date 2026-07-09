@@ -80,3 +80,55 @@ export function RecruiterDashboardAnalytics({
     </section>
   );
 }
+
+export function DashboardCompletionByTest({
+  isLoading,
+  sessions,
+}: {
+  isLoading: boolean;
+  sessions: DashboardAnalyticsSession[];
+}) {
+  const completionSessions = [...sessions]
+    .sort((left, right) => right.candidateCount - left.candidateCount)
+    .slice(0, 6);
+
+  return (
+    <section className="dashboard-analytics-grid dashboard-completion-section">
+      <section className="dashboard-analytics-panel">
+        <div className="dashboard-analytics-heading">
+          <div>
+            <p className="dashboard-eyebrow">Completion by test</p>
+            <h2>Candidate submissions</h2>
+          </div>
+        </div>
+
+        {isLoading ? (
+          <p className="empty-state">Loading test completion...</p>
+        ) : completionSessions.length ? (
+          <div className="dashboard-completion-chart">
+            {completionSessions.map((session) => {
+              const rate = percentage(
+                session.submittedCount,
+                session.candidateCount,
+              );
+              return (
+                <div className="dashboard-completion-row" key={session.slotId}>
+                  <div>
+                    <strong title={session.slotTitle}>{session.slotTitle}</strong>
+                    <span>{session.submittedCount}/{session.candidateCount}</span>
+                  </div>
+                  <div className="dashboard-completion-track" aria-label={`${rate}% complete`}>
+                    <i style={{ width: `${rate}%` }} />
+                  </div>
+                  <b>{rate}%</b>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="empty-state">No test slots are available in this view.</p>
+        )}
+      </section>
+    </section>
+  );
+}

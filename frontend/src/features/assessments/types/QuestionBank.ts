@@ -1,10 +1,17 @@
 export type DifficultyLevel = "easy" | "medium" | "hard";
 export type QuestionStatus = "draft" | "validated" | "blocked" | "archived";
 export type QuestionCreationMode = "manual" | "ai_assisted";
+export type QuestionVisibility = "private" | "public";
 export type QuestionGroupStatus = "draft" | "active" | "archived";
 export type MetadataStatus = "pending" | "classified" | "failed";
 export type DifficultySource = "legacy" | "ai" | "manual_override";
 export type ValidationStatus = "not_run" | "passed" | "failed" | "skipped" | "stale";
+export type AnswerValidationMode =
+  | "exact"
+  | "unordered"
+  | "floating"
+  | "multiple_valid"
+  | "constructive";
 
 export interface QuestionGenerationSettings {
   question_count: number;
@@ -52,6 +59,7 @@ export interface SolutionValidationCaseResult {
   stderr: string;
   compile_output: string;
   message: string;
+  checker_message: string;
   token: string;
   execution_time: string;
   memory_kb: number | null;
@@ -117,11 +125,15 @@ export interface QuestionRecord {
   validation_status: ValidationStatus;
   validation_updated_at: string | null;
   reference_solutions: Record<string, ReferenceSolutionArtifact>;
+  answer_validation_mode: AnswerValidationMode;
+  output_checker: string;
+  output_checker_explanation: string;
   solution_approach: string;
   time_complexity: string;
   space_complexity: string;
   status: QuestionStatus;
   creation_mode: QuestionCreationMode;
+  visibility: QuestionVisibility;
   created_at: string;
   updated_at: string;
 }
@@ -175,11 +187,15 @@ export interface QuestionCreatePayload {
   validation_status: ValidationStatus;
   validation_updated_at: string | null;
   reference_solutions: Record<string, ReferenceSolutionArtifact>;
+  answer_validation_mode: AnswerValidationMode;
+  output_checker: string;
+  output_checker_explanation: string;
   solution_approach: string;
   time_complexity: string;
   space_complexity: string;
   status: QuestionStatus;
   creation_mode: QuestionCreationMode;
+  visibility: QuestionVisibility;
 }
 
 export type QuestionUpdatePayload = QuestionCreatePayload;
@@ -230,6 +246,8 @@ export interface QuestionAIDraftProgressEvent {
     | "error";
   scope: QuestionAIDraftRequest["generation_scope"];
   message: string;
+  ai_provider?: string;
+  ai_model?: string;
   current_node?: string | null;
   next_node?: string | null;
   progress: number;
@@ -251,6 +269,11 @@ export interface QuestionAIDraftProgressEvent {
 
 export interface QuestionDraftValidationRequest {
   draft: QuestionCreatePayload;
+}
+
+export interface QuestionDraftRefinementRequest {
+  draft: QuestionCreatePayload;
+  generation_settings?: QuestionGenerationSettings;
 }
 
 export interface QuestionDraftValidationResponse {

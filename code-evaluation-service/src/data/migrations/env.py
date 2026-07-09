@@ -19,6 +19,12 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
 
 
+def should_create_schema() -> bool:
+    """Return whether migrations should create the configured schema."""
+
+    return EVALUATION_SCHEMA != "public"
+
+
 def include_evaluation_objects(
     name: str | None,
     type_: Literal[
@@ -57,7 +63,8 @@ def run_migrations_offline() -> None:
         version_table="evaluation_alembic_version",
         version_table_schema=EVALUATION_SCHEMA,
     )
-    context.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+    if should_create_schema():
+        context.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
     with context.begin_transaction():
         context.run_migrations()
 
@@ -71,7 +78,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        if connection.dialect.name == "postgresql":
+        if connection.dialect.name == "postgresql" and should_create_schema():
             connection.execute(
                 text(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
             )

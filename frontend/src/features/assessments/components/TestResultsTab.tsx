@@ -1,28 +1,25 @@
 import { useEffect, useState } from "react";
+import { Download } from "lucide-react";
 
 import { StatusBadge } from "../../../components/common/StatusBadge";
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
 import { useAuth } from "../../auth";
 import {
+  downloadCandidateEvaluationReport,
   downloadTestEvaluationReport,
   fetchCandidateScorecardReport,
   type CandidateEvaluationReport,
 } from "../../codeEvaluation";
 import type {
-  Assessment,
-  AssessmentSlot,
   EvaluationBackfillResponse,
   SlotCandidate,
 } from "../types/Assessment";
-import {
-  buildScorecardSettings,
-  RecruiterScorecardPreview,
-} from "./RecruiterScorecardPreview";
+import { RecruiterScorecardPreview } from "./RecruiterScorecardPreview";
 
 interface TestResultsTabProps {
-  assessment: Assessment;
-  slot: AssessmentSlot;
+  assessmentId: string;
+  slotId: string;
   candidates: SlotCandidate[];
   backfillPending: boolean;
   backfillError: string;
@@ -33,8 +30,8 @@ interface TestResultsTabProps {
 }
 
 export function TestResultsTab({
-  assessment,
-  slot,
+  assessmentId,
+  slotId,
   candidates,
   backfillPending,
   backfillError,
@@ -42,16 +39,12 @@ export function TestResultsTab({
   onBackfillEvaluations,
 }: TestResultsTabProps) {
   const { currentUser } = useAuth();
-  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(
-    null,
-  );
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedScorecard, setSelectedScorecard] =
     useState<CandidateEvaluationReport | null>(null);
   const [scorecardError, setScorecardError] = useState("");
   const [downloadError, setDownloadError] = useState("");
-  const [downloadingReport, setDownloadingReport] = useState<string | null>(
-    null,
-  );
+  const [downloadingReport, setDownloadingReport] = useState<string | null>(null);
   const rankedCandidates = [...candidates].sort((first, second) => {
     const firstRank = first.rank ?? Number.POSITIVE_INFINITY;
     const secondRank = second.rank ?? Number.POSITIVE_INFINITY;
@@ -71,9 +64,11 @@ export function TestResultsTab({
   const submittedCount = candidates.filter((candidate) =>
     ["submitted", "auto_submitted"].includes(candidate.assessment_status),
   ).length;
-  const submittedCandidateIds = candidates
-    .filter((candidate) =>
-      ["submitted", "auto_submitted"].includes(candidate.assessment_status),
+  const evaluableCandidateIds = candidates
+    .filter(
+      (candidate) =>
+        ["submitted", "auto_submitted"].includes(candidate.assessment_status) &&
+        candidate.percentage === null,
     )
     .map((candidate) => candidate.candidate_assessment_id);
   const averageScore = evaluatedCount
@@ -100,7 +95,7 @@ export function TestResultsTab({
         }
         const report = await fetchCandidateScorecardReport(
           await currentUser.getIdToken(),
-          assessment.id,
+          assessmentId,
           selectedCandidateId,
           controller.signal,
         );
@@ -117,7 +112,7 @@ export function TestResultsTab({
     })();
 
     return () => controller.abort();
-  }, [assessment.id, currentUser, selectedCandidateId]);
+  }, [assessmentId, currentUser, selectedCandidateId]);
 
   async function downloadTestReport() {
     setDownloadError("");
@@ -128,12 +123,33 @@ export function TestResultsTab({
       }
       await downloadTestEvaluationReport(
         await currentUser.getIdToken(),
-        assessment.id,
-        slot.id,
+        assessmentId,
+        slotId,
       );
     } catch (error: unknown) {
       setDownloadError(
         error instanceof Error ? error.message : "Unable to download report.",
+      );
+    } finally {
+      setDownloadingReport(null);
+    }
+  }
+
+  async function downloadCandidateReport(candidateAssessmentId: string) {
+    setDownloadError("");
+    setDownloadingReport(candidateAssessmentId);
+    try {
+      if (!currentUser) {
+        throw new Error("Recruiter session is required.");
+      }
+      await downloadCandidateEvaluationReport(
+        await currentUser.getIdToken(),
+        assessmentId,
+        candidateAssessmentId,
+      );
+    } catch (error: unknown) {
+      setDownloadError(
+        error instanceof Error ? error.message : "Unable to download scorecard.",
       );
     } finally {
       setDownloadingReport(null);
@@ -146,9 +162,10 @@ export function TestResultsTab({
         <RecruiterScorecardPreview
           candidate={selectedScorecard?.candidate ?? null}
           benchmark={selectedScorecard?.benchmark}
-          settings={buildScorecardSettings(assessment, slot)}
           loading={!selectedScorecard && !scorecardError}
           error={scorecardError}
+          downloadPending={downloadingReport === selectedCandidateId}
+          onDownload={() => void downloadCandidateReport(selectedCandidateId)}
           onBack={() => setSelectedCandidateId(null)}
           fullPage
         />
@@ -163,8 +180,8 @@ export function TestResultsTab({
           <span>Results</span>
           <h2>Leaderboard and scorecards</h2>
           <p>
-            Open a candidate scorecard to review results. Use Print / Save as PDF
-            on the scorecard for the same report layout.
+            Final scores appear here after candidate submission and evaluation
+            backfill.
           </p>
         </div>
         <div className="assessment-row-actions">
@@ -172,8 +189,8 @@ export function TestResultsTab({
           <Button
             type="button"
             variant="secondary"
-            disabled={backfillPending || submittedCandidateIds.length === 0}
-            onClick={() => onBackfillEvaluations(submittedCandidateIds)}
+            disabled={backfillPending || evaluableCandidateIds.length === 0}
+            onClick={() => onBackfillEvaluations(evaluableCandidateIds)}
           >
             {backfillPending ? "Evaluating..." : "Evaluate Previous"}
           </Button>
@@ -184,7 +201,7 @@ export function TestResultsTab({
           >
             {downloadingReport === "assessment"
               ? "Preparing..."
-              : "Download Test Slot PDF"}
+              : "Download Test PDF"}
           </Button>
         </div>
       </div>
@@ -241,54 +258,65 @@ export function TestResultsTab({
           </thead>
           <tbody>
             {rankedCandidates.length ? (
-              rankedCandidates.map((candidate) => {
-                const resultStatus = candidate.percentage === null
-                  ? "pending"
-                  : candidate.percentage >= assessment.passing_score
-                    ? "passed"
-                    : "failed";
-                return (
-                  <tr key={candidate.candidate_assessment_id}>
-                    <td>{candidate.rank ? `#${candidate.rank}` : "-"}</td>
-                    <td>
-                      <div className="assessment-name-cell">
-                        <strong>{candidate.name}</strong>
-                        <span>{candidate.email}</span>
-                      </div>
-                    </td>
-                    <td>
-                      {candidate.percentage !== null
-                        ? `${Math.round(candidate.percentage)}%`
-                        : "Pending"}
-                    </td>
-                    <td>
-                      {candidate.submitted_at
-                        ? new Date(candidate.submitted_at).toLocaleString()
-                        : "Not submitted"}
-                    </td>
-                    <td>
-                      {candidate.percentage !== null ? (
+              rankedCandidates.map((candidate) => (
+                <tr key={candidate.candidate_assessment_id}>
+                  <td>{candidate.rank ? `#${candidate.rank}` : "-"}</td>
+                  <td>
+                    <div className="assessment-name-cell">
+                      <strong>{candidate.name}</strong>
+                      <span>{candidate.email}</span>
+                    </div>
+                  </td>
+                  <td>
+                    {candidate.percentage !== null
+                      ? `${Math.round(candidate.percentage)}%`
+                      : "Pending"}
+                  </td>
+                  <td>
+                    {candidate.submitted_at
+                      ? new Date(candidate.submitted_at).toLocaleString()
+                      : "Not submitted"}
+                  </td>
+                  <td>
+                    {candidate.percentage !== null ? (
+                      <div className="assessment-row-actions compact-actions">
                         <Button
                           type="button"
                           variant="secondary"
                           onClick={() =>
-                            setSelectedCandidateId(
-                              candidate.candidate_assessment_id,
-                            )
+                            setSelectedCandidateId(candidate.candidate_assessment_id)
                           }
                         >
                           View Scorecard
                         </Button>
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td>
-                      <StatusBadge value={resultStatus} />
-                    </td>
-                  </tr>
-                );
-              })
+                        <button
+                          type="button"
+                          className="icon-button scorecard-download-icon"
+                          disabled={downloadingReport !== null}
+                          aria-label={`Download ${candidate.name} scorecard`}
+                          title="Download scorecard PDF"
+                          onClick={() =>
+                            void downloadCandidateReport(
+                              candidate.candidate_assessment_id,
+                            )
+                          }
+                        >
+                          {downloadingReport === candidate.candidate_assessment_id
+                            ? <span className="scorecard-download-spinner" aria-hidden="true" />
+                            : <Download size={17} aria-hidden="true" />}
+                        </button>
+                      </div>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td>
+                    <StatusBadge
+                      value={candidate.percentage !== null ? "evaluated" : "pending"}
+                    />
+                  </td>
+                </tr>
+              ))
             ) : (
               <tr>
                 <td colSpan={6}>Candidates will appear here after import.</td>

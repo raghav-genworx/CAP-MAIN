@@ -1,21 +1,15 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   Activity,
-  Archive,
   ArrowLeft,
   ArrowRight,
-  Ban,
   CheckCircle2,
   FileText,
-  Globe,
-  Lock,
-  Pencil,
   Play,
   Plus,
   Redo2,
   Save,
-  ShieldCheck,
   Sparkles,
   Trash2,
   Undo2,
@@ -26,7 +20,6 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
-import { ToastItem, ToastStack } from "../../../components/ui/ToastNotification";
 import { useAuth } from "../../auth";
 import { AgentRunOverlay, StepCard } from "./QuestionBuilderPanels";
 import {
@@ -155,6 +148,7 @@ function fieldToastTitle(toast: FieldToast) {
   for (const title of [
     "Security alert",
     "Safety alert",
+    "Data sanitation alert",
   ]) {
     if (toast.message.includes(`${title}:`)) {
       return title;
@@ -233,38 +227,6 @@ const BULK_IMPORT_COLUMNS = [
   "space_complexity",
   "status",
 ] as const;
-const PUBLISH_STATUS_OPTIONS: Array<{
-  value: QuestionStatus;
-  label: string;
-  detail: string;
-  icon: typeof FileText;
-}> = [
-  { value: "draft", label: "Draft", detail: "Keep working on it", icon: FileText },
-  { value: "validated", label: "Validated", detail: "Ready for assessments", icon: ShieldCheck },
-  { value: "blocked", label: "Blocked", detail: "Exclude from assessments", icon: Ban },
-  { value: "archived", label: "Archived", detail: "Retain but hide", icon: Archive },
-];
-
-const PUBLISH_VISIBILITY_OPTIONS: Array<{
-  value: QuestionVisibility;
-  label: string;
-  detail: string;
-  icon: typeof Lock;
-}> = [
-  {
-    value: "private",
-    label: "Private",
-    detail: "Only you can use this question in assessments",
-    icon: Lock,
-  },
-  {
-    value: "public",
-    label: "Public",
-    detail: "All recruiters can use this question in assessments",
-    icon: Globe,
-  },
-];
-
 const STEP_DEFINITIONS: StepDefinition[] = [
   {
     id: 1,
@@ -1622,201 +1584,6 @@ function formatCount(value: number) {
   return value.toLocaleString();
 }
 
-interface QuestionFinalReviewProps {
-  composer: QuestionCreatePayload;
-  answerValidationBadge: ReactNode;
-  actions?: ReactNode;
-}
-
-type QuestionReviewSectionKey = "problem" | "tests" | "solutions" | "metadata";
-
-interface QuestionReviewSectionProps {
-  id: QuestionReviewSectionKey;
-  title: string;
-  eyebrow: string;
-  summary: string;
-  open: boolean;
-  onToggle: (id: QuestionReviewSectionKey) => void;
-  children: ReactNode;
-}
-
-const QUESTION_REVIEW_SECTION_DEFAULTS: Record<QuestionReviewSectionKey, boolean> = {
-  problem: true,
-  tests: true,
-  solutions: true,
-  metadata: true,
-};
-
-function QuestionReviewSection({
-  id,
-  title,
-  eyebrow,
-  summary,
-  open,
-  onToggle,
-  children,
-}: QuestionReviewSectionProps) {
-  return (
-    <section
-      className={[
-        "question-review-section",
-        open ? "is-open" : "is-collapsed",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-    >
-      <button
-        type="button"
-        className="question-review-section-toggle"
-        aria-expanded={open}
-        onClick={() => onToggle(id)}
-      >
-        <span className="question-review-section-kicker">{eyebrow}</span>
-        <strong>{title}</strong>
-        <small>{summary}</small>
-        <em>{open ? "Collapse" : "Expand"}</em>
-      </button>
-      {open ? <div className="question-review-section-body">{children}</div> : null}
-    </section>
-  );
-}
-
-function QuestionFinalReview({
-  composer,
-  answerValidationBadge,
-  actions,
-}: QuestionFinalReviewProps) {
-  const [openSections, setOpenSections] = useState(QUESTION_REVIEW_SECTION_DEFAULTS);
-  const reviewTestCases = [
-    ...composer.sample_test_cases.map((testCase, index) => ({ testCase, index, label: "Sample" })),
-    ...composer.hidden_test_cases.map((testCase, index) => ({ testCase, index, label: "Hidden" })),
-  ];
-  const reviewLanguages = normalizeLanguageList(
-    composer.supported_languages.length
-      ? composer.supported_languages
-      : [composer.reference_language],
-    composer.reference_language || "python",
-  );
-
-  function toggleSection(id: QuestionReviewSectionKey) {
-    setOpenSections((current) => ({
-      ...current,
-      [id]: !current[id],
-    }));
-  }
-
-  return (
-    <section className="question-final-review" aria-label="Final question review">
-      <div className="question-final-review-hero">
-        <div>
-          <span>Final reviewer check</span>
-          <h3>{composer.title || "Untitled question"}</h3>
-          <p>{composer.difficulty} · {composer.category || "Uncategorized"}</p>
-        </div>
-        <div className="question-final-review-hero-actions">
-          <div className={`pill ${questionStatusTone(composer.status)}`}>
-            {composer.status}
-          </div>
-          {actions}
-        </div>
-      </div>
-
-      <div className="question-review-summary-grid">
-        <div><span>Languages</span><strong>{composer.supported_languages.join(", ")}</strong></div>
-        <div><span>Tests</span><strong>{composer.sample_test_cases.length} sample · {composer.hidden_test_cases.length} hidden</strong></div>
-        <div><span>Validation</span><strong>{composer.validation_status.replace("_", " ")}</strong></div>
-        <div className="question-review-checker-cell">{answerValidationBadge}</div>
-        <div><span>Limits</span><strong>{composer.execution_time_limit_seconds}s · {composer.memory_limit_mb} MB</strong></div>
-        <div><span>Visibility</span><strong>{composer.visibility}</strong></div>
-      </div>
-
-      <QuestionReviewSection
-        id="problem"
-        title="Problem statement"
-        eyebrow="Section 1"
-        summary="Statement, input/output contract, and constraints."
-        open={openSections.problem}
-        onToggle={toggleSection}
-      >
-        <div className="question-review-copy"><strong>Statement</strong><p>{composer.problem_statement}</p></div>
-        <div className="question-review-two-column">
-          <div><strong>Input format</strong><p>{composer.input_format}</p></div>
-          <div><strong>Output format</strong><p>{composer.output_format}</p></div>
-        </div>
-        <div className="question-review-copy"><strong>Constraints</strong><pre>{composer.constraints}</pre></div>
-      </QuestionReviewSection>
-
-      <QuestionReviewSection
-        id="tests"
-        title="Test cases"
-        eyebrow="Section 2"
-        summary={`${composer.sample_test_cases.length} sample and ${composer.hidden_test_cases.length} hidden cases.`}
-        open={openSections.tests}
-        onToggle={toggleSection}
-      >
-        <div className="question-review-test-grid">
-          {reviewTestCases.map(({ testCase, index, label }) => (
-            <article key={`${label}-${index}`} className="question-review-test-card">
-              <div><strong>{label} {index + 1}</strong><span>{testCase.is_sample ? "Visible" : "Private"}</span></div>
-              <label>Input<pre>{testCase.input || "(empty)"}</pre></label>
-              <label>Expected output<pre>{testCase.expected_output || "(empty)"}</pre></label>
-              {testCase.explanation ? <p>{testCase.explanation}</p> : null}
-            </article>
-          ))}
-        </div>
-      </QuestionReviewSection>
-
-      <QuestionReviewSection
-        id="solutions"
-        title="Optimized solutions"
-        eyebrow="Section 3"
-        summary={`${reviewLanguages.length} language solution${reviewLanguages.length === 1 ? "" : "s"} with validation state.`}
-        open={openSections.solutions}
-        onToggle={toggleSection}
-      >
-        <div className="question-review-solutions">
-          {reviewLanguages.map((language) => {
-            const normalizedLanguage = languageKey(language);
-            const artifact = composer.reference_solutions[normalizedLanguage];
-            const sourceCode =
-              normalizedLanguage === languageKey(composer.reference_language)
-                ? composer.reference_solution
-                : artifact?.source_code ?? "";
-            return (
-              <article key={language}>
-                <div>
-                  <strong>{languageDisplayName(normalizedLanguage)}</strong>
-                  <span>{artifact?.validation_status ?? composer.validation_status}</span>
-                </div>
-                <pre>{sourceCode || "No solution generated"}</pre>
-              </article>
-            );
-          })}
-        </div>
-        <div className="question-review-two-column">
-          <div><strong>Time complexity</strong><p>{composer.time_complexity || "Not classified"}</p></div>
-          <div><strong>Space complexity</strong><p>{composer.space_complexity || "Not classified"}</p></div>
-        </div>
-      </QuestionReviewSection>
-
-      <QuestionReviewSection
-        id="metadata"
-        title="Metadata"
-        eyebrow="Section 4"
-        summary="Difficulty, tags, category, visibility, and readiness signals."
-        open={openSections.metadata}
-        onToggle={toggleSection}
-      >
-        <div className="question-review-summary-grid">
-          <div><span>Difficulty</span><strong>{composer.difficulty}</strong></div>
-          <div><span>Tags</span><strong>{composer.tags.join(", ") || "None"}</strong></div>
-          <div><span>Category</span><strong>{composer.category || "Uncategorized"}</strong></div>
-        </div>
-      </QuestionReviewSection>
-    </section>
-  );
-}
-
 export function QuestionManagementPage() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
@@ -1912,19 +1679,15 @@ export function QuestionManagementPage() {
       : 0;
 
     return {
-      questions: data?.total ?? questions.length,
+      questions: questions.length,
       validated,
       drafts,
-      groups: groupData?.total ?? groups.length,
+      groups: groups.length,
       avgScore,
     };
-  }, [data?.total, groupData?.total, groups.length, questions]);
+  }, [groups.length, questions]);
 
-  function viewQuestion(question: QuestionRecord) {
-    navigate(`/recruiter/question-management/new?questionId=${encodeURIComponent(question.id)}&mode=view`);
-  }
-
-  function editQuestion(question: QuestionRecord) {
+  function openQuestion(question: QuestionRecord) {
     navigate(`/recruiter/question-management/new?questionId=${encodeURIComponent(question.id)}`);
   }
 
@@ -1994,23 +1757,23 @@ export function QuestionManagementPage() {
           <p>Question management</p>
           <h1>Question library</h1>
         </div>
-        <div className="question-bank-metrics" aria-label="Question bank summary">
-          <div className="question-bank-metric">
+        <div className="assessment-hero-metrics">
+          <span>
             <strong>{formatCount(metrics.questions)}</strong>
-            <span>Total</span>
-          </div>
-          <div className="question-bank-metric">
+            Total
+          </span>
+          <span>
             <strong>{formatCount(metrics.validated)}</strong>
-            <span>Validated</span>
-          </div>
-          <div className="question-bank-metric">
+            Validated
+          </span>
+          <span>
             <strong>{formatCount(metrics.drafts)}</strong>
-            <span>Drafts</span>
-          </div>
-          <div className="question-bank-metric">
+            Drafts
+          </span>
+          <span>
             <strong>{formatCount(metrics.groups)}</strong>
-            <span>Groups</span>
-          </div>
+            Groups
+          </span>
         </div>
         <div className="management-hero-actions">
           <Button
@@ -2152,15 +1915,6 @@ export function QuestionManagementPage() {
                           <tr
                             key={question.id}
                             className={`data-row question-row-compact${isGenerating ? " question-row-generating" : ""}`}
-                            onClick={() => viewQuestion(question)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                viewQuestion(question);
-                              }
-                            }}
-                            tabIndex={0}
-                            title="View question"
                           >
                         <td>
                           <div className="question-title-cell">
@@ -2208,25 +1962,12 @@ export function QuestionManagementPage() {
                           <Button
                             type="button"
                             variant="secondary"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              viewQuestion(question);
-                            }}
+                            onClick={() => openQuestion(question)}
+                            disabled={!isOwned}
+                            title={isOwned ? undefined : "Public questions from other recruiters are read-only"}
                           >
-                            View
+                            {isOwned ? (isGenerating ? "View live" : "Edit") : "Shared"}
                           </Button>
-                          {isOwned ? (
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                editQuestion(question);
-                              }}
-                            >
-                              {isGenerating ? "View live" : "Edit"}
-                            </Button>
-                          ) : null}
                         </td>
                           </tr>
                         );
@@ -2495,7 +2236,6 @@ export function QuestionCreationFlowPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const questionId = searchParams.get("questionId");
-  const isViewMode = searchParams.get("mode") === "view" && Boolean(questionId);
   const generationOwnerIdRef = useRef(
     `question-page-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
@@ -2515,7 +2255,7 @@ export function QuestionCreationFlowPage() {
   const validateDraft = useValidateQuestionBankDraft(currentUser);
   const refineTestCases = useRefineQuestionBankTestCases(currentUser);
   const refineSolution = useRefineQuestionBankSolution(currentUser);
-  const { data, isLoading: questionsLoading } = useQuestionBank(currentUser, {
+  const { data } = useQuestionBank(currentUser, {
     search: "",
     difficulty: "",
     status: "",
@@ -2527,9 +2267,6 @@ export function QuestionCreationFlowPage() {
   const editingQuestion = useMemo(
     () => questions.find((item) => item.id === questionId) ?? null,
     [questionId, questions],
-  );
-  const canEditViewedQuestion = Boolean(
-    isViewMode && editingQuestion && editingQuestion.recruiter_uid === currentUser?.uid,
   );
 
   const [composer, setComposer] = useState<QuestionCreatePayload>(() =>
@@ -2543,11 +2280,12 @@ export function QuestionCreationFlowPage() {
       ? structuredClone(resumableGenerationSession.settings)
       : createEmptyGenerationSettings(),
   );
-  const [activeStep, setActiveStep] = useState<WizardStep>(() => isViewMode ? 6 : 1);
+  const [activeStep, setActiveStep] = useState<WizardStep>(1);
   const [statusConfirmed, setStatusConfirmed] = useState(() => Boolean(questionId));
   const [visibilityConfirmed, setVisibilityConfirmed] = useState(() => Boolean(questionId));
-  const [visitedSteps, setVisitedSteps] = useState<Set<WizardStep>>(
-    () => new Set(isViewMode ? [1, 2, 3, 4, 5, 6] : [1]),
+  const [visitedSteps, setVisitedSteps] = useState<Set<WizardStep>>(() => new Set([1]));
+  const [advanceAttemptedSteps, setAdvanceAttemptedSteps] = useState<Set<WizardStep>>(
+    () => new Set(),
   );
   const [assistantMessage, setAssistantMessage] = useState(
     "Move step by step. Each AI action uses the fields already in the builder.",
@@ -2709,11 +2447,7 @@ export function QuestionCreationFlowPage() {
         hidden_test_case_count: Math.max(1, editingQuestion.hidden_test_cases.length),
       }));
       setPersistedQuestionId(editingQuestion.id);
-      setAssistantMessage(
-        isViewMode
-          ? `Viewing ${editingQuestion.title}.`
-          : `Editing ${editingQuestion.title}.`,
-      );
+      setAssistantMessage(`Editing ${editingQuestion.title}.`);
       setActivityLog((current) => [
         createTimelineEntry("Question loaded", editingQuestion.title, "info"),
         ...current,
@@ -2724,14 +2458,10 @@ export function QuestionCreationFlowPage() {
       setLanguageTestRunningKey(null);
       setSolutionValidationStale(false);
       setAiPromptRequest(null);
-      setStatusConfirmed(isViewMode);
-      setVisibilityConfirmed(isViewMode);
-      if (isViewMode) {
-        setActiveStep(6);
-        setVisitedSteps(new Set([1, 2, 3, 4, 5, 6]));
-      }
+      setStatusConfirmed(false);
+      setVisibilityConfirmed(false);
     }
-  }, [editingQuestion, isViewMode]);
+  }, [editingQuestion]);
 
   const scores = useMemo(() => scoreComposer(composer), [composer]);
   const difficultyIsAgentSet =
@@ -3140,25 +2870,16 @@ export function QuestionCreationFlowPage() {
   }
 
   function getStepVisualState(step: WizardStep) {
-    const isComplete =
-      step === 6
-        ? statusConfirmed && visibilityConfirmed
-        : stepIsComplete(step, composer, generationSettings);
-
-    if (isComplete) {
-      return "complete";
-    }
     if (!visitedSteps.has(step)) {
       return "untouched";
+    }
+    if (advanceAttemptedSteps.has(step) && stepIsComplete(step, composer, generationSettings)) {
+      return "complete";
     }
     return "in-progress";
   }
 
   function moveToStep(step: WizardStep) {
-    if (isViewMode) {
-      setActiveStep(6);
-      return;
-    }
     if (step === 6) {
       void saveAndMoveNext(6);
       return;
@@ -3207,6 +2928,7 @@ export function QuestionCreationFlowPage() {
 
   async function saveAndMoveNext(nextStep: WizardStep) {
     const message = getStepNavigationError(activeStep);
+    setAdvanceAttemptedSteps((current) => new Set(current).add(activeStep));
     setVisitedSteps((current) => new Set(current).add(activeStep));
     if (message) {
       notifyFieldError(message);
@@ -3435,6 +3157,7 @@ export function QuestionCreationFlowPage() {
           error instanceof Error ? error.message : `${displayName} generation failed.`;
         if (
           message.includes("Security") ||
+          message.includes("Data sanitation") ||
           message.includes("Guardrail") ||
           message.includes("violation") ||
           message.includes("alert")
@@ -4332,6 +4055,7 @@ export function QuestionCreationFlowPage() {
 
   function saveQuestionFromWizard() {
     setVisitedSteps((current) => new Set(current).add(6));
+    setAdvanceAttemptedSteps((current) => new Set(current).add(6));
     void saveQuestion();
   }
 
@@ -4357,174 +4081,47 @@ export function QuestionCreationFlowPage() {
     }
   }
 
-  function openEditQuestionFromView() {
-    if (!editingQuestion) {
-      return;
-    }
-    setActiveStep(1);
-    navigate(`/recruiter/question-management/new?questionId=${encodeURIComponent(editingQuestion.id)}`);
-  }
-
-  function renderAnswerCheckerModal() {
-    if (!checkerInfoOpen) {
-      return null;
-    }
-
-    return (
-      <div
-        className="modal-backdrop"
-        role="presentation"
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
-            setCheckerInfoOpen(false);
-          }
-        }}
-      >
-        <Card
-          className="answer-checker-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="answer-checker-title"
-        >
-          <div className="answer-checker-modal-head">
-            <div>
-              <span>Answer validation</span>
-              <h3 id="answer-checker-title">
-                {answerValidationOption(composer.answer_validation_mode).label}
-              </h3>
-            </div>
-            <button
-              type="button"
-              className="testcase-detail-close"
-              onClick={() => setCheckerInfoOpen(false)}
-              aria-label="Close answer checker details"
-            >
-              <X size={20} aria-hidden="true" />
-            </button>
-          </div>
-          <div className="answer-checker-modal-body">
-            <p>{answerValidationDescription(composer)}</p>
-            <div className="answer-checker-rule-grid">
-              <div>
-                <span>Mode</span>
-                <strong>
-                  {answerValidationOption(composer.answer_validation_mode).label}
-                </strong>
-              </div>
-              <div>
-                <span>Expected output role</span>
-                <strong>
-                  {composer.answer_validation_mode === "exact"
-                    ? "Canonical answer"
-                    : "Valid exemplar"}
-                </strong>
-              </div>
-            </div>
-            {composer.output_checker.trim() ? (
-              <div className="answer-checker-code">
-                <span>Python checker</span>
-                <pre>{composer.output_checker}</pre>
-              </div>
-            ) : null}
-          </div>
-        </Card>
-      </div>
-    );
-  }
-
-  if (isViewMode) {
-    const viewQuestionReady = Boolean(editingQuestion);
-    return (
-      <main className="question-flow-page question-view-page">
-        <section className="question-view-shell">
-          {viewQuestionReady ? (
-            <QuestionFinalReview
-              composer={composer}
-              answerValidationBadge={renderAnswerValidationBadge(true)}
-              actions={
-                <>
-                  {canEditViewedQuestion ? (
-                    <Button type="button" onClick={openEditQuestionFromView}>
-                      <Pencil size={16} />
-                      Edit
-                    </Button>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => navigate("/recruiter/question-management")}
-                  >
-                    <X size={16} />
-                    Close
-                  </Button>
-                </>
-              }
-            />
-          ) : (
-            <Card className="question-view-state-card">
-              <div>
-                <span>Question preview</span>
-                <h1>{questionsLoading ? "Loading question..." : "Question not found"}</h1>
-                <p>
-                  {questionsLoading
-                    ? "Preparing the read-only review page."
-                    : "This question could not be found in your question library."}
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => navigate("/recruiter/question-management")}
-              >
-                <X size={16} />
-                Close
-              </Button>
-            </Card>
-          )}
-        </section>
-        {renderAnswerCheckerModal()}
-      </main>
-    );
-  }
-
   return (
     <main className="question-flow-page">
       {fieldToasts.length ? (
-        <ToastStack live="polite" label="Question flow notifications">
+        <div className="question-flow-toast-stack" aria-live="polite" aria-label="Question flow notifications">
           {fieldToasts.map((toast) => (
-            <ToastItem
+            <div
               key={toast.id}
-              title={fieldToastTitle(toast)}
-              message={toast.message}
-              tone={toast.tone === "error" ? "error" : "warning"}
-              onClose={() => dismissFieldToast(toast.id)}
-            />
+              className={`question-flow-toast is-${toast.tone}`}
+              role="alert"
+            >
+              <div>
+                <strong>{fieldToastTitle(toast)}</strong>
+                <p>{toast.message}</p>
+              </div>
+              <button
+                type="button"
+                className="question-flow-toast-dismiss"
+                onClick={() => dismissFieldToast(toast.id)}
+                aria-label="Dismiss notification"
+              >
+                Close
+              </button>
+            </div>
           ))}
-        </ToastStack>
+        </div>
       ) : null}
       <section className="flow-hero flow-hero-compact">
         <div>
-          <p>{isViewMode ? "View question" : editingQuestion ? "Edit question" : "New question"}</p>
-          <h1>
-            {isViewMode
-              ? composer.title || "Question preview"
-              : editingQuestion
-                ? composer.title || "Edit question"
-                : "Create question"}
-          </h1>
+          <p>{editingQuestion ? "Edit question" : "New question"}</p>
+          <h1>{editingQuestion ? composer.title || "Edit question" : "Create question"}</h1>
         </div>
         <div className="flow-hero-actions">
           <Button type="button" variant="secondary" onClick={() => navigate("/recruiter/question-management")}>
             <ArrowLeft size={16} />
             Back to dashboard
           </Button>
-          {!isViewMode ? (
-            <Button type="button" variant="secondary" onClick={() => setShowActivityPanel(true)}>
-              <Activity size={16} />
-              Activity
-            </Button>
-          ) : null}
-          {editingQuestion && !isViewMode ? (
+          <Button type="button" variant="secondary" onClick={() => setShowActivityPanel(true)}>
+            <Activity size={16} />
+            Activity
+          </Button>
+          {editingQuestion ? (
             <Button
               type="button"
               variant="secondary"
@@ -4557,7 +4154,6 @@ export function QuestionCreationFlowPage() {
                       .filter(Boolean)
                       .join(" ")}
                     onClick={() => moveToStep(step.id)}
-                    disabled={isViewMode && step.id !== 6}
                     aria-current={activeStep === step.id ? "step" : undefined}
                   >
                     <span>{step.id}</span>
@@ -5219,6 +4815,10 @@ export function QuestionCreationFlowPage() {
 
             <div className="metadata-chip-panel">
               <div>
+                <span>Topics</span>
+                <p>{composer.topics.join(", ") || "Pending AI"}</p>
+              </div>
+              <div>
                 <span>Tags</span>
                 <p>{composer.tags.join(", ") || "Pending AI"}</p>
               </div>
@@ -5278,10 +4878,89 @@ export function QuestionCreationFlowPage() {
           ) : null}
 
           {selectedStep === 6 ? (
-            <QuestionFinalReview
-              composer={composer}
-              answerValidationBadge={renderAnswerValidationBadge(true)}
-            />
+            <section className="question-final-review" aria-label="Final question review">
+              <div className="question-final-review-hero">
+                <div>
+                  <span>Final reviewer check</span>
+                  <h3>{composer.title}</h3>
+                  <p>{composer.difficulty} · {composer.category || "Uncategorized"}</p>
+                </div>
+                <div className={`pill ${questionStatusTone(composer.status)}`}>
+                  {composer.status}
+                </div>
+              </div>
+
+              <div className="question-review-summary-grid">
+                <div><span>Languages</span><strong>{composer.supported_languages.join(", ")}</strong></div>
+                <div><span>Tests</span><strong>{composer.sample_test_cases.length} sample · {composer.hidden_test_cases.length} hidden</strong></div>
+                <div><span>Validation</span><strong>{composer.validation_status.replace("_", " ")}</strong></div>
+                <div className="question-review-checker-cell">{renderAnswerValidationBadge(true)}</div>
+                <div><span>Limits</span><strong>{composer.execution_time_limit_seconds}s · {composer.memory_limit_mb} MB</strong></div>
+                <div><span>Visibility</span><strong>{composer.visibility}</strong></div>
+              </div>
+
+              <div className="question-review-section">
+                <h4>Problem</h4>
+                <div className="question-review-copy"><strong>Statement</strong><p>{composer.problem_statement}</p></div>
+                <div className="question-review-two-column">
+                  <div><strong>Input format</strong><p>{composer.input_format}</p></div>
+                  <div><strong>Output format</strong><p>{composer.output_format}</p></div>
+                </div>
+                <div className="question-review-copy"><strong>Constraints</strong><pre>{composer.constraints}</pre></div>
+              </div>
+
+              <div className="question-review-section">
+                <h4>Test cases</h4>
+                <div className="question-review-test-grid">
+                  {[
+                    ...composer.sample_test_cases.map((testCase, index) => ({ testCase, index, label: "Sample" })),
+                    ...composer.hidden_test_cases.map((testCase, index) => ({ testCase, index, label: "Hidden" })),
+                  ].map(({ testCase, index, label }) => (
+                    <article key={`${label}-${index}`} className="question-review-test-card">
+                      <div><strong>{label} {index + 1}</strong><span>{testCase.is_sample ? "Visible" : "Private"}</span></div>
+                      <label>Input<pre>{testCase.input || "(empty)"}</pre></label>
+                      <label>Expected output<pre>{testCase.expected_output || "(empty)"}</pre></label>
+                      {testCase.explanation ? <p>{testCase.explanation}</p> : null}
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="question-review-section">
+                <h4>Optimized solutions</h4>
+                <div className="question-review-solutions">
+                  {composer.supported_languages.map((language) => {
+                    const normalizedLanguage = languageKey(language);
+                    const artifact = composer.reference_solutions[normalizedLanguage];
+                    const sourceCode =
+                      normalizedLanguage === languageKey(composer.reference_language)
+                        ? composer.reference_solution
+                        : artifact?.source_code ?? "";
+                    return (
+                      <article key={language}>
+                        <div><strong>{language}</strong><span>{artifact?.validation_status ?? composer.validation_status}</span></div>
+                        <pre>{sourceCode || "No solution generated"}</pre>
+                      </article>
+                    );
+                  })}
+                </div>
+                <div className="question-review-two-column">
+                  <div><strong>Time complexity</strong><p>{composer.time_complexity || "Not classified"}</p></div>
+                  <div><strong>Space complexity</strong><p>{composer.space_complexity || "Not classified"}</p></div>
+                </div>
+              </div>
+
+              <div className="question-review-section">
+                <h4>Metadata</h4>
+                <div className="question-review-summary-grid">
+                  <div><span>Difficulty</span><strong>{composer.difficulty}</strong></div>
+                  <div><span>Topics</span><strong>{composer.topics.join(", ") || "None"}</strong></div>
+                  <div><span>Tags</span><strong>{composer.tags.join(", ") || "None"}</strong></div>
+                  <div><span>Category</span><strong>{composer.category || "Uncategorized"}</strong></div>
+                </div>
+              </div>
+
+            </section>
           ) : null}
 
               <div className="question-page-footer-nav">
@@ -5487,7 +5166,66 @@ export function QuestionCreationFlowPage() {
         />
       ) : null}
 
-      {renderAnswerCheckerModal()}
+      {checkerInfoOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setCheckerInfoOpen(false);
+            }
+          }}
+        >
+          <Card
+            className="answer-checker-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="answer-checker-title"
+          >
+            <div className="answer-checker-modal-head">
+              <div>
+                <span>Answer validation</span>
+                <h3 id="answer-checker-title">
+                  {answerValidationOption(composer.answer_validation_mode).label}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="testcase-detail-close"
+                onClick={() => setCheckerInfoOpen(false)}
+                aria-label="Close answer checker details"
+              >
+                <X size={20} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="answer-checker-modal-body">
+              <p>{answerValidationDescription(composer)}</p>
+              <div className="answer-checker-rule-grid">
+                <div>
+                  <span>Mode</span>
+                  <strong>
+                    {answerValidationOption(composer.answer_validation_mode).label}
+                  </strong>
+                </div>
+                <div>
+                  <span>Expected output role</span>
+                  <strong>
+                    {composer.answer_validation_mode === "exact"
+                      ? "Canonical answer"
+                      : "Valid exemplar"}
+                  </strong>
+                </div>
+              </div>
+              {composer.output_checker.trim() ? (
+                <div className="answer-checker-code">
+                  <span>Python checker</span>
+                  <pre>{composer.output_checker}</pre>
+                </div>
+              ) : null}
+            </div>
+          </Card>
+        </div>
+      ) : null}
 
       {aiPromptRequest && activePromptCopy ? (
         <div className="modal-backdrop" onClick={closeAiPrompt}>
@@ -5612,9 +5350,9 @@ export function QuestionCreationFlowPage() {
           </div>
         </div>
       ) : null}
-      {showPublishModal && !isViewMode ? (
+      {showPublishModal ? (
         <div
-          className="modal-backdrop publish-modal-backdrop"
+          className="modal-backdrop"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !draftSaving) {
@@ -5629,172 +5367,110 @@ export function QuestionCreationFlowPage() {
             aria-labelledby="publish-modal-title"
           >
             <div className="publish-modal-header">
-              <div className="publish-modal-header-copy">
-                <span>{editingQuestion ? "Update question" : "Create question"}</span>
-                <h3 id="publish-modal-title">Review publishing settings</h3>
-                <p>
-                  Choose the status and visibility for{" "}
-                  <strong>{composer.title || "this question"}</strong> before saving.
-                </p>
-              </div>
-              <button
-                type="button"
-                className="publish-modal-close"
-                aria-label="Close publish settings"
-                onClick={() => setShowPublishModal(false)}
-                disabled={draftSaving}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="publish-modal-progress" aria-label="Publish checklist">
-              <div
-                className={[
-                  "publish-modal-progress-item",
-                  statusConfirmed ? "is-complete" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <CheckCircle2 size={16} aria-hidden="true" />
-                <span>Status selected</span>
-              </div>
-              <div
-                className={[
-                  "publish-modal-progress-item",
-                  visibilityConfirmed ? "is-complete" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <CheckCircle2 size={16} aria-hidden="true" />
-                <span>Visibility selected</span>
-              </div>
+              <h3 id="publish-modal-title">
+                {editingQuestion ? "Update Question Details" : "Publish Question"}
+              </h3>
+              <p>Configure visibility and status for "{composer.title}" before saving.</p>
             </div>
 
             <div className="publish-modal-body">
-              <section className="question-status-manager publish-modal-section">
+              <div className="question-status-manager">
                 <div className="question-status-manager-head">
                   <div>
-                    <span>Step 1</span>
+                    <span>Required final decision</span>
                     <strong>Select the question status</strong>
                   </div>
-                  {statusConfirmed ? (
-                    <span className="publish-section-check" aria-label="Status confirmed">
-                      <CheckCircle2 size={18} />
-                    </span>
-                  ) : null}
+                  {statusConfirmed ? <CheckCircle2 size={20} style={{ color: "#16a34a" }} /> : null}
                 </div>
                 <div className="question-status-options" role="radiogroup" aria-label="Question status">
-                  {PUBLISH_STATUS_OPTIONS.map((option) => {
-                    const Icon = option.icon;
-                    const isSelected =
-                      composer.status === option.value && statusConfirmed;
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={[
-                          "question-status-option",
-                          `status-${option.value}`,
-                          isSelected ? "is-active" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        onClick={() => {
-                          updateField("status", option.value);
-                          setStatusConfirmed(true);
-                        }}
-                        role="radio"
-                        aria-checked={isSelected}
-                      >
-                        <span className="question-status-option-header">
-                          <Icon size={16} aria-hidden="true" />
-                          <strong>{option.label}</strong>
-                        </span>
-                        <span>{option.detail}</span>
-                      </button>
-                    );
-                  })}
+                  {[
+                    { value: "draft", label: "Draft", detail: "Keep working" },
+                    { value: "validated", label: "Validated", detail: "Ready for assessments" },
+                    { value: "blocked", label: "Blocked", detail: "Exclude from assessments" },
+                    { value: "archived", label: "Archived", detail: "Retain but hide" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={[
+                        "question-status-option",
+                        `status-${option.value}`,
+                        composer.status === option.value && statusConfirmed ? "is-active" : "",
+                      ].filter(Boolean).join(" ")}
+                      onClick={() => {
+                        updateField("status", option.value as QuestionStatus);
+                        setStatusConfirmed(true);
+                      }}
+                      role="radio"
+                      aria-checked={composer.status === option.value && statusConfirmed}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.detail}</span>
+                    </button>
+                  ))}
                 </div>
-              </section>
+              </div>
 
-              <section className="question-status-manager question-visibility-manager publish-modal-section">
+              <div className="question-status-manager question-visibility-manager" style={{ marginTop: "20px" }}>
                 <div className="question-status-manager-head">
                   <div>
-                    <span>Step 2</span>
+                    <span>Required sharing decision</span>
                     <strong>Who can use this question?</strong>
                   </div>
-                  {visibilityConfirmed ? (
-                    <span className="publish-section-check" aria-label="Visibility confirmed">
-                      <CheckCircle2 size={18} />
-                    </span>
-                  ) : null}
+                  {visibilityConfirmed ? <CheckCircle2 size={20} style={{ color: "#16a34a" }} /> : null}
                 </div>
                 <div className="question-status-options" role="radiogroup" aria-label="Question visibility">
-                  {PUBLISH_VISIBILITY_OPTIONS.map((option) => {
-                    const Icon = option.icon;
-                    const isSelected =
-                      composer.visibility === option.value && visibilityConfirmed;
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={[
-                          "question-status-option",
-                          `visibility-${option.value}`,
-                          isSelected ? "is-active" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        onClick={() => {
-                          updateField("visibility", option.value);
-                          setVisibilityConfirmed(true);
-                        }}
-                        role="radio"
-                        aria-checked={isSelected}
-                      >
-                        <span className="question-status-option-header">
-                          <Icon size={16} aria-hidden="true" />
-                          <strong>{option.label}</strong>
-                        </span>
-                        <span>{option.detail}</span>
-                      </button>
-                    );
-                  })}
+                  {[
+                    {
+                      value: "private",
+                      label: "Private",
+                      detail: "Only you can use this question in assessments",
+                    },
+                    {
+                      value: "public",
+                      label: "Public",
+                      detail: "All recruiters can use this question in assessments",
+                    },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={[
+                        "question-status-option",
+                        `visibility-${option.value}`,
+                        composer.visibility === option.value && visibilityConfirmed ? "is-active" : "",
+                      ].filter(Boolean).join(" ")}
+                      onClick={() => {
+                        updateField("visibility", option.value as QuestionVisibility);
+                        setVisibilityConfirmed(true);
+                      }}
+                      role="radio"
+                      aria-checked={composer.visibility === option.value && visibilityConfirmed}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.detail}</span>
+                    </button>
+                  ))}
                 </div>
-              </section>
+              </div>
             </div>
 
             <div className="publish-modal-footer">
-              {!statusConfirmed || !visibilityConfirmed ? (
-                <p className="publish-modal-footer-hint">
-                  Select both a status and visibility to continue.
-                </p>
-              ) : (
-                <p className="publish-modal-footer-hint is-ready">
-                  Ready to save with status <strong>{composer.status}</strong> and{" "}
-                  <strong>{composer.visibility}</strong> visibility.
-                </p>
-              )}
-              <div className="publish-modal-footer-actions">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setShowPublishModal(false)}
-                  disabled={draftSaving}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  onClick={saveQuestionFromWizard}
-                  disabled={draftSaving || !statusConfirmed || !visibilityConfirmed}
-                >
-                  {draftSaving ? "Saving..." : editingQuestion ? "Save & Update" : "Confirm & Create"}
-                </Button>
-              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setShowPublishModal(false)}
+                disabled={draftSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={saveQuestionFromWizard}
+                disabled={draftSaving || !statusConfirmed || !visibilityConfirmed}
+              >
+                {draftSaving ? "Saving..." : editingQuestion ? "Save & Update" : "Confirm & Create"}
+              </Button>
             </div>
           </Card>
         </div>

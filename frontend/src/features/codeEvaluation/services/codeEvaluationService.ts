@@ -1,6 +1,7 @@
 import { coreApiClient } from "../../../lib/axios";
 import type {
   AssessmentEvaluationDashboard,
+  CandidateEvaluationReport,
   CandidateEvaluationSummary,
   EvaluationBackfillResponse,
   RetryEvaluationResponse,
@@ -63,6 +64,20 @@ export async function fetchCandidateEvaluationReport(
     },
   );
   return response.data.candidate;
+}
+
+export async function fetchCandidateScorecardReport(
+  idToken: string,
+  assessmentId: string,
+  candidateAssessmentId: string,
+  signal?: AbortSignal,
+): Promise<CandidateEvaluationReport> {
+  const response = await coreApiClient.get<CandidateEvaluationReport>(
+    `/assessments/${assessmentId}/evaluations/reports/candidates/`
+      + candidateAssessmentId,
+    { headers: authHeader(idToken), signal },
+  );
+  return response.data;
 }
 
 export async function downloadAssessmentEvaluationReport(

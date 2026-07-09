@@ -34,208 +34,11 @@ export function addMinutesToLocalInput(value: string, minutes: number) {
   return shifted.toISOString().slice(0, 16);
 }
 
-export function compareLocalDateTimeInputs(left: string, right: string) {
-  if (!left && !right) {
-    return 0;
-  }
-  if (!left) {
-    return -1;
-  }
-  if (!right) {
-    return 1;
-  }
-  return left.localeCompare(right);
-}
-
-export function isLocalInputBefore(value: string, minimum: string) {
-  return Boolean(value && minimum && compareLocalDateTimeInputs(value, minimum) < 0);
-}
-
-export function maxLocalDateTimeInput(left: string, right: string) {
-  if (!left) {
-    return right;
-  }
-  if (!right) {
-    return left;
-  }
-  return compareLocalDateTimeInputs(left, right) >= 0 ? left : right;
-}
-
-export function clampLocalInputToMinimum(value: string, minimum: string) {
-  if (!minimum) {
-    return value;
-  }
-  return maxLocalDateTimeInput(value, minimum);
-}
-
-export function createDefaultSlotSchedule(
-  timezoneName: string,
-  offsetMinutes: number,
-  durationMinutes: number,
-  nowMs: number = Date.now(),
-) {
-  const start_at = nextAvailableTimeInput(timezoneName, offsetMinutes, nowMs);
-  return {
-    start_at,
-    end_at: addMinutesToLocalInput(start_at, durationMinutes),
-  };
-}
-
-export function minimumSlotEndInput(
-  startAt: string,
-  durationMinutes: number,
-  timezoneName: string,
-  offsetMinutes: number,
-  nowMs: number = Date.now(),
-) {
-  const minimumStart = nextAvailableTimeInput(timezoneName, offsetMinutes, nowMs);
-  const effectiveStart = clampLocalInputToMinimum(startAt, minimumStart) || minimumStart;
-  return addMinutesToLocalInput(effectiveStart, durationMinutes);
-}
-
-export function splitLocalDateTimeInput(value: string) {
-  if (!value) {
-    return { date: "", time: "" };
-  }
-  const [date = "", time = ""] = value.split("T");
-  return { date, time: time.slice(0, 5) };
-}
-
-export function formatSlotDateTimeLabel(value: string) {
-  const { date, time } = splitLocalDateTimeInput(value);
-  if (!date || !time) {
-    return value;
-  }
-  const parsed = new Date(`${date}T${time}:00`);
-  if (Number.isNaN(parsed.getTime())) {
-    return `${date} ${time}`;
-  }
-  return parsed.toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-export function buildScheduleTimeOptions(
-  selectedDate: string,
-  minimum: string,
-  minuteStep = 15,
-) {
-  const { date: minDate, time: minTime } = splitLocalDateTimeInput(minimum);
-  const options: Array<{ value: string; label: string; disabled: boolean }> = [];
-
-  for (let hour = 0; hour < 24; hour += 1) {
-    for (let minute = 0; minute < 60; minute += minuteStep) {
-      const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-      const candidate = selectedDate ? `${selectedDate}T${value}` : "";
-      const disabled = Boolean(
-        selectedDate &&
-          minDate &&
-          (selectedDate < minDate ||
-            (selectedDate === minDate &&
-              minTime &&
-              compareLocalDateTimeInputs(candidate, minimum) < 0)),
-      );
-      options.push({
-        value,
-        label: value,
-        disabled,
-      });
-    }
-  }
-
-  return options;
-}
-
-export function getSlotScheduleFieldErrors(
-  form: {
-    start_at: string;
-    end_at: string;
-    duration_minutes: number;
-    timezone_name: string;
-    timezone_offset_minutes: number;
-  },
-  nowMs: number = Date.now(),
-) {
-  const errors = {
-    start_at: "",
-    end_at: "",
-    general: "",
-  };
-
-  if (!form.start_at) {
-    errors.start_at = "Choose a start time.";
-    return errors;
-  }
-
-  const minimumStart = nextAvailableTimeInput(
-    form.timezone_name,
-    form.timezone_offset_minutes,
-    nowMs,
-  );
-  if (isLocalInputBefore(form.start_at, minimumStart)) {
-    errors.start_at = `Pick ${formatSlotDateTimeLabel(minimumStart)} or later.`;
-  }
-
-  if (!form.end_at) {
-    errors.end_at = "Choose an end time.";
-    return errors;
-  }
-
-  const minimumEnd = minimumSlotEndInput(
-    form.start_at,
-    form.duration_minutes,
-    form.timezone_name,
-    form.timezone_offset_minutes,
-    nowMs,
-  );
-  if (isLocalInputBefore(form.end_at, minimumEnd)) {
-    errors.end_at = `End time must be at least ${form.duration_minutes} minutes after the start time.`;
-  }
-
-  try {
-    const timezoneOffsetMinutes = timezoneOffsetMinutesForLocalDateTime(
-      form.start_at || form.end_at,
-      form.timezone_name,
-      form.timezone_offset_minutes,
-    );
-    const startAt = toIsoDateTimeForTimezone(
-      form.start_at,
-      form.timezone_name,
-      timezoneOffsetMinutes,
-    );
-    const endAt = toIsoDateTimeForTimezone(
-      form.end_at,
-      form.timezone_name,
-      timezoneOffsetMinutes,
-    );
-    if (new Date(startAt).getTime() < nowMs) {
-      errors.start_at = "Start time must be in the future.";
-    }
-    if (
-      new Date(endAt).getTime() <
-      new Date(startAt).getTime() + form.duration_minutes * MINUTE_MS
-    ) {
-      errors.end_at = `End time must be at least ${form.duration_minutes} minutes after the start time.`;
-    }
-  } catch (error) {
-    const message = errorMessage(error) || "Choose a valid start and end time.";
-    if (!errors.start_at) {
-      errors.start_at = message;
-    } else {
-      errors.general = message;
-    }
-  }
-
-  return errors;
-}
-
 export function nextAvailableTimeInput(
   timezoneName: string,
   offsetMinutes: number,
-  nowMs: number = Date.now(),
 ) {
-  const nextMinute = new Date(Math.ceil(nowMs / MINUTE_MS) * MINUTE_MS);
+  const nextMinute = new Date(Math.ceil(Date.now() / MINUTE_MS) * MINUTE_MS);
   return toTimezoneInputValue(nextMinute.toISOString(), timezoneName, offsetMinutes);
 }
 
@@ -412,7 +215,7 @@ export function assessmentToPayload(assessment: Assessment): AssessmentCreatePay
 }
 
 export function statusTone(status: string) {
-  if (["live", "sent", "submitted", "auto_submitted", "active", "passed"].includes(status)) {
+  if (["live", "sent", "submitted", "auto_submitted", "active"].includes(status)) {
     return "success";
   }
   if (["failed", "revoked", "closed", "archived"].includes(status)) {
@@ -444,24 +247,6 @@ export function calculateQuestionTemplateMarks(blueprint: DifficultyLevel[]) {
       marks[index] += 1;
     });
   return marks;
-}
-
-export function marksSummaryForDifficulty(
-  difficulty: DifficultyLevel,
-  blueprint: DifficultyLevel[],
-  marks: number[],
-) {
-  const values = blueprint.flatMap((item, index) =>
-    item === difficulty ? [marks[index] ?? 0] : [],
-  );
-  if (!values.length) {
-    return "";
-  }
-  const unique = Array.from(new Set(values));
-  if (unique.length === 1) {
-    return `${unique[0]} marks each`;
-  }
-  return `${Math.min(...unique)}-${Math.max(...unique)} marks`;
 }
 
 export function buildAssessmentQuestionAssignments(

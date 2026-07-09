@@ -9,6 +9,7 @@ import type {
   QuestionCreatePayload,
   QuestionDraftValidationRequest,
   QuestionDraftValidationResponse,
+  QuestionDraftRefinementRequest,
   QuestionDraftRefinementResponse,
   QuestionGroupCreatePayload,
   QuestionGroupListResponse,
@@ -239,6 +240,7 @@ export async function streamQuestionBankDraft(
   idToken: string,
   payload: QuestionAIDraftRequest,
   onProgress: (event: QuestionAIDraftProgressEvent) => void,
+  signal?: AbortSignal,
 ): Promise<QuestionAIDraftResponse> {
   const sanitizedPayload = sanitizeAIDraftRequest(payload);
   let response: Response;
@@ -254,6 +256,7 @@ export async function streamQuestionBankDraft(
         },
         body: JSON.stringify(sanitizedPayload),
         credentials: "include",
+        signal,
       },
     );
   } catch (error) {
@@ -265,14 +268,25 @@ export async function streamQuestionBankDraft(
     );
   }
 
-  if (!response.ok || !response.body) {
+  if (!response.ok) {
+    const message = await streamResponseErrorMessage(response);
+    if (response.status >= 400 && response.status < 500) {
+      throw new Error(message);
+    }
     return generateQuestionBankDraftFallback(
       idToken,
       sanitizedPayload,
       onProgress,
-      response.ok
-        ? "The browser could not read the question generation stream."
-        : await streamResponseErrorMessage(response),
+      message,
+    );
+  }
+
+  if (!response.body) {
+    return generateQuestionBankDraftFallback(
+      idToken,
+      sanitizedPayload,
+      onProgress,
+      "The browser could not read the question generation stream.",
     );
   }
 
@@ -327,12 +341,14 @@ export async function streamQuestionBankDraft(
 export async function validateQuestionBankDraft(
   idToken: string,
   payload: QuestionDraftValidationRequest,
+  signal?: AbortSignal,
 ): Promise<QuestionDraftValidationResponse> {
   const response = await coreApiClient.post<QuestionDraftValidationResponse>(
     "/question-bank/questions/validate-draft",
     payload,
     {
       headers: authHeader(idToken),
+      signal,
     },
   );
   return response.data;
@@ -340,24 +356,32 @@ export async function validateQuestionBankDraft(
 
 export async function refineQuestionBankTestCases(
   idToken: string,
-  payload: QuestionDraftValidationRequest,
+  payload: QuestionDraftRefinementRequest,
+  signal?: AbortSignal,
 ): Promise<QuestionDraftRefinementResponse> {
   const response = await coreApiClient.post<QuestionDraftRefinementResponse>(
     "/question-bank/questions/refine-test-cases",
     payload,
-    { headers: authHeader(idToken) },
+    {
+      headers: authHeader(idToken),
+      signal,
+    },
   );
   return response.data;
 }
 
 export async function refineQuestionBankSolution(
   idToken: string,
-  payload: QuestionDraftValidationRequest,
+  payload: QuestionDraftRefinementRequest,
+  signal?: AbortSignal,
 ): Promise<QuestionDraftRefinementResponse> {
   const response = await coreApiClient.post<QuestionDraftRefinementResponse>(
     "/question-bank/questions/refine-solution",
     payload,
-    { headers: authHeader(idToken) },
+    {
+      headers: authHeader(idToken),
+      signal,
+    },
   );
   return response.data;
 }
