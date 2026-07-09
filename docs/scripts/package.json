@@ -1,0 +1,12 @@
+{
+  "name": "cap-docs-pdf",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:codebase-guide": "node generate-codebase-guide-pdf.mjs"
+  },
+  "devDependencies": {
+    "marked": "^15.0.6",
+    "puppeteer": "^24.2.0"
+  }
+}

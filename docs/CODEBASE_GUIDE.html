@@ -1,0 +1,1286 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CAP Codebase Architecture Guide</title>
+    <style>@page {
+  size: A4;
+  margin: 18mm 16mm 22mm;
+}
+
+:root {
+  --ink: #0f172a;
+  --muted: #475569;
+  --accent: #2563eb;
+  --accent-soft: #dbeafe;
+  --border: #e2e8f0;
+  --code-bg: #f1f5f9;
+  --surface: #ffffff;
+  --hero: linear-gradient(135deg, #0f172a 0%, #1e3a8a 55%, #312e81 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 11pt;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.55;
+  background: var(--surface);
+}
+
+.cover {
+  page-break-after: always;
+  min-height: 95vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 48px 40px;
+  background: var(--hero);
+  color: #fff;
+  border-radius: 0;
+}
+
+.cover-kicker {
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0.82;
+  margin-bottom: 18px;
+}
+
+.cover h1 {
+  font-size: 2.35rem;
+  line-height: 1.15;
+  margin: 0 0 16px;
+  font-weight: 800;
+}
+
+.cover p {
+  max-width: 620px;
+  font-size: 1.05rem;
+  opacity: 0.92;
+  margin: 0 0 28px;
+}
+
+.cover-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.cover-meta div {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.cover-meta span {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.75;
+}
+
+.cover-meta strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.95rem;
+}
+
+.content {
+  padding: 0 4px;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+  color: var(--ink);
+  line-height: 1.25;
+  page-break-after: avoid;
+}
+
+.content h1 {
+  font-size: 1.65rem;
+  margin: 2.2rem 0 0.8rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 3px solid var(--accent);
+}
+
+.content h2 {
+  font-size: 1.28rem;
+  margin: 1.8rem 0 0.65rem;
+  color: #1e3a8a;
+}
+
+.content h3 {
+  font-size: 1.05rem;
+  margin: 1.35rem 0 0.5rem;
+  color: #334155;
+}
+
+.content p,
+.content li {
+  color: #1e293b;
+}
+
+.content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.content hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+
+.content ul,
+.content ol {
+  padding-left: 1.25rem;
+}
+
+.content blockquote {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--accent);
+  background: var(--accent-soft);
+  color: #1e3a8a;
+}
+
+.content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0 1.25rem;
+  font-size: 0.92rem;
+  page-break-inside: avoid;
+}
+
+.content th,
+.content td {
+  border: 1px solid var(--border);
+  padding: 0.55rem 0.65rem;
+  vertical-align: top;
+}
+
+.content th {
+  background: #eff6ff;
+  color: #1e3a8a;
+  text-align: left;
+}
+
+.content tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+.content code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  padding: 0.12rem 0.35rem;
+  border-radius: 4px;
+}
+
+.content pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  page-break-inside: avoid;
+}
+
+.content pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.content img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 1rem auto 1.25rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  page-break-inside: avoid;
+}
+
+.mermaid {
+  margin: 1rem 0 1.25rem;
+  page-break-inside: avoid;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.page-break {
+  page-break-before: always;
+}
+
+@media print {
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+</style>
+  </head>
+  <body>
+    <section class="cover">
+      <div class="cover-kicker">Coding Assessment Platform</div>
+      <h1>Codebase Architecture Guide</h1>
+      <p>
+        A complete map of CAP services, authentication flows, data models,
+        business workflows, frontend features, and the best places to start
+        reading source code.
+      </p>
+      <div class="cover-meta">
+        <div><span>Document</span><strong>Architecture Guide</strong></div>
+        <div><span>Generated</span><strong>July 10, 2026</strong></div>
+        <div><span>Repository</span><strong>CAP CodeBase</strong></div>
+      </div>
+    </section>
+    <main class="content"><h1>CAP Codebase Architecture Guide</h1>
+<p>This guide explains how the <strong>Coding Assessment Platform (CAP)</strong> is structured, how requests flow between services, and where to start reading code for each feature.</p>
+<hr>
+<h2>Table of Contents</h2>
+<ol>
+<li><a href="#what-cap-does">What CAP Does</a></li>
+<li><a href="#system-architecture">System Architecture</a></li>
+<li><a href="#services-at-a-glance">Services at a Glance</a></li>
+<li><a href="#authentication--request-flow">Authentication &amp; Request Flow</a></li>
+<li><a href="#core-data-model">Core Data Model</a></li>
+<li><a href="#key-business-flows">Key Business Flows</a></li>
+<li><a href="#frontend-architecture">Frontend Architecture</a></li>
+<li><a href="#backend-folder-layout">Backend Folder Layout</a></li>
+<li><a href="#api-surface-summary">API Surface Summary</a></li>
+<li><a href="#infrastructure--local-dev">Infrastructure &amp; Local Dev</a></li>
+<li><a href="#where-to-start-reading-code">Where to Start Reading Code</a></li>
+<li><a href="#related-documentation">Related Documentation</a></li>
+</ol>
+<hr>
+<h2>What CAP Does</h2>
+<p>CAP is a <strong>service-oriented coding assessment platform</strong> for recruiter workflows:</p>
+<table>
+<thead>
+<tr>
+<th>Actor</th>
+<th>What they do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Recruiter</strong></td>
+<td>Creates questions (manual or AI), builds assessments, schedules test slots, invites candidates, monitors live tests, reviews scorecards</td>
+</tr>
+<tr>
+<td><strong>Candidate</strong></td>
+<td>Joins via invite/access code, writes code in a browser IDE, runs sample tests, submits for hidden evaluation</td>
+</tr>
+<tr>
+<td><strong>Platform</strong></td>
+<td>Executes code in Judge0 sandboxes, scores submissions (test cases + AI quality), ranks candidates, generates PDF reports, sends in-app notifications</td>
+</tr>
+</tbody></table>
+<p>All browser traffic goes through a single <strong>API Gateway</strong>. Internal services (execution, evaluation) are not exposed to the browser directly.</p>
+<hr>
+<h2>System Architecture</h2>
+<p>![CAP System Architecture](file:///Users/raghavsomasundaram/Downloads/CAP/CAP CodeBase/docs/images/cap-system-architecture.png)</p>
+<h3>Layered view</h3>
+<pre class="mermaid">flowchart TB
+  subgraph Client
+    FE[React Frontend :5173]
+  end
+
+  subgraph Edge
+    GW[API Gateway :8001]
+  end
+
+  subgraph Application
+    CORE[Core Platform :8002]
+    EXEC[Code Execution :8003]
+    EVAL[Code Evaluation :8004]
+  end
+
+  subgraph Infrastructure
+    PG[(PostgreSQL :55432)]
+    RD[(Redis :6379)]
+    J0[Judge0 :12358]
+  end
+
+  subgraph External
+    FB[Firebase Auth]
+    GROQ[Groq AI]
+    BREVO[Brevo Email]
+  end
+
+  FE -->|HTTPS /api/*| GW
+  GW --> CORE
+  CORE --> EXEC
+  CORE --> EVAL
+  EXEC --> J0
+  CORE --> PG
+  EVAL --> PG
+  CORE --> RD
+  GW --> FB
+  CORE --> GROQ
+  CORE --> BREVO</pre><h3>Service responsibilities</h3>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th align="right">Port</th>
+<th>Folder</th>
+<th>Primary job</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Frontend</strong></td>
+<td align="right">5173</td>
+<td><code>frontend/</code></td>
+<td>Recruiter + candidate React SPA</td>
+</tr>
+<tr>
+<td><strong>API Gateway</strong></td>
+<td align="right">8001</td>
+<td><code>api-gateway-service/</code></td>
+<td>Auth, authorization, reverse proxy</td>
+</tr>
+<tr>
+<td><strong>Core Platform</strong></td>
+<td align="right">8002</td>
+<td><code>core-assessment-platform-service/</code></td>
+<td>Business logic, DB, AI agent, email, notifications</td>
+</tr>
+<tr>
+<td><strong>Code Execution</strong></td>
+<td align="right">8003</td>
+<td><code>code-execution-service/</code></td>
+<td>Judge0 adapter — run code against stdin/stdout</td>
+</tr>
+<tr>
+<td><strong>Code Evaluation</strong></td>
+<td align="right">8004</td>
+<td><code>code-evaluation-service/</code></td>
+<td>Scoring, ranking, evaluation jobs, PDF reports</td>
+</tr>
+<tr>
+<td><strong>Judge0</strong></td>
+<td align="right">12358</td>
+<td><code>docker/judge0/</code></td>
+<td>Sandboxed compile + run</td>
+</tr>
+<tr>
+<td><strong>PostgreSQL</strong></td>
+<td align="right">55432</td>
+<td>—</td>
+<td><code>cap_core</code> DB + Judge0 DB</td>
+</tr>
+<tr>
+<td><strong>Redis</strong></td>
+<td align="right">6379</td>
+<td>—</td>
+<td>Judge0 job queue + notification pub/sub</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Services at a Glance</h2>
+<h3>API Gateway (<code>api-gateway-service/</code>)</h3>
+<p><strong>Entry point for all browser API calls.</strong></p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/api/rest/routes/proxy.py</code></td>
+<td>Proxies <code>/{service}/{path}</code> to upstream services</td>
+</tr>
+<tr>
+<td><code>src/core/services/gateway_auth_service.py</code></td>
+<td>Firebase JWT, candidate session, route policies</td>
+</tr>
+<tr>
+<td><code>src/core/services/gateway_service.py</code></td>
+<td>HTTP relay, SSE streaming support</td>
+</tr>
+</tbody></table>
+<p>Browser calls look like:</p>
+<pre><code class="language-text">GET  /api/core/assessments
+POST /api/core/candidate/start
+GET  /api/core/notifications/stream   (SSE)</code></pre><p>The gateway validates credentials <strong>before</strong> forwarding. Execution and evaluation services are <strong>never</strong> called directly from the browser.</p>
+<hr>
+<h3>Core Platform (<code>core-assessment-platform-service/</code>)</h3>
+<p><strong>The brain of CAP.</strong> Owns recruiter data, candidate sessions, assessments, and orchestration.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Folder</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Routes</td>
+<td><code>src/api/rest/routes/</code></td>
+<td>HTTP endpoints (assessments, auth, candidate portal, question bank, notifications)</td>
+</tr>
+<tr>
+<td>Services</td>
+<td><code>src/core/services/</code></td>
+<td>Business logic (<code>AssessmentService</code>, <code>QuestionBankService</code>, <code>NotificationService</code>, …)</td>
+</tr>
+<tr>
+<td>Agents</td>
+<td><code>src/control/agents/question_agent/</code></td>
+<td>LangGraph AI question generation pipeline</td>
+</tr>
+<tr>
+<td>Data</td>
+<td><code>src/data/models/postgres/</code></td>
+<td>SQLAlchemy models</td>
+</tr>
+<tr>
+<td>Repositories</td>
+<td><code>src/data/repositories/</code></td>
+<td>DB access</td>
+</tr>
+<tr>
+<td>Handlers</td>
+<td><code>src/handlers/http_clients/</code></td>
+<td>Outbound HTTP to execution, evaluation, Groq</td>
+</tr>
+<tr>
+<td>Handlers</td>
+<td><code>src/handlers/clients/redis_broker.py</code></td>
+<td>Redis pub/sub for notification SSE</td>
+</tr>
+</tbody></table>
+<p><strong>Key service:</strong> <code>assessment_service.py</code> — assessments, slots, invites, submit, backfill evaluations, monitoring.</p>
+<hr>
+<h3>Code Execution (<code>code-execution-service/</code>)</h3>
+<p><strong>Trusted backend-only service.</strong> Wraps Judge0.</p>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST /executions</code></td>
+<td>Run one code snippet with stdin</td>
+</tr>
+<tr>
+<td><code>POST /executions/batch</code></td>
+<td>Run one submission against many test cases</td>
+</tr>
+</tbody></table>
+<p>Protected by <code>INTERNAL_SERVICE_TOKEN</code> — only Core (or other trusted services) may call it.</p>
+<p><strong>Key file:</strong> <code>src/core/services/code_execution_service.py</code></p>
+<hr>
+<h3>Code Evaluation (<code>code-evaluation-service/</code>)</h3>
+<p><strong>Scores final submissions and maintains leaderboards.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST /evaluations/jobs</code></td>
+<td>Create + process evaluation job</td>
+</tr>
+<tr>
+<td><code>GET /evaluations/assessments/{id}/dashboard</code></td>
+<td>Recruiter evaluation overview</td>
+</tr>
+<tr>
+<td><code>GET /evaluations/assessments/{id}/candidates/{id}/report</code></td>
+<td>Candidate scorecard</td>
+</tr>
+<tr>
+<td>PDF routes</td>
+<td>Download assessment / candidate / test reports</td>
+</tr>
+</tbody></table>
+<p>Also runs a <strong>background worker</strong> (<code>src/worker.py</code>) that polls Postgres for pending jobs (not Celery).</p>
+<p><strong>Key file:</strong> <code>src/core/services/evaluation_service.py</code></p>
+<p>Scoring combines:</p>
+<ul>
+<li>Hidden test case pass rate</li>
+<li>AI code quality signals (via Groq)</li>
+<li>Weighted final score + rank</li>
+</ul>
+<hr>
+<h2>Authentication &amp; Request Flow</h2>
+<p>![Authentication Flow](file:///Users/raghavsomasundaram/Downloads/CAP/CAP CodeBase/docs/images/cap-auth-flow.png)</p>
+<h3>Recruiter flow</h3>
+<ol>
+<li>Recruiter logs in via <strong>Firebase</strong> in the React app.</li>
+<li>Frontend sends <code>Authorization: Bearer &lt;firebase-id-token&gt;</code> on every API call.</li>
+<li><strong>API Gateway</strong> validates the JWT against Firebase public certificates.</li>
+<li>For protected routes, gateway calls Core <code>GET /auth/me</code> to verify recruiter role and subscription.</li>
+<li>Request is proxied to Core with recruiter identity headers.</li>
+</ol>
+<h3>Candidate flow</h3>
+<ol>
+<li>Candidate opens invite link or enters access code.</li>
+<li><code>POST /candidate/verify-invite</code> and <code>POST /candidate/start</code> are <strong>public</strong> (no Firebase).</li>
+<li>Core issues an <strong>HMAC-signed candidate session token</strong>.</li>
+<li>Gateway validates the session token for all <code>/candidate/*</code> routes (except verify/start).</li>
+<li>Candidate takes the test and submits through the portal.</li>
+</ol>
+<h3>Route policy (gateway)</h3>
+<table>
+<thead>
+<tr>
+<th>Route type</th>
+<th>Auth</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST candidate/verify-invite</code>, <code>POST candidate/start</code></td>
+<td>Public</td>
+</tr>
+<tr>
+<td><code>GET auth/firebase-config</code></td>
+<td>Public</td>
+</tr>
+<tr>
+<td><code>GET auth/me</code>, <code>POST auth/start-free-trial</code></td>
+<td>Firebase (subscription optional)</td>
+</tr>
+<tr>
+<td>All other <code>/core/*</code> recruiter routes</td>
+<td>Firebase + active subscription</td>
+</tr>
+<tr>
+<td>All <code>/candidate/*</code> (except public)</td>
+<td>Candidate session token</td>
+</tr>
+<tr>
+<td>Execution / Evaluation APIs</td>
+<td>Internal service token only</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Core Data Model</h2>
+<p>Core PostgreSQL tables (see <code>core-assessment-platform-service/src/data/models/postgres/</code>):</p>
+<pre class="mermaid">erDiagram
+  ASSESSMENT_TEMPLATE ||--o{ ASSESSMENT_SLOT : has
+  ASSESSMENT_TEMPLATE ||--o{ ASSESSMENT_QUESTION : contains
+  ASSESSMENT_SLOT ||--o{ CANDIDATE_ASSESSMENT : assigns
+  CANDIDATE ||--o{ CANDIDATE_ASSESSMENT : takes
+  CANDIDATE_ASSESSMENT ||--o{ SUBMISSION : writes
+  QUESTION_BANK_QUESTION ||--o{ ASSESSMENT_QUESTION : referenced_by
+  QUESTION_GROUP ||--o{ QUESTION_BANK_QUESTION : groups
+  RECRUITER ||--o{ RECRUITER_NOTIFICATION : receives
+  RECRUITER ||--o| RECRUITER_NOTIFICATION_SETTING : configures</pre><table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Table purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AssessmentTemplateModel</code></td>
+<td>Recruiter-owned assessment definition</td>
+</tr>
+<tr>
+<td><code>AssessmentSlotModel</code></td>
+<td>Scheduled test window (start/end, duration, status)</td>
+</tr>
+<tr>
+<td><code>CandidateAssessmentModel</code></td>
+<td>One candidate&#39;s assignment to a slot; stores score, rank, status</td>
+</tr>
+<tr>
+<td><code>SubmissionModel</code></td>
+<td>Per-question source code (draft + final)</td>
+</tr>
+<tr>
+<td><code>QuestionBankQuestionModel</code></td>
+<td>Coding question with test cases, solutions, metadata</td>
+</tr>
+<tr>
+<td><code>QuestionGroupModel</code></td>
+<td>Grouped questions for bulk selection</td>
+</tr>
+<tr>
+<td><code>CandidateModel</code></td>
+<td>Candidate identity (email, name)</td>
+</tr>
+<tr>
+<td><code>RecruiterNotificationModel</code></td>
+<td>In-app notification inbox rows</td>
+</tr>
+<tr>
+<td><code>RecruiterNotificationSettingModel</code></td>
+<td>Notification mode preferences</td>
+</tr>
+</tbody></table>
+<p>Evaluation service has its own tables (<code>evaluation_jobs</code>, <code>assessment_reports</code>) in the same Postgres instance (separate schema managed by evaluation Alembic migrations).</p>
+<hr>
+<h2>Key Business Flows</h2>
+<h3>1. Candidate submit → scorecard</h3>
+<p>![Evaluation Flow](file:///Users/raghavsomasundaram/Downloads/CAP/CAP CodeBase/docs/images/cap-evaluation-flow.png)</p>
+<pre class="mermaid">sequenceDiagram
+  participant C as Candidate Browser
+  participant GW as API Gateway
+  participant Core as Core Platform
+  participant Exec as Code Execution
+  participant Eval as Code Evaluation
+  participant PG as PostgreSQL
+  participant RD as Redis
+
+  C->>GW: POST /candidate/submit
+  GW->>Core: Forward (session auth)
+  Core->>Exec: Batch run hidden test cases (Judge0)
+  Exec-->>Core: Hidden execution results
+  Core->>Eval: POST /evaluations/jobs
+  Eval->>Eval: Score (tests + AI quality)
+  Eval-->>Core: Job result (score, rank)
+  Core->>PG: Save scores + metadata
+  Core->>Core: NotificationService.enqueue
+  Core->>PG: Commit
+  Core->>RD: PUBLISH notification event
+  Core-->>C: Submit success
+  Note over C,RD: Recruiter SSE stream receives update</pre><p><strong>Code path:</strong></p>
+<ol>
+<li><code>candidate_portal.py</code> → <code>AssessmentService.submit_assessment()</code></li>
+<li>Hidden tests via <code>ExecutionAdapterService</code></li>
+<li>Payload built by <code>EvaluationPayloadBuilder</code></li>
+<li><code>EvaluationAdapterService.create_job()</code> → evaluation service</li>
+<li>Scores stored on <code>CandidateAssessmentModel</code></li>
+<li><code>NotificationService</code> → Redis → SSE to recruiter bell</li>
+</ol>
+<hr>
+<h3>2. Evaluate Previous (re-evaluation)</h3>
+<p>When a recruiter clicks <strong>Evaluate Previous</strong> on a test slot:</p>
+<ol>
+<li>Frontend sends <code>POST /assessments/{id}/evaluations/backfill</code> with <code>force: true</code> and candidate IDs.</li>
+<li>Core <code>backfill_evaluations()</code> loads submitted assignments.</li>
+<li>For each candidate, <code>_backfill_candidate_evaluation()</code> rebuilds the evaluation payload.</li>
+<li>With <code>force: true</code>, evaluation service <strong>resets</strong> existing jobs and reprocesses.</li>
+<li>Leaderboard and scorecards refresh.</li>
+</ol>
+<p><strong>Key files:</strong></p>
+<ul>
+<li><code>frontend/.../TestResultsTab.tsx</code> — button + candidate ID list</li>
+<li><code>core/.../assessment_service.py</code> — <code>backfill_evaluations()</code>, <code>_backfill_candidate_evaluation()</code></li>
+<li><code>code-evaluation-service/.../evaluation_service.py</code> — <code>create_job(force=True)</code></li>
+</ul>
+<hr>
+<h3>3. In-app notifications (SSE + Redis)</h3>
+<pre class="mermaid">sequenceDiagram
+  participant Core as Core Platform
+  participant PG as PostgreSQL
+  participant RD as Redis
+  participant FE as Recruiter Browser
+
+  Core->>PG: Insert notification row (same txn as submit/eval)
+  Core->>PG: Commit
+  Core->>RD: PUBLISH notifications:{recruiter_uid}
+  FE->>Core: GET /notifications/stream (SSE)
+  Core->>RD: SUBSCRIBE
+  RD-->>Core: Event
+  Core-->>FE: SSE snapshot push</pre><p><strong>Modes</strong> (configured in Settings):</p>
+<ul>
+<li><code>per_candidate</code> — one notification per submit/eval</li>
+<li><code>milestone</code> — batched at percentage milestones</li>
+<li><code>one_per_test</code> — single notification when test completes</li>
+</ul>
+<p><strong>Key files:</strong></p>
+<ul>
+<li><code>notification_service.py</code>, <code>notification_repository.py</code></li>
+<li><code>routes/notifications.py</code></li>
+<li><code>frontend/features/notifications/</code></li>
+</ul>
+<hr>
+<h3>4. AI question generation (LangGraph)</h3>
+<p>![AI Question Pipeline](file:///Users/raghavsomasundaram/Downloads/CAP/CAP CodeBase/docs/images/cap-question-ai-pipeline.png)</p>
+<p>Recruiters create questions via a <strong>6-step wizard</strong> or full AI generation:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1 Basic details</td>
+<td>Title, context; optional &quot;Generate whole question with AI&quot;</td>
+</tr>
+<tr>
+<td>2 Problem statement</td>
+<td>Description, I/O format, constraints</td>
+</tr>
+<tr>
+<td>3 Test cases</td>
+<td>Sample + hidden cases (CodeChef STDIN/STDOUT style)</td>
+</tr>
+<tr>
+<td>4 Solutions</td>
+<td>Reference solution + multi-language variants</td>
+</tr>
+<tr>
+<td>5 Metadata</td>
+<td>AI classifies difficulty, tags, category</td>
+</tr>
+<tr>
+<td>6 Review &amp; publish</td>
+<td>Collapsible review sections, create question</td>
+</tr>
+</tbody></table>
+<p><strong>LangGraph node sequence</strong> (<code>question_graph.py</code>):</p>
+<pre><code class="language-text">orchestrator → problem_statement → constraints → examples → hidden_tests
+→ constraint_script → solution → validation → multi_language_solutions
+→ metadata → duplicate_detection → quality_review</code></pre><p>Validation runs reference solutions against Judge0 via the execution adapter. Failed validation triggers repair loops (up to 3 rounds).</p>
+<p><strong>Key files:</strong></p>
+<ul>
+<li><code>frontend/.../AssessmentsPage.tsx</code> — question creation UI</li>
+<li><code>core/.../question_agent/graph/question_graph.py</code> — LangGraph workflow</li>
+<li><code>core/.../question_bank_service.py</code> — persistence</li>
+<li><code>core/.../routes/question_bank.py</code> — API including SSE draft stream</li>
+</ul>
+<hr>
+<h2>Frontend Architecture</h2>
+<p>![Frontend Feature Map](file:///Users/raghavsomasundaram/Downloads/CAP/CAP CodeBase/docs/images/cap-frontend-features.png)</p>
+<p>See also <a href="../frontend/docs/architecture.md"><code>frontend/docs/architecture.md</code></a> for folder conventions.</p>
+<h3>Route map (<code>frontend/src/app/routes.tsx</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Page</th>
+<th>Feature</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/recruiter/dashboard</code></td>
+<td>RecruitersPage</td>
+<td>Dashboard + analytics</td>
+</tr>
+<tr>
+<td><code>/recruiter/question-management</code></td>
+<td>QuestionManagementPage</td>
+<td>Question library</td>
+</tr>
+<tr>
+<td><code>/recruiter/question-management/new</code></td>
+<td>QuestionCreationFlowPage</td>
+<td>6-step question builder</td>
+</tr>
+<tr>
+<td><code>/recruiter/assessments</code></td>
+<td>RecruiterAssessmentsPage</td>
+<td>Assessment list + detail + test slots</td>
+</tr>
+<tr>
+<td><code>/recruiter/settings</code></td>
+<td>SettingsPage</td>
+<td>Notification preferences</td>
+</tr>
+<tr>
+<td><code>/candidate/invite/:token</code></td>
+<td>CandidateInvitePage</td>
+<td>Invite landing</td>
+</tr>
+<tr>
+<td><code>/candidate/portal</code></td>
+<td>CandidateAssessmentPage</td>
+<td>Live test (Monaco editor)</td>
+</tr>
+<tr>
+<td><code>/candidate/submitted</code></td>
+<td>CandidateSubmissionPage</td>
+<td>Post-submit confirmation</td>
+</tr>
+</tbody></table>
+<h3>Data flow pattern</h3>
+<p>Every feature follows the same pattern:</p>
+<pre><code class="language-text">Component  →  Hook (React Query)  →  Service (axios)  →  /api/core/...</code></pre><p>Example — assessments:</p>
+<pre><code class="language-text">RecruiterAssessmentsPage.tsx
+  → useAssessments.ts (useQuery / useMutation)
+  → assessmentService.ts
+  → coreApiClient.post("/assessments/...")</code></pre><h3>Feature folders</h3>
+<table>
+<thead>
+<tr>
+<th>Folder</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>features/auth/</code></td>
+<td>Firebase login, signup, protected routes, subscription gate</td>
+</tr>
+<tr>
+<td><code>features/recruiters/</code></td>
+<td>Dashboard, analytics</td>
+</tr>
+<tr>
+<td><code>features/assessments/</code></td>
+<td>Assessments, slots, candidates, scorecards, question builder</td>
+</tr>
+<tr>
+<td><code>features/candidatePortal/</code></td>
+<td>Candidate test experience</td>
+</tr>
+<tr>
+<td><code>features/notifications/</code></td>
+<td>Bell icon, SSE stream, preferences</td>
+</tr>
+<tr>
+<td><code>features/codeEvaluation/</code></td>
+<td>Scorecard fetch, evaluation dashboard API</td>
+</tr>
+<tr>
+<td><code>features/settings/</code></td>
+<td>Settings page shell</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Backend Folder Layout</h2>
+<p>Each Python service follows the same layered structure:</p>
+<pre><code class="language-text">service/
+├── src/
+│   ├── main.py                 # Uvicorn entry point
+│   ├── config/settings.py      # Environment config (pydantic-settings)
+│   ├── api/
+│   │   ├── rest/
+│   │   │   ├── app.py          # FastAPI factory
+│   │   │   ├── routes/         # HTTP endpoints
+│   │   │   └── dependencies.py # DI, auth deps
+│   │   └── middleware/         # CORS, logging, errors, metrics
+│   ├── core/
+│   │   ├── services/           # Business logic
+│   │   └── exceptions/         # Domain errors
+│   ├── schemas/                # Pydantic request/response models
+│   ├── data/
+│   │   ├── models/postgres/    # SQLAlchemy ORM (core + evaluation)
+│   │   ├── repositories/       # DB queries
+│   │   └── migrations/         # Alembic (core + evaluation only)
+│   ├── handlers/
+│   │   └── http_clients/       # Outbound HTTP adapters
+│   └── observability/          # Logging, tracing (LangSmith)
+├── pyproject.toml              # uv dependencies
+├── Dockerfile
+└── .env.example</code></pre><p>Core additionally has:</p>
+<ul>
+<li><code>src/control/agents/</code> — LangGraph AI workflows</li>
+<li><code>src/handlers/clients/redis_broker.py</code> — Redis pub/sub</li>
+</ul>
+<hr>
+<h2>API Surface Summary</h2>
+<h3>Core — Recruiter assessments (<code>/api/v1/assessments</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/assessments</code></td>
+<td>List assessments</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments</code></td>
+<td>Create assessment</td>
+</tr>
+<tr>
+<td>PATCH</td>
+<td><code>/assessments/{id}</code></td>
+<td>Update assessment</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/assessments/{id}</code></td>
+<td>Delete assessment</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/questions</code></td>
+<td>Assign questions</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/slots</code></td>
+<td>Create test slot</td>
+</tr>
+<tr>
+<td>PATCH</td>
+<td><code>/assessments/{id}/slots/{slot_id}</code></td>
+<td>Update slot</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/slots/{slot_id}/actions</code></td>
+<td>Pause / continue / close</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/slots</code></td>
+<td>List slots</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/slots/{slot_id}/candidates/import</code></td>
+<td>CSV import</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/slots/{slot_id}/candidates</code></td>
+<td>List slot candidates</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/evaluations/backfill</code></td>
+<td>Re-evaluate candidates</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/evaluations/dashboard</code></td>
+<td>Evaluation overview</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/candidates/{cid}/report</code></td>
+<td>Scorecard data</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/assessments/{id}/slots/{slot_id}/invites</code></td>
+<td>Send invites</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/slots/{slot_id}/monitoring</code></td>
+<td>Live monitoring</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/assessments/{id}/slots/{slot_id}/monitoring/stream</code></td>
+<td>SSE monitoring</td>
+</tr>
+</tbody></table>
+<h3>Core — Question bank (<code>/api/v1/question-bank</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET/POST</td>
+<td><code>/question-bank/questions</code></td>
+<td>List / create questions</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/question-bank/questions/ai-draft</code></td>
+<td>Start AI generation</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/question-bank/questions/ai-draft/stream</code></td>
+<td>SSE generation progress</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/question-bank/questions/validate-draft</code></td>
+<td>Validate unsaved draft</td>
+</tr>
+</tbody></table>
+<h3>Core — Candidate portal (<code>/api/v1/candidate</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/candidate/verify-invite</code></td>
+<td>Validate invite token</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/candidate/start</code></td>
+<td>Start session</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/candidate/assessment</code></td>
+<td>Load test state</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/candidate/run-sample</code></td>
+<td>Run visible test cases</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/candidate/save-draft</code></td>
+<td>Autosave code</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/candidate/submit</code></td>
+<td>Final submission</td>
+</tr>
+</tbody></table>
+<h3>Core — Notifications (<code>/api/v1/notifications</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/notifications</code></td>
+<td>List inbox</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/notifications/unread-count</code></td>
+<td>Badge count</td>
+</tr>
+<tr>
+<td>PATCH</td>
+<td><code>/notifications/{id}/read</code></td>
+<td>Mark read</td>
+</tr>
+<tr>
+<td>GET/PUT</td>
+<td><code>/notifications/settings</code></td>
+<td>Preferences</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/notifications/stream</code></td>
+<td>SSE push stream</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Infrastructure &amp; Local Dev</h2>
+<h3>Start everything</h3>
+<pre><code class="language-bash">cp .env.example .env
+# Copy each service .env.example → .env
+docker compose up --build</code></pre><p>Open <code>http://localhost:5173</code> for the frontend.</p>
+<h3>What starts in Docker Compose</h3>
+<ol>
+<li><strong>postgres</strong> + <strong>redis</strong> — infrastructure</li>
+<li><strong>core-assessment-migrate</strong> + <strong>evaluation-migrate</strong> — one-shot Alembic upgrades</li>
+<li><strong>judge0-server</strong> + <strong>judge0-worker</strong> — code sandbox (uses Redis queue)</li>
+<li><strong>code-execution-service</strong>, <strong>code-evaluation-service</strong>, <strong>core-assessment-platform-service</strong>, <strong>api-gateway-service</strong></li>
+<li><strong>frontend</strong> — Nginx serving built React app, proxying <code>/api</code> to gateway</li>
+</ol>
+<h3>Redis usage</h3>
+<table>
+<thead>
+<tr>
+<th>Consumer</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Judge0 worker</td>
+<td>Job queue for compile/run</td>
+</tr>
+<tr>
+<td>Core notification broker</td>
+<td>Pub/sub channel <code>notifications:{recruiter_uid}</code> for SSE</td>
+</tr>
+<tr>
+<td>Celery env vars</td>
+<td>Defined in compose but <strong>not used</strong> by application code today</td>
+</tr>
+</tbody></table>
+<h3>Evaluation worker</h3>
+<p><code>code-evaluation-service/src/worker.py</code> polls Postgres with <code>SELECT … FOR UPDATE SKIP LOCKED</code> for pending jobs. This is a safety net when inline processing fails — not a Celery worker.</p>
+<hr>
+<h2>Where to Start Reading Code</h2>
+<p>Pick the feature you care about and read in this order: <strong>route → service → repository/model → frontend hook → component</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Start here</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Overall request routing</strong></td>
+<td><code>api-gateway-service/src/api/rest/routes/proxy.py</code></td>
+</tr>
+<tr>
+<td><strong>Recruiter auth</strong></td>
+<td><code>gateway_auth_service.py</code> → <code>core/.../firebase_auth_service.py</code> → <code>frontend/features/auth/</code></td>
+</tr>
+<tr>
+<td><strong>Create assessment + slot</strong></td>
+<td><code>assessments.py</code> → <code>assessment_service.py</code> → <code>RecruiterAssessmentsPage.tsx</code></td>
+</tr>
+<tr>
+<td><strong>Candidate takes test</strong></td>
+<td><code>candidate_portal.py</code> → <code>assessment_service.py</code> → <code>CandidateAssessmentPage.tsx</code></td>
+</tr>
+<tr>
+<td><strong>Run code (sample tests)</strong></td>
+<td><code>executions.py</code> → <code>code_execution_service.py</code> → Judge0 client</td>
+</tr>
+<tr>
+<td><strong>Submit + evaluate</strong></td>
+<td><code>assessment_service.submit_assessment()</code> → <code>evaluation_service.create_job()</code></td>
+</tr>
+<tr>
+<td><strong>Scorecard / PDF</strong></td>
+<td><code>evaluations.py</code> → <code>evaluation_service.py</code> → <code>RecruiterScorecardPreview.tsx</code></td>
+</tr>
+<tr>
+<td><strong>Evaluate Previous</strong></td>
+<td><code>TestResultsTab.tsx</code> → <code>backfill_evaluations()</code> → <code>create_job(force=True)</code></td>
+</tr>
+<tr>
+<td><strong>Notifications</strong></td>
+<td><code>notification_service.py</code> → <code>notifications.py</code> → <code>useNotificationStream.ts</code></td>
+</tr>
+<tr>
+<td><strong>AI question generation</strong></td>
+<td><code>question_bank.py</code> → <code>question_graph.py</code> → <code>AssessmentsPage.tsx</code></td>
+</tr>
+<tr>
+<td><strong>Live slot monitoring</strong></td>
+<td><code>assessments.py</code> monitoring stream → <code>useSlotMonitoring</code> hook</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Related Documentation</h2>
+<table>
+<thead>
+<tr>
+<th>Document</th>
+<th>Location</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Root README (local start, quality gates)</td>
+<td><a href="../README.md"><code>README.md</code></a></td>
+</tr>
+<tr>
+<td>Frontend folder conventions</td>
+<td><a href="../frontend/docs/architecture.md"><code>frontend/docs/architecture.md</code></a></td>
+</tr>
+<tr>
+<td>Question AI flow requirements</td>
+<td><a href="../core-assessment-platform-service/docs/question-creation-ai-flow.md"><code>core-assessment-platform-service/docs/question-creation-ai-flow.md</code></a></td>
+</tr>
+<tr>
+<td>Gateway API notes</td>
+<td><a href="../api-gateway-service/docs/api/gateway.md"><code>api-gateway-service/docs/api/gateway.md</code></a></td>
+</tr>
+<tr>
+<td>Code execution API</td>
+<td><a href="../code-execution-service/docs/api/code-execution.md"><code>code-execution-service/docs/api/code-execution.md</code></a></td>
+</tr>
+<tr>
+<td>Load testing</td>
+<td><a href="load-testing.md"><code>docs/load-testing.md</code></a></td>
+</tr>
+<tr>
+<td>COE readiness checklist</td>
+<td><a href="coe-readiness.md"><code>docs/coe-readiness.md</code></a></td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Quick Reference — Ports</h2>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>Local URL</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Frontend</td>
+<td><a href="http://localhost:5173">http://localhost:5173</a></td>
+</tr>
+<tr>
+<td>API Gateway</td>
+<td><a href="http://localhost:8001/api/v1/health">http://localhost:8001/api/v1/health</a></td>
+</tr>
+<tr>
+<td>Core Platform</td>
+<td><a href="http://localhost:8002/api/v1/health">http://localhost:8002/api/v1/health</a> (internal)</td>
+</tr>
+<tr>
+<td>Code Execution</td>
+<td><a href="http://localhost:8003/api/v1/health">http://localhost:8003/api/v1/health</a> (internal)</td>
+</tr>
+<tr>
+<td>Code Evaluation</td>
+<td><a href="http://localhost:8004/api/v1/health">http://localhost:8004/api/v1/health</a> (internal)</td>
+</tr>
+<tr>
+<td>PostgreSQL</td>
+<td>localhost:55432</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>localhost:6379</td>
+</tr>
+</tbody></table>
+<hr>
+<p><em>Last updated: July 2026. For questions about a specific file or flow, ask in chat and reference the section above.</em></p>
+</main>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "base",
+        themeVariables: {
+          primaryColor: "#dbeafe",
+          primaryTextColor: "#0f172a",
+          primaryBorderColor: "#2563eb",
+          lineColor: "#475569",
+          secondaryColor: "#ecfdf5",
+          tertiaryColor: "#fef3c7",
+          fontFamily: "Segoe UI, Helvetica Neue, Arial, sans-serif",
+        },
+        flowchart: { htmlLabels: true, curve: "basis" },
+        sequence: { actorMargin: 40, messageMargin: 30 },
+      });
+      await mermaid.run({ querySelector: ".mermaid" });
+    </script>
+  </body>
+</html>
