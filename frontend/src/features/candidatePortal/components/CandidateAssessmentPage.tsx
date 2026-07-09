@@ -5,9 +5,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  GripHorizontal,
   Clock3,
   Code2,
+  LoaderCircle,
   Play,
   Save,
   Send,
@@ -15,8 +15,6 @@ import {
   XCircle,
 } from "lucide-react";
 import {
-  type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -62,6 +60,13 @@ const FULLSCREEN_EXIT_MESSAGE =
   "Assessment closed because strict fullscreen mode was exited.";
 const HIDDEN_CHECK_COOLDOWN_SECONDS = 5;
 const TEST_RESULT_REVEAL_INTERVAL_MS = 100;
+const CANDIDATE_ANSWER_VALIDATION_LABELS = {
+  exact: "Exact output",
+  unordered: "Order flexible",
+  floating: "Numeric tolerance",
+  multiple_valid: "Multiple answers",
+  constructive: "Any valid construction",
+} as const;
 
 interface RunResultCase {
   index: number;
@@ -198,7 +203,6 @@ export function CandidateAssessmentPage() {
   const [tabSwitchWarnings, setTabSwitchWarnings] = useState(0);
   const [proctorMessage, setProctorMessage] = useState("");
   const [resultsExpanded, setResultsExpanded] = useState(false);
-  const [resultsDrawerHeight, setResultsDrawerHeight] = useState(260);
   const [submittedQuestionIds, setSubmittedQuestionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -212,12 +216,13 @@ export function CandidateAssessmentPage() {
   const submitOnceRef = useRef(false);
   const fullscreenAttemptedRef = useRef(false);
   const hasEnteredFullscreenRef = useRef(false);
+  const tabSwitchCountRef = useRef(0);
+  const clipboardCountRef = useRef(0);
+  const fullscreenExitCountRef = useRef(0);
+  const questionTimeSpentRef = useRef<Record<string, number>>({});
+  const evidenceAssignmentRef = useRef("");
   const hasReceivedPositiveTimerRef = useRef(false);
   const latestDraftsRef = useRef<Record<string, DraftState>>({});
-  const resultsResizeRef = useRef({
-    startY: 0,
-    startHeight: 260,
-  });
   const timerSyncRef = useRef({
     serverRemainingSeconds: 0,
     syncedAtMs: Date.now(),
@@ -231,6 +236,7 @@ export function CandidateAssessmentPage() {
   });
 
   latestDraftsRef.current = drafts;
+  questionTimeSpentRef.current = questionTimeSpentSeconds;
 
   useEffect(() => {
     if (!sessionToken) {
@@ -281,20 +287,33 @@ export function CandidateAssessmentPage() {
   }, [assessmentQuery.data, selectedQuestionId]);
 
   useEffect(() => {
-    const assessmentId = assessmentQuery.data?.candidate_assessment_id;
-    if (!assessmentId) {
+    const assessment = assessmentQuery.data;
+    const assessmentId = assessment?.candidate_assessment_id;
+    if (!assessmentId || evidenceAssignmentRef.current === assessmentId) {
       return;
     }
+    evidenceAssignmentRef.current = assessmentId;
+    tabSwitchCountRef.current = assessment.tab_switch_count || 0;
+    clipboardCountRef.current = assessment.copy_paste_count || 0;
+    fullscreenExitCountRef.current = assessment.fullscreen_exit_count || 0;
+    setTabSwitchWarnings(Math.min(assessment.tab_switch_count || 0, TAB_SWITCH_LIMIT));
     const storageKey = `candidate-question-time-${assessmentId}`;
+    let storedTimes: Record<string, number> = {};
     try {
       const stored = window.sessionStorage.getItem(storageKey);
       if (stored) {
-        setQuestionTimeSpentSeconds(JSON.parse(stored) as Record<string, number>);
+        storedTimes = JSON.parse(stored) as Record<string, number>;
       }
     } catch {
-      setQuestionTimeSpentSeconds({});
+      storedTimes = {};
     }
-  }, [assessmentQuery.data?.candidate_assessment_id]);
+    const mergedTimes = { ...assessment.question_time_seconds };
+    Object.entries(storedTimes).forEach(([questionId, seconds]) => {
+      mergedTimes[questionId] = Math.max(mergedTimes[questionId] || 0, seconds);
+    });
+    questionTimeSpentRef.current = mergedTimes;
+    setQuestionTimeSpentSeconds(mergedTimes);
+  }, [assessmentQuery.data]);
 
   const selectedQuestion = useMemo(
     () =>
@@ -359,15 +378,6 @@ export function CandidateAssessmentPage() {
           : [];
       const samplePassed = currentSampleCases.filter((item) => item.passed).length;
       const sampleTotal = currentSampleCases.length;
-      const answerSignal = !sourceCode.trim()
-        ? 0
-        : isSubmitted
-          ? sampleTotal
-            ? Math.min(100, 70 + Math.round((samplePassed / sampleTotal) * 30))
-            : 82
-          : sampleTotal
-            ? Math.min(88, 45 + Math.round((samplePassed / sampleTotal) * 35))
-            : Math.min(75, 35 + Math.min(lineCount, 40));
 
       return {
         question,
@@ -385,7 +395,6 @@ export function CandidateAssessmentPage() {
         submittedAt: serverDraft?.submitted_at || null,
         samplePassed,
         sampleTotal,
-        answerSignal,
       };
     }) || [];
   const mandatoryUnansweredCount = questionSubmissionSummary.filter(
@@ -438,6 +447,10 @@ export function CandidateAssessmentPage() {
         source_code: sourceCode,
         language,
         current_question_order: currentQuestionOrder,
+        tab_switch_count: tabSwitchCountRef.current,
+        copy_paste_count: clipboardCountRef.current,
+        fullscreen_exit_count: fullscreenExitCountRef.current,
+        question_time_seconds: questionTimeSpentRef.current,
       }),
     onSuccess: (data) => {
       setLastSavedAt(data.saved_at);
@@ -473,7 +486,11 @@ export function CandidateAssessmentPage() {
           status: item.status,
           executionTime: item.execution_time,
           detail:
-            item.actual_output || item.stderr || item.compile_output || item.message,
+            item.actual_output ||
+            item.stderr ||
+            item.compile_output ||
+            item.checker_message ||
+            item.message,
           expectedOutput: item.expected_output,
           actualOutput: item.actual_output,
           errorType: item.passed ? "" : item.status || "Execution failed",
@@ -554,6 +571,10 @@ export function CandidateAssessmentPage() {
         auto_submit: auto,
         submission_tag: submissionTag || "",
         submission_message: submissionMessage || "",
+        tab_switch_count: tabSwitchCountRef.current,
+        copy_paste_count: clipboardCountRef.current,
+        fullscreen_exit_count: fullscreenExitCountRef.current,
+        question_time_seconds: questionTimeSpentRef.current,
       });
       return {
         ...response,
@@ -624,30 +645,6 @@ export function CandidateAssessmentPage() {
     setRunResult(null);
     setResultsExpanded(false);
     setSelectedQuestionId(questionId);
-  }
-
-  function beginResultsResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    setResultsExpanded(true);
-    resultsResizeRef.current = {
-      startY: event.clientY,
-      startHeight: resultsDrawerHeight,
-    };
-
-    function handlePointerMove(pointerEvent: PointerEvent) {
-      const delta = resultsResizeRef.current.startY - pointerEvent.clientY;
-      setResultsDrawerHeight(
-        Math.max(150, Math.min(440, resultsResizeRef.current.startHeight + delta)),
-      );
-    }
-
-    function handlePointerUp() {
-      document.removeEventListener("pointermove", handlePointerMove);
-      document.removeEventListener("pointerup", handlePointerUp);
-    }
-
-    document.addEventListener("pointermove", handlePointerMove);
-    document.addEventListener("pointerup", handlePointerUp);
   }
 
   function requestFinalSubmit() {
@@ -766,6 +763,7 @@ export function CandidateAssessmentPage() {
         return;
       }
       if (hasEnteredFullscreenRef.current) {
+        fullscreenExitCountRef.current += 1;
         submitAutomatically(FULLSCREEN_EXIT_TAG, FULLSCREEN_EXIT_MESSAGE);
       } else {
         setFullscreenPromptVisible(true);
@@ -836,8 +834,12 @@ export function CandidateAssessmentPage() {
       if (submitOnceRef.current) {
         return;
       }
-      setTabSwitchWarnings((current) => {
-        const next = Math.min(current + 1, TAB_SWITCH_LIMIT);
+      tabSwitchCountRef.current = Math.min(
+        tabSwitchCountRef.current + 1,
+        TAB_SWITCH_LIMIT,
+      );
+      setTabSwitchWarnings(() => {
+        const next = tabSwitchCountRef.current;
         if (next >= TAB_SWITCH_LIMIT) {
           submitAutomatically(TAB_SWITCH_TAG, TAB_SWITCH_MESSAGE);
           return next;
@@ -872,6 +874,7 @@ export function CandidateAssessmentPage() {
     }
 
     function handleClipboard(event: ClipboardEvent) {
+      clipboardCountRef.current += 1;
       if (mode === "strict") {
         event.preventDefault();
       }
@@ -923,6 +926,14 @@ export function CandidateAssessmentPage() {
     (assessment.proctoring_mode === "none"
       ? "No proctoring warnings are active."
       : `${tabSwitchWarnings}/${TAB_SWITCH_LIMIT} tab-switch warnings recorded. The assessment auto-submits at ${TAB_SWITCH_LIMIT}.`);
+  const isTestRunning = sampleMutation.isPending || hiddenCheckMutation.isPending;
+  const resultTone = isTestRunning
+    ? "is-running"
+    : runResult?.cases.length
+      ? runResult.cases.every((testCase) => testCase.passed)
+        ? "is-passed"
+        : "is-failed"
+      : "is-idle";
 
   return (
     <main className="candidate-portal candidate-portal-pro">
@@ -1063,7 +1074,26 @@ export function CandidateAssessmentPage() {
                   </span>
                   <h1>{selectedQuestion.title}</h1>
                 </div>
-                {selectedQuestion.is_mandatory ? <span className="status-badge status-info">mandatory</span> : null}
+                <div className="candidate-problem-badges">
+                  <span
+                    className={`candidate-answer-checker ${
+                      selectedQuestion.answer_validation_mode !== "exact"
+                        ? "is-highlighted"
+                        : ""
+                    }`}
+                    title={selectedQuestion.output_checker_explanation}
+                  >
+                    <CheckCircle2 size={14} aria-hidden="true" />
+                    {
+                      CANDIDATE_ANSWER_VALIDATION_LABELS[
+                        selectedQuestion.answer_validation_mode
+                      ]
+                    }
+                  </span>
+                  {selectedQuestion.is_mandatory ? (
+                    <span className="status-badge status-info">mandatory</span>
+                  ) : null}
+                </div>
               </div>
 
               <section className="candidate-problem-section">
@@ -1181,79 +1211,90 @@ export function CandidateAssessmentPage() {
               />
             </div>
 
-            <div className="assessment-actions-row candidate-action-row">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={saveSelectedQuestion}
-                disabled={checkpointMutation.isPending}
-              >
-                <Save size={16} aria-hidden="true" />
-                {checkpointMutation.isPending ? "Saving..." : "Save Progress"}
-              </Button>
-              <Button
-                type="button"
-                disabled={isActionBusy || !selectedDraft.source_code.trim()}
-                onClick={() =>
-                  void sampleMutation.mutateAsync({
-                    questionId: selectedQuestion.id,
-                    sourceCode: selectedDraft.source_code,
-                    language: selectedDraft.language,
-                  })
-                }
-              >
-                <Play size={16} aria-hidden="true" />
-                {sampleMutation.isPending ? "Running..." : "Run Test"}
-              </Button>
-              <Button
-                type="button"
-                disabled={
-                  isActionBusy ||
-                  hiddenCheckCooldownSeconds > 0 ||
-                  !selectedDraft.source_code.trim()
-                }
-                onClick={() => void submitSelectedQuestion()}
-              >
-                <CheckCircle2 size={16} aria-hidden="true" />
-                {hiddenCheckMutation.isPending
-                  ? "Evaluating hidden tests..."
-                  : checkpointMutation.isPending
-                    ? "Saving..."
-                    : hiddenCheckCooldownSeconds > 0
-                      ? `Submit again in ${hiddenCheckCooldownSeconds}s`
-                      : "Submit Question"}
-              </Button>
-              {isSelectedQuestionSubmitted && nextQuestion ? (
+            <div
+              className="assessment-actions-row candidate-action-row"
+              role="toolbar"
+              aria-label="Code actions"
+            >
+              <div className="candidate-action-context" aria-live="polite">
+                <span className={`candidate-action-state ${isActionBusy ? "is-busy" : ""}`}>
+                  {isActionBusy ? (
+                    <LoaderCircle size={15} aria-hidden="true" />
+                  ) : (
+                    <Code2 size={15} aria-hidden="true" />
+                  )}
+                  {sampleMutation.isPending
+                    ? "Running sample tests"
+                    : hiddenCheckMutation.isPending
+                      ? "Checking hidden tests"
+                      : checkpointMutation.isPending
+                        ? "Saving solution"
+                        : "Editor ready"}
+                </span>
+                <small>Run before submitting to verify sample cases.</small>
+              </div>
+              <div className="candidate-action-buttons">
                 <Button
                   type="button"
-                  className="candidate-next-question"
-                  onClick={() => moveToQuestion(nextQuestion.id)}
+                  variant="secondary"
+                  onClick={saveSelectedQuestion}
+                  disabled={checkpointMutation.isPending}
                 >
-                  Move to next question
-                  <ChevronRight size={16} aria-hidden="true" />
+                  <Save size={16} aria-hidden="true" />
+                  {checkpointMutation.isPending ? "Saving..." : "Save Progress"}
                 </Button>
-              ) : null}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={isActionBusy || !selectedDraft.source_code.trim()}
+                  onClick={() =>
+                    void sampleMutation.mutateAsync({
+                      questionId: selectedQuestion.id,
+                      sourceCode: selectedDraft.source_code,
+                      language: selectedDraft.language,
+                    })
+                  }
+                >
+                  <Play size={16} aria-hidden="true" />
+                  {sampleMutation.isPending ? "Running..." : "Run Test"}
+                </Button>
+                <Button
+                  type="button"
+                  className="candidate-submit-question"
+                  disabled={
+                    isActionBusy ||
+                    hiddenCheckCooldownSeconds > 0 ||
+                    !selectedDraft.source_code.trim()
+                  }
+                  onClick={() => void submitSelectedQuestion()}
+                >
+                  <CheckCircle2 size={16} aria-hidden="true" />
+                  {hiddenCheckMutation.isPending
+                    ? "Evaluating..."
+                    : checkpointMutation.isPending
+                      ? "Saving..."
+                      : hiddenCheckCooldownSeconds > 0
+                        ? `Submit again in ${hiddenCheckCooldownSeconds}s`
+                        : "Submit Question"}
+                </Button>
+                {isSelectedQuestionSubmitted && nextQuestion ? (
+                  <Button
+                    type="button"
+                    className="candidate-next-question"
+                    onClick={() => moveToQuestion(nextQuestion.id)}
+                  >
+                    Move to next question
+                    <ChevronRight size={16} aria-hidden="true" />
+                  </Button>
+                ) : null}
+              </div>
             </div>
 
             <section
-              className={`candidate-results-drawer ${
-                resultsExpanded ? "is-expanded" : ""
-              }`}
-              style={
-                {
-                  "--candidate-results-height": `${resultsDrawerHeight}px`,
-                } as CSSProperties
-              }
+              className={`candidate-results-drawer ${resultsExpanded ? "is-expanded" : ""} ${resultTone}`}
+              aria-label="Test case results"
             >
               <div className="candidate-results-handle">
-                <button
-                  type="button"
-                  className="candidate-results-grip"
-                  aria-label="Drag to resize testcase results"
-                  onPointerDown={beginResultsResize}
-                >
-                  <GripHorizontal size={20} aria-hidden="true" />
-                </button>
                 <button
                   type="button"
                   className="candidate-results-toggle"
@@ -1261,6 +1302,7 @@ export function CandidateAssessmentPage() {
                   onClick={() => setResultsExpanded((current) => !current)}
                 >
                   <span>
+                    <i className="candidate-results-indicator" aria-hidden="true" />
                     Testcase Results
                     {runResult ? <small>{runResult.summary}</small> : null}
                   </span>
@@ -1402,15 +1444,8 @@ export function CandidateAssessmentPage() {
               ) : null}
               <div className="candidate-final-question-summary">
                 <div className="candidate-final-summary-heading">
-                  <div>
-                    <span className="candidate-kicker">Question Review</span>
-                    <h3>Your answers before final submission</h3>
-                  </div>
-                  <p>
-                    The understanding signal is an answer-completion estimate from
-                    code presence, saved/submitted state, and visible sample test
-                    results.
-                  </p>
+                  <span className="candidate-kicker">Question Review</span>
+                  <h3>Your answers before final submission</h3>
                 </div>
                 {questionSubmissionSummary.map((item) => (
                   <article key={item.question.id} className="candidate-final-question-card">
@@ -1454,12 +1489,6 @@ export function CandidateAssessmentPage() {
                             : "Not saved yet"}
                       </span>
                     </div>
-                    <div className="candidate-understanding-meter">
-                      <div>
-                        <span style={{ width: `${item.answerSignal}%` }} />
-                      </div>
-                      <strong>{item.answerSignal}% answer signal</strong>
-                    </div>
                     <pre className="candidate-final-code-preview">
                       {item.sourceCode.trim() || "No code answered for this question."}
                     </pre>
@@ -1483,7 +1512,7 @@ export function CandidateAssessmentPage() {
                   variant="secondary"
                   onClick={() => setShowSubmitAssessmentDialog(false)}
                 >
-                  Continue Test
+                  Continue Test Slot
                 </Button>
                 <Button
                   type="button"

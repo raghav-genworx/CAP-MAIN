@@ -70,7 +70,7 @@ function CandidatePipelineCard({
       <div className="dashboard-analytics-heading">
         <div>
           <p className="dashboard-eyebrow">Candidate pipeline</p>
-          <h2>Test candidate progress</h2>
+          <h2>Test slot candidate progress</h2>
         </div>
         <strong>{submittedCount}/{candidateCount}</strong>
       </div>
@@ -106,7 +106,7 @@ function CandidatePipelineCard({
           </div>
         </>
       ) : (
-        <p className="empty-state">Add candidates to see their test progress here.</p>
+        <p className="empty-state">Add candidates to see their test slot progress here.</p>
       )}
     </Card>
   );
@@ -114,6 +114,7 @@ function CandidatePipelineCard({
 
 export function CandidatesTab({
   slot,
+  passingScore,
   candidateCsv,
   candidates,
   importPending,
@@ -128,6 +129,7 @@ export function CandidatesTab({
   onResend,
 }: {
   slot: AssessmentSlot;
+  passingScore: number;
   candidateCsv: string;
   candidates: SlotCandidate[];
   importPending: boolean;
@@ -217,58 +219,12 @@ export function CandidatesTab({
         .filter(Boolean)
         .join(" ")}
     >
-      <CandidatePipelineCard candidates={candidates} />
-
-      <Card className="assessment-panel candidates-list-card">
-        <div className="panel-heading candidates-list-heading">
-          <div>
-            <span>Candidate List</span>
-            <h2>{candidates.length} candidates</h2>
-            <p>Select rows when you want to send invites to only a few people.</p>
-          </div>
-          <Button
-            type="button"
-            onClick={() => setShowCandidateEntry(true)}
-            disabled={showCandidateEntry}
-          >
-            Add Candidate
-          </Button>
-        </div>
-        <div className="candidate-invite-actions">
-          <Button
-            type="button"
-            disabled={invitePending || candidates.length === 0}
-            onClick={() => onSendInvites()}
-          >
-            {invitePending ? "Sending invites..." : "Send invites"}
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={invitePending || selectedIds.length === 0}
-            onClick={() => onSendInvites(selectedIds)}
-          >
-            Send selected ({selectedIds.length})
-          </Button>
-        </div>
-        <CandidateTable
-          candidates={candidates}
-          resendPendingId={resendPendingId}
-          selectedCandidateIds={selectedCandidateIds}
-          allSelected={allSelected}
-          onToggleAll={toggleAllCandidates}
-          onToggleCandidate={toggleCandidateSelection}
-          onResend={onResend}
-        />
-      </Card>
-
       {showCandidateEntry ? (
-        <Card className="assessment-panel candidate-import-card action-drawer-card">
+        <Card className="assessment-panel candidate-import-card candidate-import-popup">
           <div className="panel-heading">
             <div>
               <span>Candidate Setup</span>
               <h2>Add candidates</h2>
-              <p>Add an individual candidate first, or use group upload for batches.</p>
             </div>
             <div className="assessment-row-actions">
               <StatusBadge value={slot.status} />
@@ -423,12 +379,56 @@ export function CandidatesTab({
           ) : null}
         </Card>
       ) : null}
+
+      <Card className="assessment-panel candidates-list-card">
+        <div className="panel-heading candidates-list-heading">
+          <div>
+            <span>Candidate List</span>
+            <h2>{candidates.length} candidates</h2>
+          </div>
+          <Button
+            type="button"
+            onClick={() => setShowCandidateEntry(true)}
+            disabled={showCandidateEntry}
+          >
+            Add Candidate
+          </Button>
+        </div>
+        <div className="candidate-invite-actions">
+          <Button
+            type="button"
+            disabled={invitePending || candidates.length === 0}
+            onClick={() => onSendInvites()}
+          >
+            {invitePending ? "Sending invites..." : "Send invites"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={invitePending || selectedIds.length === 0}
+            onClick={() => onSendInvites(selectedIds)}
+          >
+            Send selected ({selectedIds.length})
+          </Button>
+        </div>
+        <CandidateTable
+          candidates={candidates}
+          passingScore={passingScore}
+          resendPendingId={resendPendingId}
+          selectedCandidateIds={selectedCandidateIds}
+          allSelected={allSelected}
+          onToggleAll={toggleAllCandidates}
+          onToggleCandidate={toggleCandidateSelection}
+          onResend={onResend}
+        />
+      </Card>
     </section>
   );
 }
 
 function CandidateTable({
   candidates,
+  passingScore,
   resendPendingId,
   selectedCandidateIds,
   allSelected,
@@ -437,6 +437,7 @@ function CandidateTable({
   onResend,
 }: {
   candidates: SlotCandidate[];
+  passingScore: number;
   resendPendingId: string | null;
   selectedCandidateIds: Set<string>;
   allSelected: boolean;
@@ -445,7 +446,7 @@ function CandidateTable({
   onResend: (candidateAssessmentId: string) => void;
 }) {
   if (!candidates.length) {
-    return <EmptyState label="Imported candidates for this test will appear here." />;
+    return <EmptyState label="Imported candidates for this test slot will appear here." />;
   }
 
   return (
@@ -469,65 +470,75 @@ function CandidateTable({
           </tr>
         </thead>
         <tbody>
-          {candidates.map((candidate) => (
-            <tr key={candidate.candidate_assessment_id}>
-              <td className="candidate-select-cell">
-                <input
-                  type="checkbox"
-                  aria-label={`Select ${candidate.name}`}
-                  checked={selectedCandidateIds.has(
-                    candidate.candidate_assessment_id,
-                  )}
-                  onChange={(event) =>
-                    onToggleCandidate(
+          {candidates.map((candidate) => {
+            const resultStatus = candidate.percentage === null
+              ? null
+              : candidate.percentage >= passingScore
+                ? "passed"
+                : "failed";
+            return (
+              <tr key={candidate.candidate_assessment_id}>
+                <td className="candidate-select-cell">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${candidate.name}`}
+                    checked={selectedCandidateIds.has(
                       candidate.candidate_assessment_id,
-                      event.target.checked,
-                    )
-                  }
-                />
-              </td>
-              <td>
-                <div className="assessment-name-cell">
-                  <strong>{candidate.name}</strong>
-                  <span>{candidate.email}</span>
-                </div>
-              </td>
-              <td>
-                <StatusBadge value={candidate.invite_status} />
-              </td>
-              <td>
-                <div className="status-with-dot">
-                  <HealthDot status={candidate.assessment_status} />
-                  <StatusBadge value={candidate.assessment_status} />
-                </div>
-              </td>
-              <td>{formatDateTime(candidate.last_activity_at)}</td>
-              <td>
-                {(() => {
-                  const canResend =
-                    candidate.invite_status === "sent" ||
-                    candidate.invite_status === "failed";
-                  const isSending =
-                    resendPendingId === candidate.candidate_assessment_id;
-                  return (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      disabled={isSending || !canResend}
-                      title={
-                        canResend
-                          ? "Send this invite again"
-                          : "Resend is available after the first send attempt."
-                      }
-                      onClick={() => onResend(candidate.candidate_assessment_id)}
-                    >
-                      {isSending ? "Sending..." : "Resend"}
-                    </Button>
-                  );
-                })()}
-              </td>
-            </tr>
-          ))}
+                    )}
+                    onChange={(event) =>
+                      onToggleCandidate(
+                        candidate.candidate_assessment_id,
+                        event.target.checked,
+                      )
+                    }
+                  />
+                </td>
+                <td>
+                  <div className="assessment-name-cell">
+                    <strong>{candidate.name}</strong>
+                    <span>{candidate.email}</span>
+                  </div>
+                </td>
+                <td>
+                  <StatusBadge value={candidate.invite_status} />
+                </td>
+                <td>
+                  <div className="status-with-dot">
+                    <HealthDot status={resultStatus ?? candidate.assessment_status} />
+                    <StatusBadge value={resultStatus ?? candidate.assessment_status} />
+                    {candidate.percentage !== null ? (
+                      <small>{Math.round(candidate.percentage)}%</small>
+                    ) : null}
+                  </div>
+                </td>
+                <td>{formatDateTime(candidate.last_activity_at)}</td>
+                <td>
+                  {(() => {
+                    const canResend =
+                      candidate.invite_status === "sent" ||
+                      candidate.invite_status === "failed";
+                    const isSending =
+                      resendPendingId === candidate.candidate_assessment_id;
+                    return (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={isSending || !canResend}
+                        title={
+                          canResend
+                            ? "Send this invite again"
+                            : "Resend is available after the first send attempt."
+                        }
+                        onClick={() => onResend(candidate.candidate_assessment_id)}
+                      >
+                        {isSending ? "Sending..." : "Resend"}
+                      </Button>
+                    );
+                  })()}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -535,10 +546,12 @@ function CandidateTable({
 }
 
 export function LiveMonitoringTab({
+  candidates,
   items,
   loading,
   liveSummary,
 }: {
+  candidates: SlotCandidate[];
   items: MonitoringCandidate[];
   loading: boolean;
   liveSummary?: {
@@ -559,7 +572,10 @@ export function LiveMonitoringTab({
   );
 
   return (
-    <Card className="assessment-panel assessment-panel-wide">
+    <section className="assessment-console live-monitoring-console">
+      <CandidatePipelineCard candidates={candidates} />
+
+      <Card className="assessment-panel assessment-panel-wide">
       <div className="panel-heading">
         <div>
           <span>Live Monitoring</span>
@@ -572,7 +588,7 @@ export function LiveMonitoringTab({
         <div className="live-monitoring-bar" role="status" aria-live="polite">
           <div className="live-monitoring-pulse">
             <span />
-            <strong>Live test running</strong>
+            <strong>Live test slot running</strong>
           </div>
           <div className="live-monitoring-copy">
             <strong>{liveSummary.statusLabel}</strong>
@@ -647,6 +663,7 @@ export function LiveMonitoringTab({
       {!loading && !items.length ? (
         <EmptyState label="Live activity appears after candidates open their invite links." />
       ) : null}
-    </Card>
+      </Card>
+    </section>
   );
 }

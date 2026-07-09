@@ -1,8 +1,22 @@
 import { useEffect, useState } from "react";
-import { BadgeCheck, BarChart3, Gauge, Settings } from "lucide-react";
+import {
+  AlertTriangle,
+  BadgeCheck,
+  BarChart3,
+  CalendarClock,
+  Clock3,
+  Gauge,
+  Pause,
+  Play,
+  Settings,
+  Timer,
+  X,
+  XCircle,
+} from "lucide-react";
 
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
+import { ScheduleDateTimePicker } from "../../../components/ui/ScheduleDateTimePicker";
 import type {
   Assessment,
   AssessmentSlot,
@@ -13,10 +27,12 @@ import type {
   SlotCandidate,
 } from "../types/Assessment";
 import {
-  addMinutesToLocalInput,
+  clampLocalInputToMinimum,
   errorMessage,
   formatCountdown,
   formatDateTime,
+  getSlotScheduleFieldErrors,
+  minimumSlotEndInput,
   nextAvailableTimeInput,
   TIME_ZONE_OPTIONS,
   timezoneOffsetMinutesForLocalDateTime,
@@ -31,6 +47,8 @@ import { HealthDot, StatusBadge } from "./AssessmentStatusPrimitives";
 import { TestResultsTab } from "./TestResultsTab";
 
 export type TestTab = "candidates" | "live" | "results";
+
+const EXTEND_MINUTE_PRESETS = [15, 30, 60];
 
 export function TestDetailView({
   assessment,
@@ -97,6 +115,12 @@ export function TestDetailView({
 }) {
   const [isManagingTest, setIsManagingTest] = useState(false);
   const [showTestSettings, setShowTestSettings] = useState(false);
+  const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  const [slotFieldErrors, setSlotFieldErrors] = useState({
+    start_at: "",
+    end_at: "",
+    general: "",
+  });
   const [pendingTestAction, setPendingTestAction] =
     useState<AssessmentSlotActionPayload | null>(null);
   const [testResponseMessage, setTestResponseMessage] = useState("");
@@ -150,6 +174,14 @@ export function TestDetailView({
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (!showTestSettings) {
+      return;
+    }
+    const interval = window.setInterval(() => setScheduleNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, [showTestSettings]);
+
   const secondsUntilStart = Math.max(
     0,
     Math.floor((new Date(slot.start_at).getTime() - nowMs) / 1000),
@@ -157,10 +189,14 @@ export function TestDetailView({
   const minimumEditStart = nextAvailableTimeInput(
     editForm.timezone_name,
     editForm.timezone_offset_minutes,
+    scheduleNowMs,
   );
-  const minimumEditEnd = addMinutesToLocalInput(
+  const minimumEditEnd = minimumSlotEndInput(
     editForm.start_at,
     editForm.duration_minutes,
+    editForm.timezone_name,
+    editForm.timezone_offset_minutes,
+    scheduleNowMs,
   );
   const secondsUntilClose = Math.max(
     0,
@@ -184,13 +220,13 @@ export function TestDetailView({
           : "Closed for responses";
   const pendingActionLabel =
     pendingTestAction?.action === "continue"
-      ? "continue this test"
+      ? "continue this test slot"
       : pendingTestAction?.action === "extend"
-        ? `extend this test by ${pendingTestAction.extend_minutes || extendMinutes} minutes`
+        ? `extend this test slot by ${pendingTestAction.extend_minutes || extendMinutes} minutes`
         : pendingTestAction?.action === "close"
-          ? "close this test now"
+          ? "close this test slot now"
           : pendingTestAction?.action === "pause"
-            ? "pause this test"
+            ? "pause this test slot"
             : "";
   const proposedExtendedEndAt = new Date(
     new Date(slot.end_at).getTime() + Math.max(extendMinutes, 1) * 60_000,
@@ -209,6 +245,12 @@ export function TestDetailView({
           : pendingTestAction?.action === "close"
             ? "Candidate access will close immediately. Submitted work remains available for results."
             : "";
+
+  function closeManageTestModal() {
+    setIsManagingTest(false);
+    setPendingTestAction(null);
+    setTestResponseMessage("");
+  }
 
   function requestTestAction(
     action: AssessmentSlotActionPayload,
@@ -243,8 +285,53 @@ export function TestDetailView({
     }
   }
 
+  function openTestSettings() {
+    setScheduleNowMs(Date.now());
+    setSlotFieldErrors({ start_at: "", end_at: "", general: "" });
+    setShowTestSettings(true);
+  }
+
+  function updateEditSchedule(
+    patch: Partial<typeof editForm>,
+    currentForm: typeof editForm = editForm,
+  ) {
+    const nextForm = { ...currentForm, ...patch };
+    const minimumStart = nextAvailableTimeInput(
+      nextForm.timezone_name,
+      nextForm.timezone_offset_minutes,
+      scheduleNowMs,
+    );
+    const startAt =
+      clampLocalInputToMinimum(nextForm.start_at, minimumStart) || minimumStart;
+    const minimumEnd = minimumSlotEndInput(
+      startAt,
+      nextForm.duration_minutes,
+      nextForm.timezone_name,
+      nextForm.timezone_offset_minutes,
+      scheduleNowMs,
+    );
+    const endAt =
+      "end_at" in patch
+        ? clampLocalInputToMinimum(nextForm.end_at, minimumEnd) || minimumEnd
+        : "start_at" in patch || "duration_minutes" in patch
+          ? minimumEnd
+          : clampLocalInputToMinimum(nextForm.end_at, minimumEnd) || minimumEnd;
+    const resolvedForm = {
+      ...nextForm,
+      start_at: startAt,
+      end_at: endAt,
+    };
+    setEditForm(resolvedForm);
+    setSlotFieldErrors(getSlotScheduleFieldErrors(resolvedForm, scheduleNowMs));
+  }
+
   async function saveSlotChanges() {
     setTestResponseMessage("");
+    const scheduleErrors = getSlotScheduleFieldErrors(editForm, scheduleNowMs);
+    setSlotFieldErrors(scheduleErrors);
+    if (scheduleErrors.start_at || scheduleErrors.end_at || scheduleErrors.general) {
+      return;
+    }
     try {
       const timezoneOffsetMinutes = timezoneOffsetMinutesForLocalDateTime(
         editForm.start_at || editForm.end_at,
@@ -261,17 +348,6 @@ export function TestDetailView({
         editForm.timezone_name,
         timezoneOffsetMinutes,
       );
-      if (new Date(startAt).getTime() < Date.now()) {
-        throw new Error("Past times are unavailable. Choose a future start time.");
-      }
-      if (
-        new Date(endAt).getTime() <
-        new Date(startAt).getTime() + editForm.duration_minutes * 60_000
-      ) {
-        throw new Error(
-          `End time must be at least ${editForm.duration_minutes} minutes after the start time.`,
-        );
-      }
       await onUpdateSlot({
         title: editForm.title,
         start_at: startAt,
@@ -284,14 +360,19 @@ export function TestDetailView({
       });
       setTestResponseTone("success");
       setTestResponseMessage(
-        `Test details updated successfully. New window: ${formatDateTime(startAt)} to ${formatDateTime(endAt)}.`,
+        `Test slot details updated successfully. New window: ${formatDateTime(startAt)} to ${formatDateTime(endAt)}.`,
       );
       setShowTestSettings(false);
+      setSlotFieldErrors({ start_at: "", end_at: "", general: "" });
     } catch (error) {
       setTestResponseTone("warning");
       setTestResponseMessage(
         errorMessage(error) || "Choose a valid start and end time.",
       );
+      setSlotFieldErrors((current) => ({
+        ...current,
+        general: errorMessage(error) || "Unable to save test slot settings.",
+      }));
     }
   }
 
@@ -299,7 +380,7 @@ export function TestDetailView({
     <section className="assessment-drilldown">
       <div className="assessment-breadcrumb">
         <button type="button" onClick={onBack}>
-          Back to tests
+          Back to test slots
         </button>
         <span>/</span>
         <strong>{assessment.title}</strong>
@@ -308,57 +389,56 @@ export function TestDetailView({
       </div>
 
       <Card className="assessment-panel assessment-command-center test-command-center">
-        <div className="assessment-command-main">
-          <div>
-            <span className="panel-eyebrow">Test Session</span>
-            <h2>{slot.title}</h2>
-            <p>
-              {formatDateTime(slot.start_at)} to {formatDateTime(slot.end_at)}
-            </p>
-            <p className="slot-live-line">{statusLabel}</p>
+        <div className="assessment-command-title">
+          <span className="panel-eyebrow">Test Slot</span>
+          <h2>{slot.title}</h2>
+          <p>
+            {formatDateTime(slot.start_at)} to {formatDateTime(slot.end_at)}
+          </p>
+          <p className="slot-live-line">{statusLabel}</p>
+        </div>
+
+        <div className="assessment-header-metrics" aria-label="Test slot summary">
+          <div className="assessment-header-metric">
+            <strong>{slot.candidate_count}</strong>
+            <span>Candidates</span>
           </div>
-          <div className="assessment-row-actions">
-            <div className="status-with-dot">
-              <HealthDot status={effectiveStatus} />
-              <StatusBadge value={effectiveStatus} />
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              className="icon-only-button"
-              onClick={() => setShowTestSettings(true)}
-              title="Test settings"
-            >
-              <Settings size={18} aria-hidden="true" />
-              <span className="sr-only">Test settings</span>
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setIsManagingTest(true)}
-            >
-              Manage Test
-            </Button>
+          <div className="assessment-header-metric">
+            <strong>{inProgressCount}</strong>
+            <span>In progress</span>
+          </div>
+          <div className="assessment-header-metric">
+            <strong>{submittedCount}</strong>
+            <span>Submitted</span>
+          </div>
+          <div className="assessment-header-metric">
+            <strong>{slot.duration_minutes || assessment.duration_minutes}m</strong>
+            <span>Duration</span>
           </div>
         </div>
 
-        <div className="assessment-hero-metrics assessment-command-metrics">
-          <span>
-            <strong>{slot.candidate_count}</strong>
-            Candidates
-          </span>
-          <span>
-            <strong>{inProgressCount}</strong>
-            In progress
-          </span>
-          <span>
-            <strong>{submittedCount}</strong>
-            Submitted
-          </span>
-          <span>
-            <strong>{slot.duration_minutes || assessment.duration_minutes}m</strong>
-            Duration
-          </span>
+        <div className="assessment-row-actions">
+          <div className="status-with-dot">
+            <HealthDot status={effectiveStatus} />
+            <StatusBadge value={effectiveStatus} />
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            className="icon-only-button"
+            onClick={openTestSettings}
+            title="Test slot settings"
+          >
+            <Settings size={18} aria-hidden="true" />
+            <span className="sr-only">Test slot settings</span>
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setIsManagingTest(true)}
+          >
+            Manage Test Slot
+          </Button>
         </div>
       </Card>
 
@@ -369,214 +449,378 @@ export function TestDetailView({
       ) : null}
 
       {isManagingTest ? (
-        <div className="dialog-backdrop">
-          <div className="test-management-modal" role="dialog" aria-modal="true">
-            <div className="panel-heading">
-              <div>
-                <span>Manage Test</span>
-                <h2>{slot.title}</h2>
-                <p>
-                  Review the current test window, choose one action, then confirm
-                  before the change is applied.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setIsManagingTest(false);
-                  setPendingTestAction(null);
-                  setTestResponseMessage("");
-                }}
-              >
-                Close
-              </Button>
-            </div>
-
-            <div className="test-control-overview">
-              <div>
-                <span>Current status</span>
-                <strong>{effectiveStatus.replace("_", " ")}</strong>
-                <em>{statusLabel}</em>
-              </div>
-              <div>
-                <span>Start time</span>
-                <strong>{formatDateTime(slot.start_at)}</strong>
-                <em>{slot.timezone_name}</em>
-              </div>
-              <div>
-                <span>End time</span>
-                <strong>{formatDateTime(slot.end_at)}</strong>
-                <em>
-                  {effectiveStatus === "active"
-                    ? `${formatCountdown(secondsUntilClose)} remaining`
-                    : slot.is_accepting_responses
-                      ? "Window is accepting responses"
-                      : "Window is not accepting responses"}
-                </em>
-              </div>
-              <div>
-                <span>After extension</span>
-                <strong>{formatDateTime(proposedExtendedEndAt)}</strong>
-                <em>Based on +{Math.max(extendMinutes, 1)} minutes</em>
-              </div>
-            </div>
-
-            <div className="test-management-actions" aria-label="Test controls">
-              <button
-                type="button"
-                className={`test-action-card ${canPauseTest ? "" : "is-unavailable"}`}
-                disabled={slotUpdatePending}
-                onClick={() =>
-                  requestTestAction(
-                    { action: "pause" },
-                    canPauseTest
-                      ? undefined
-                      : effectiveStatus === "paused"
-                        ? "This test is already paused. Use Continue Test when candidates can resume."
-                        : "This test is already closed, so it cannot be paused.",
-                  )
-                }
-              >
-                <span>Pause</span>
-                <strong>Pause Test</strong>
-                <em>
-                  {canPauseTest
-                    ? "Temporarily block candidate progress."
-                    : "Not available for the current status."}
-                </em>
-              </button>
-              <button
-                type="button"
-                className={`test-action-card ${canContinueTest ? "" : "is-unavailable"}`}
-                disabled={slotUpdatePending}
-                onClick={() =>
-                  requestTestAction(
-                    { action: "continue" },
-                    canContinueTest
-                      ? undefined
-                      : "Continue becomes available only after this test is paused.",
-                  )
-                }
-              >
-                <span>Resume</span>
-                <strong>Continue Test</strong>
-                <em>
-                  {canContinueTest
-                    ? "Let candidates continue from saved progress."
-                    : "Available only while paused."}
-                </em>
-              </button>
-              <div className={`test-action-card test-extend-card ${canExtendTest ? "" : "is-unavailable"}`}>
-                <span>Extend</span>
-                <strong>Extend Time</strong>
-                <label>
-                  <small>Minutes</small>
-                  <input
-                    type="number"
-                    min={1}
-                    max={720}
-                    value={extendMinutes}
-                    onChange={(event) => setExtendMinutes(Number(event.target.value))}
-                  />
-                </label>
-                <em>New end: {formatDateTime(proposedExtendedEndAt)}</em>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={slotUpdatePending}
-                  onClick={() =>
-                    requestTestAction(
-                      {
-                        action: "extend",
-                        extend_minutes: Math.max(extendMinutes, 1),
-                      },
-                      canExtendTest
-                        ? undefined
-                        : "This test is closed. Reopening closed tests is not supported in this flow.",
-                    )
-                  }
-                >
-                  Prepare extension
-                </Button>
+        <div
+          className="dialog-backdrop test-management-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeManageTestModal();
+            }
+          }}
+        >
+          <div
+            className="test-management-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="test-management-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="test-management-header">
+              <div className="test-management-header-copy">
+                <span>Test slot controls</span>
+                <h2 id="test-management-title">{slot.title}</h2>
               </div>
               <button
                 type="button"
-                className={`test-action-card test-action-danger ${canCloseTest ? "" : "is-unavailable"
-                  }`}
-                disabled={slotUpdatePending}
-                onClick={() =>
-                  requestTestAction(
-                    { action: "close" },
-                    canCloseTest
-                      ? undefined
-                      : "This test is already closed. No further close action is needed.",
-                  )
-                }
+                className="test-management-close"
+                onClick={closeManageTestModal}
+                aria-label="Close manage test slot dialog"
               >
-                <span>Close</span>
-                <strong>Close Test</strong>
-                <em>
-                  {canCloseTest
-                    ? "Stop accepting candidate responses now."
-                    : "Already closed."}
-                </em>
+                <X size={18} aria-hidden="true" />
               </button>
+            </header>
+
+            <div className="test-management-progress" aria-label="Manage test slot steps">
+              <div
+                className={[
+                  "test-management-progress-item",
+                  pendingTestAction ? "is-complete" : "is-active",
+                ].join(" ")}
+              >
+                <span>1</span>
+                <strong>Choose action</strong>
+              </div>
+              <div
+                className={[
+                  "test-management-progress-item",
+                  pendingTestAction ? "is-active" : "",
+                ].join(" ")}
+              >
+                <span>2</span>
+                <strong>Confirm change</strong>
+              </div>
             </div>
 
-            {pendingTestAction ? (
-              <div className="test-confirm-panel">
-                <div>
-                  <strong>Confirm action</strong>
-                  <p>Are you sure you want to {pendingActionLabel}?</p>
-                  <p>{pendingActionImpact}</p>
+            <div className="test-management-body">
+              <section className="test-management-snapshot">
+                <div className="test-management-snapshot-status">
+                  <div className="status-with-dot">
+                    <HealthDot status={effectiveStatus} />
+                    <StatusBadge value={effectiveStatus} />
+                  </div>
+                  <p>{statusLabel}</p>
                 </div>
-                <div className="assessment-row-actions">
-                  <Button
+
+                <div className="test-control-overview">
+                  <div>
+                    <span>
+                      <CalendarClock size={14} aria-hidden="true" />
+                      Start time
+                    </span>
+                    <strong>{formatDateTime(slot.start_at)}</strong>
+                    <em>{slot.timezone_name}</em>
+                  </div>
+                  <div>
+                    <span>
+                      <Clock3 size={14} aria-hidden="true" />
+                      End time
+                    </span>
+                    <strong>{formatDateTime(slot.end_at)}</strong>
+                    <em>
+                      {effectiveStatus === "active"
+                        ? `${formatCountdown(secondsUntilClose)} remaining`
+                        : slot.is_accepting_responses
+                          ? "Window is accepting responses"
+                          : "Window is not accepting responses"}
+                    </em>
+                  </div>
+                  <div>
+                    <span>
+                      <Timer size={14} aria-hidden="true" />
+                      After extension
+                    </span>
+                    <strong>{formatDateTime(proposedExtendedEndAt)}</strong>
+                    <em>Based on +{Math.max(extendMinutes, 1)} minutes</em>
+                  </div>
+                  <div>
+                    <span>
+                      <Gauge size={14} aria-hidden="true" />
+                      Candidates
+                    </span>
+                    <strong>{slot.candidate_count}</strong>
+                    <em>
+                      {inProgressCount} in progress · {submittedCount} submitted
+                    </em>
+                  </div>
+                </div>
+              </section>
+
+              <section className="test-management-actions-section">
+                <div className="test-management-section-head">
+                  <h3>Available actions</h3>
+                </div>
+
+                <div className="test-management-actions" aria-label="Test slot controls">
+                  <button
                     type="button"
-                    variant="secondary"
-                    onClick={() => setPendingTestAction(null)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
+                    className={[
+                      "test-action-card",
+                      "test-action-card-pause",
+                      canPauseTest ? "" : "is-unavailable",
+                      pendingTestAction?.action === "pause" ? "is-selected" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                     disabled={slotUpdatePending}
-                    onClick={() => void confirmTestAction()}
+                    onClick={() =>
+                      requestTestAction(
+                        { action: "pause" },
+                        canPauseTest
+                          ? undefined
+                          : effectiveStatus === "paused"
+                            ? "This test slot is already paused. Use Continue Test Slot when candidates can resume."
+                            : "This test slot is already closed, so it cannot be paused.",
+                      )
+                    }
                   >
-                    {slotUpdatePending ? "Applying..." : "Confirm"}
-                  </Button>
+                    <div className="test-action-card-icon">
+                      <Pause size={18} aria-hidden="true" />
+                    </div>
+                    <span>Pause</span>
+                    <strong>Pause Test Slot</strong>
+                    <em>
+                      {canPauseTest
+                        ? "Temporarily block candidate progress until you resume."
+                        : "Not available for the current status."}
+                    </em>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={[
+                      "test-action-card",
+                      "test-action-card-resume",
+                      canContinueTest ? "" : "is-unavailable",
+                      pendingTestAction?.action === "continue" ? "is-selected" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    disabled={slotUpdatePending}
+                    onClick={() =>
+                      requestTestAction(
+                        { action: "continue" },
+                        canContinueTest
+                          ? undefined
+                          : "Continue becomes available only after this test slot is paused.",
+                      )
+                    }
+                  >
+                    <div className="test-action-card-icon">
+                      <Play size={18} aria-hidden="true" />
+                    </div>
+                    <span>Resume</span>
+                    <strong>Continue Test Slot</strong>
+                    <em>
+                      {canContinueTest
+                        ? "Let candidates continue from saved progress."
+                        : "Available only while paused."}
+                    </em>
+                  </button>
+
+                  <div
+                    className={[
+                      "test-action-card",
+                      "test-extend-card",
+                      canExtendTest ? "" : "is-unavailable",
+                      pendingTestAction?.action === "extend" ? "is-selected" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    <div className="test-action-card-icon">
+                      <Timer size={18} aria-hidden="true" />
+                    </div>
+                    <span>Extend</span>
+                    <strong>Extend Time</strong>
+                    <p>Add extra minutes to the current end time.</p>
+                    <div className="test-extend-presets" role="group" aria-label="Extension presets">
+                      {EXTEND_MINUTE_PRESETS.map((minutes) => (
+                        <button
+                          key={minutes}
+                          type="button"
+                          className={extendMinutes === minutes ? "is-active" : ""}
+                          disabled={!canExtendTest || slotUpdatePending}
+                          onClick={() => setExtendMinutes(minutes)}
+                        >
+                          +{minutes}m
+                        </button>
+                      ))}
+                    </div>
+                    <label>
+                      <small>Custom minutes</small>
+                      <input
+                        type="number"
+                        min={1}
+                        max={720}
+                        value={extendMinutes}
+                        disabled={!canExtendTest || slotUpdatePending}
+                        onChange={(event) =>
+                          setExtendMinutes(Number(event.target.value))
+                        }
+                      />
+                    </label>
+                    <em>New end: {formatDateTime(proposedExtendedEndAt)}</em>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={slotUpdatePending || !canExtendTest}
+                      onClick={() =>
+                        requestTestAction(
+                          {
+                            action: "extend",
+                            extend_minutes: Math.max(extendMinutes, 1),
+                          },
+                          canExtendTest
+                            ? undefined
+                            : "This test slot is closed. Reopening closed test slots is not supported in this flow.",
+                        )
+                      }
+                    >
+                      Use this extension
+                    </Button>
+                  </div>
+
+                  <button
+                    type="button"
+                    className={[
+                      "test-action-card",
+                      "test-action-card-close",
+                      "test-action-danger",
+                      canCloseTest ? "" : "is-unavailable",
+                      pendingTestAction?.action === "close" ? "is-selected" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    disabled={slotUpdatePending}
+                    onClick={() =>
+                      requestTestAction(
+                        { action: "close" },
+                        canCloseTest
+                          ? undefined
+                          : "This test slot is already closed. No further close action is needed.",
+                      )
+                    }
+                  >
+                    <div className="test-action-card-icon">
+                      <XCircle size={18} aria-hidden="true" />
+                    </div>
+                    <span>Close</span>
+                    <strong>Close Test Slot</strong>
+                    <em>
+                      {canCloseTest
+                        ? "Stop accepting candidate responses immediately."
+                        : "Already closed."}
+                    </em>
+                  </button>
                 </div>
-              </div>
-            ) : null}
-            {testResponseMessage && testResponseTone === "warning" ? (
-              <div className="question-flow-toast-stack" aria-live="assertive">
-                <div className="question-flow-toast is-warning" role="alert">
-                  <div><strong>Schedule warning</strong><p>{testResponseMessage}</p></div>
-                  <button type="button" className="question-flow-toast-dismiss" onClick={() => setTestResponseMessage("")}>Close</button>
+              </section>
+
+              {pendingTestAction ? (
+                <section
+                  className={[
+                    "test-confirm-panel",
+                    pendingTestAction.action === "close" ? "is-danger" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  <div className="test-confirm-panel-copy">
+                    <div className="test-confirm-panel-icon">
+                      <AlertTriangle size={18} aria-hidden="true" />
+                    </div>
+                    <div>
+                      <strong>Confirm {pendingActionLabel}</strong>
+                      <p>{pendingActionImpact}</p>
+                    </div>
+                  </div>
+                  <div className="test-confirm-panel-actions">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => setPendingTestAction(null)}
+                    >
+                      Go back
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={slotUpdatePending}
+                      onClick={() => void confirmTestAction()}
+                    >
+                      {slotUpdatePending ? "Applying..." : "Confirm change"}
+                    </Button>
+                  </div>
+                </section>
+              ) : null}
+
+              {testResponseMessage && testResponseTone === "warning" ? (
+                <div className="test-management-alert is-warning" role="alert">
+                  <AlertTriangle size={18} aria-hidden="true" />
+                  <div>
+                    <strong>Action unavailable</strong>
+                    <p>{testResponseMessage}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="test-management-alert-dismiss"
+                    onClick={() => setTestResponseMessage("")}
+                  >
+                    Dismiss
+                  </button>
                 </div>
-              </div>
-            ) : testResponseMessage ? (
-              <p className="test-feedback-message is-success">{testResponseMessage}</p>
-            ) : null}
-            {slotUpdateError ? <p className="form-error">{slotUpdateError}</p> : null}
+              ) : testResponseMessage ? (
+                <div className="test-management-alert is-success" role="status">
+                  <BadgeCheck size={18} aria-hidden="true" />
+                  <div>
+                    <strong>Action completed</strong>
+                    <p>{testResponseMessage}</p>
+                  </div>
+                </div>
+              ) : null}
+              {slotUpdateError ? (
+                <p className="form-error test-management-error">{slotUpdateError}</p>
+              ) : null}
+            </div>
+
+            <footer className="test-management-footer">
+              <p>
+                {pendingTestAction
+                  ? "Confirm or go back to choose a different action."
+                  : "No changes apply until you confirm."}
+              </p>
+            </footer>
           </div>
         </div>
       ) : null}
 
       {showTestSettings ? (
-        <div className="dialog-backdrop" onClick={() => setShowTestSettings(false)}>
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setShowTestSettings(false);
+            }
+          }}
+        >
           <Card
             className="test-settings-modal"
             role="dialog"
             aria-modal="true"
             aria-labelledby="test-settings-title"
-            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="settings-modal-header">
               <div>
                 <span>Settings</span>
-                <h2 id="test-settings-title">Test settings</h2>
+                <h2 id="test-settings-title">Test slot settings</h2>
               </div>
               <button
                 type="button"
@@ -588,7 +832,7 @@ export function TestDetailView({
             </div>
             <div className="assessment-form-stack slot-edit-form">
               <label className="field">
-                <span>Test title</span>
+                <span>Test slot title</span>
                 <input
                   value={editForm.title}
                   onChange={(event) =>
@@ -608,8 +852,7 @@ export function TestDetailView({
                       if (!timezone) {
                         return;
                       }
-                      setEditForm({
-                        ...editForm,
+                      updateEditSchedule({
                         timezone_name: timezone.name,
                         timezone_offset_minutes:
                           timezoneOffsetMinutesForLocalDateTime(
@@ -627,54 +870,50 @@ export function TestDetailView({
                     ))}
                   </select>
                 </label>
+                <ScheduleDateTimePicker
+                  label="Start time"
+                  value={editForm.start_at}
+                  min={minimumEditStart}
+                  error={slotFieldErrors.start_at}
+                  onChange={(startAt) => updateEditSchedule({ start_at: startAt })}
+                />
+              </div>
+              <p className="assessment-context-banner">
+                Times use {editForm.timezone_name}. Past times are disabled in the
+                picker. Earliest start: {minimumEditStart.replace("T", " ")}.
+              </p>
+              <div className="assessment-inline-fields">
                 <label className="field">
-                  <span>Start time</span>
-                  <input
-                    type="datetime-local"
-                    min={minimumEditStart}
-                    value={editForm.start_at}
-                    onChange={(event) => {
-                      const startAt = event.target.value;
-                      setEditForm({
-                        ...editForm,
-                        start_at: startAt,
-                        end_at: addMinutesToLocalInput(
-                          startAt,
-                          editForm.duration_minutes,
-                        ),
-                      });
-                    }}
-                  />
-                </label>
-                <label className="field">
-                  <span>Test duration (minutes)</span>
+                  <span>Test slot duration (minutes)</span>
                   <input
                     type="number"
                     min={15}
                     max={360}
                     value={editForm.duration_minutes}
                     onChange={(event) => {
-                      const duration = Math.max(15, Number(event.target.value) || 15);
-                      setEditForm({
-                        ...editForm,
-                        duration_minutes: duration,
-                        end_at: addMinutesToLocalInput(editForm.start_at, duration),
-                      });
+                      const duration = Math.max(
+                        15,
+                        Number(event.target.value) || 15,
+                      );
+                      updateEditSchedule({ duration_minutes: duration });
                     }}
                   />
                 </label>
-                <label className="field">
-                  <span>End time</span>
-                  <input
-                    type="datetime-local"
-                    min={minimumEditEnd}
+                <div className="field">
+                  <ScheduleDateTimePicker
+                    label="End time"
                     value={editForm.end_at}
-                    onChange={(event) =>
-                      setEditForm({ ...editForm, end_at: event.target.value })
-                    }
+                    min={minimumEditEnd}
+                    error={slotFieldErrors.end_at}
+                    onChange={(endAt) => updateEditSchedule({ end_at: endAt })}
                   />
-                </label>
+                </div>
               </div>
+              {slotFieldErrors.general ? (
+                <p className="form-error" role="alert">
+                  {slotFieldErrors.general}
+                </p>
+              ) : null}
               <label className="field">
                 <span>Batch instructions override</span>
                 <textarea
@@ -709,7 +948,7 @@ export function TestDetailView({
         </div>
       ) : null}
 
-      <div className="test-tab-bar" role="tablist" aria-label="Test sections">
+      <div className="test-tab-bar" role="tablist" aria-label="Test slot sections">
         <button
           type="button"
           role="tab"
@@ -720,7 +959,7 @@ export function TestDetailView({
           <BadgeCheck size={20} aria-hidden="true" />
           <span>
             <strong>Candidates</strong>
-            <small>{candidates.length} in this test</small>
+            <small>{candidates.length} in this test slot</small>
           </span>
         </button>
         <button
@@ -754,6 +993,7 @@ export function TestDetailView({
       {tab === "candidates" ? (
         <CandidatesTab
           slot={slot}
+          passingScore={assessment.passing_score}
           candidateCsv={candidateCsv}
           candidates={candidates}
           importPending={importPending}
@@ -771,6 +1011,7 @@ export function TestDetailView({
 
       {tab === "live" ? (
         <LiveMonitoringTab
+          candidates={candidates}
           items={monitoringItems}
           loading={monitoringLoading}
           liveSummary={{
@@ -786,8 +1027,8 @@ export function TestDetailView({
 
       {tab === "results" ? (
         <TestResultsTab
-          assessmentId={assessment.id}
-          slotId={slot.id}
+          assessment={assessment}
+          slot={slot}
           candidates={candidates}
           backfillPending={evaluationBackfillPending}
           backfillError={evaluationBackfillError}
