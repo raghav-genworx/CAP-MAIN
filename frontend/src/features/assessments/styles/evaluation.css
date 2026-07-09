@@ -1,0 +1,119 @@
+.evaluation-analytics-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.evaluation-analytics-card {
+  background: #f8fafc;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.evaluation-analytics-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.evaluation-analytics-card strong {
+  color: #101828;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evaluation-analytics-card span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.evaluation-analytics-card dl {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.evaluation-analytics-card dt {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.evaluation-analytics-card dd {
+  color: #101828;
+  font-weight: 900;
+  margin: 3px 0 0;
+}
+
+.evaluation-empty-state {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  min-height: 220px;
+  padding: 24px;
+  text-align: center;
+}
+
+.evaluation-empty-state strong {
+  color: #101828;
+  font-size: 17px;
+}
+
+.evaluation-empty-state p {
+  margin: 0;
+}
+
+.scorecard-head {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.scorecard-head span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.scorecard-head h2 {
+  color: #101828;
+  font-size: 22px;
+  line-height: 1.1;
+  margin: 4px 0;
+}
+
+.scorecard-head p {
+  color: #64748b;
+  margin: 0;
+  word-break: break-word;
+}
+
+.scorecard-head > strong {
+  background: #111827;
+  border-radius: 8px;
+  color: #ffffff;
+  font-size: 18px;
+  padding: 9px 11px;
+}
+
+@media (max-width: 760px) {
+  .evaluation-analytics-grid,
+  .evaluation-analytics-card dl {
+    grid-template-columns: 1fr;
+  }
+}
