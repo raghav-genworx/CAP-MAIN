@@ -10,19 +10,23 @@ RUN npm ci
 COPY . .
 
 ARG VITE_API_GATEWAY_BASE_URL=/api
-ARG VITE_FIREBASE_API_KEY
-ARG VITE_FIREBASE_AUTH_DOMAIN
-ARG VITE_FIREBASE_PROJECT_ID
-ARG VITE_FIREBASE_APP_ID
+ARG VITE_FIREBASE_API_KEY=
+ARG VITE_FIREBASE_AUTH_DOMAIN=
+ARG VITE_FIREBASE_PROJECT_ID=
+ARG VITE_FIREBASE_APP_ID=
 
-RUN --mount=type=secret,id=frontend_env,target=/app/.env \
-  set -eu; \
-  export VITE_API_GATEWAY_BASE_URL="${VITE_API_GATEWAY_BASE_URL}"; \
-  if [ -n "${VITE_FIREBASE_API_KEY:-}" ]; then export VITE_FIREBASE_API_KEY="${VITE_FIREBASE_API_KEY}"; fi; \
-  if [ -n "${VITE_FIREBASE_AUTH_DOMAIN:-}" ]; then export VITE_FIREBASE_AUTH_DOMAIN="${VITE_FIREBASE_AUTH_DOMAIN}"; fi; \
-  if [ -n "${VITE_FIREBASE_PROJECT_ID:-}" ]; then export VITE_FIREBASE_PROJECT_ID="${VITE_FIREBASE_PROJECT_ID}"; fi; \
-  if [ -n "${VITE_FIREBASE_APP_ID:-}" ]; then export VITE_FIREBASE_APP_ID="${VITE_FIREBASE_APP_ID}"; fi; \
-  npm run build
+ENV VITE_API_GATEWAY_BASE_URL=$VITE_API_GATEWAY_BASE_URL
+
+RUN --mount=type=secret,id=frontend_env,target=/tmp/frontend.env,required=false \
+    sh -eu -c 'api_base="$VITE_API_GATEWAY_BASE_URL"; \
+      if [ -f /tmp/frontend.env ]; then set -a; . /tmp/frontend.env; set +a; fi; \
+      export VITE_API_GATEWAY_BASE_URL="$api_base"; \
+      : "${VITE_FIREBASE_API_KEY:?VITE_FIREBASE_API_KEY is required}"; \
+      : "${VITE_FIREBASE_AUTH_DOMAIN:?VITE_FIREBASE_AUTH_DOMAIN is required}"; \
+      : "${VITE_FIREBASE_PROJECT_ID:?VITE_FIREBASE_PROJECT_ID is required}"; \
+      : "${VITE_FIREBASE_APP_ID:?VITE_FIREBASE_APP_ID is required}"; \
+      export VITE_FIREBASE_API_KEY VITE_FIREBASE_AUTH_DOMAIN VITE_FIREBASE_PROJECT_ID VITE_FIREBASE_APP_ID; \
+      npm run build'
 
 FROM nginx:1.27-alpine
 

@@ -571,6 +571,12 @@ main() {
     deploy_worker_pool "$EVALUATION_WORKER_POOL_NAME" "$evaluation_image" "$evaluation_env" "$evaluation_secrets"
   fi
 
+  local firebase_api_key firebase_auth_domain firebase_project_id firebase_app_id
+  firebase_api_key="$(firebase_build_arg VITE_FIREBASE_API_KEY)"
+  firebase_auth_domain="$(firebase_build_arg VITE_FIREBASE_AUTH_DOMAIN)"
+  firebase_project_id="$(firebase_build_arg VITE_FIREBASE_PROJECT_ID)"
+  firebase_app_id="$(firebase_build_arg VITE_FIREBASE_APP_ID)"
+
   local core_env core_secrets
   core_env="$(join_with_at_delimiter \
     APP_ENV=production \
@@ -584,10 +590,10 @@ main() {
     CODE_EVALUATION_API_BASE_URL="${evaluation_url}/api/v1" \
     CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS="${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}" \
     AUTO_CREATE_RECRUITER_ROLE="${AUTO_CREATE_RECRUITER_ROLE:-true}" \
-    FIREBASE_API_KEY="${FIREBASE_API_KEY:-${VITE_FIREBASE_API_KEY:-}}" \
-    FIREBASE_AUTH_DOMAIN="${FIREBASE_AUTH_DOMAIN:-${VITE_FIREBASE_AUTH_DOMAIN:-}}" \
-    FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-${VITE_FIREBASE_PROJECT_ID:-}}" \
-    FIREBASE_APP_ID="${FIREBASE_APP_ID:-${VITE_FIREBASE_APP_ID:-}}" \
+    FIREBASE_API_KEY="$firebase_api_key" \
+    FIREBASE_AUTH_DOMAIN="$firebase_auth_domain" \
+    FIREBASE_PROJECT_ID="$firebase_project_id" \
+    FIREBASE_APP_ID="$firebase_app_id" \
     GROQ_BASE_URL="${GROQ_BASE_URL:-https://api.groq.com/openai/v1}" \
     GROQ_MODEL="${GROQ_MODEL:-llama-3.3-70b-versatile}" \
     GROQ_GPT_OSS_MODEL="${GROQ_GPT_OSS_MODEL:-openai/gpt-oss-120b}" \
@@ -617,10 +623,10 @@ main() {
     CODE_EXECUTION_SERVICE_BASE_URL="$execution_url" \
     CODE_EVALUATION_SERVICE_BASE_URL="$evaluation_url" \
     UPSTREAM_REQUEST_TIMEOUT_SECONDS="${UPSTREAM_REQUEST_TIMEOUT_SECONDS:-120}" \
-    FIREBASE_API_KEY="${FIREBASE_API_KEY:-${VITE_FIREBASE_API_KEY:-}}" \
-    FIREBASE_AUTH_DOMAIN="${FIREBASE_AUTH_DOMAIN:-${VITE_FIREBASE_AUTH_DOMAIN:-}}" \
-    FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-${VITE_FIREBASE_PROJECT_ID:-}}" \
-    FIREBASE_APP_ID="${FIREBASE_APP_ID:-${VITE_FIREBASE_APP_ID:-}}")"
+    FIREBASE_API_KEY="$firebase_api_key" \
+    FIREBASE_AUTH_DOMAIN="$firebase_auth_domain" \
+    FIREBASE_PROJECT_ID="$firebase_project_id" \
+    FIREBASE_APP_ID="$firebase_app_id")"
   gateway_secrets="INTERNAL_SERVICE_TOKEN=${INTERNAL_TOKEN_SECRET}:latest,CANDIDATE_SESSION_SECRET=${CANDIDATE_SECRET_SECRET}:latest"
   deploy_http_service "$GATEWAY_SERVICE_NAME" "$gateway_image" 8000 "$gateway_env" "$gateway_secrets"
   local gateway_url
