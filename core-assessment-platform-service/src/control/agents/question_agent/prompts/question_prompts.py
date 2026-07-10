@@ -1,10 +1,22 @@
-"""Shared constants and prompt-facing summaries for the question agent."""
+"""Shared constants and prompt-facing summaries for the question agent.
+
+This file is the "routing table" for SCOPED (partial) generation. When the
+recruiter regenerates just one section of the wizard, the workflow looks up the
+scope name here to decide which subset of graph nodes to run. The "full" scope
+is NOT listed because it runs the entire compiled graph instead.
+"""
 
 from __future__ import annotations
 
+# How hard the validation node tries to break a solution: it generates
+# adversarial tests over several rounds and repairs the solution each round.
 ADVERSARIAL_VALIDATION_ROUNDS = 3
 ADVERSARIAL_TESTS_PER_ROUND = 2
 
+# Maps a UI "scope" (which builder section is being (re)generated) to the exact
+# ordered list of node names to run for it. The orchestrator node is always run
+# first by the caller, so it is NOT repeated here. Compare with
+# FULL_NODE_SEQUENCE in question_graph.py, which is the full 12-node pipeline.
 SCOPE_NODE_SEQUENCE: dict[str, list[str]] = {
     "basics": ["problem_statement"],
     "problem": ["problem_statement"],
@@ -27,6 +39,8 @@ SCOPE_NODE_SEQUENCE: dict[str, list[str]] = {
     "metadata": ["metadata"],
 }
 
+# One-line summary shown to the recruiter after a scoped run finishes. Keyed by
+# the same scope names as SCOPE_NODE_SEQUENCE above.
 SCOPE_SUMMARIES: dict[str, str] = {
     "basics": "Generated starter title/context from your description.",
     "problem": (

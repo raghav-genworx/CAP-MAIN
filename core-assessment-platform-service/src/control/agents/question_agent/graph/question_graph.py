@@ -1,4 +1,61 @@
-"""LangGraph-powered question generation workflow using Groq."""
+"""LangGraph-powered question generation workflow using Groq.
+
+=============================================================================
+BIG PICTURE: How the question-creation LangGraph works
+=============================================================================
+A "question" here is a full competitive-programming problem: title, problem
+statement, input/output formats, constraints, sample tests, hidden tests, a
+reference solution, metadata (difficulty/tags), etc.
+
+We build ONE LangGraph `StateGraph` (see `_build_graph` at the bottom of this
+file). A LangGraph is just a directed graph of "nodes". Each node is a plain
+Python function that:
+    1. receives the shared state (a dict called `QuestionGenerationState`),
+    2. does some work (usually one or more LLM calls + validation),
+    3. returns a *partial* dict ("patch") that LangGraph merges back into the
+       shared state before handing it to the next node.
+
+The graph in this file is LINEAR (no branching). The nodes run in this order:
+
+    START
+      -> orchestrator            (plan / annotate the run)
+      -> problem_statement       (title, statement, I/O formats, checker)
+      -> constraints             (constraints, time/memory limits)
+      -> examples                (sample test cases)
+      -> hidden_tests            (hidden / edge / stress test cases)
+      -> constraint_script       (auto-check every testcase input is legal)
+      -> solution                (primary reference solution code)
+      -> validation              (RUN the solution against the tests + repair)
+      -> multi_language_solutions(translate solution to other languages)
+      -> metadata                (classify difficulty, tags, category)
+      -> duplicate_detection     (compare against existing question library)
+      -> quality_review          (final publish-readiness score + summary)
+    END
+
+-----------------------------------------------------------------------------
+THREE WAYS THIS WORKFLOW IS DRIVEN
+-----------------------------------------------------------------------------
+1. FULL generation (`generation_scope == "full"`):
+   We call `self._graph.invoke(state)` -> the compiled LangGraph actually runs
+   all 12 nodes end to end. This is the only path that uses LangGraph's own
+   execution engine.
+
+2. SCOPED generation (any other scope, e.g. "problem", "tests", "solution"):
+   The UI wizard lets a recruiter regenerate just one section. Instead of
+   running the whole graph, `_run_scoped_generation` runs only the handful of
+   nodes needed for that section (looked up in `SCOPE_NODE_SEQUENCE`). It calls
+   the SAME node functions directly, just not through the compiled graph.
+
+3. STREAMED generation (`generate_events`):
+   Same node sequence as (1) or (2), but run manually so we can `yield`
+   Server-Sent-Events (progress bars, "node started/finished", per-test
+   results) to the frontend as each node completes.
+
+So: the node functions are the single source of truth, and they are reused by
+all three drivers. `_build_graph` wires them for the "full" path; the scoped
+and streamed paths replay the same nodes by hand.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -9,6 +66,9 @@ from queue import Queue
 from threading import Thread
 from typing import Any, Literal, cast
 
+# `StateGraph` is the LangGraph builder. `START`/`END` are the two special
+# sentinel nodes every graph has: an edge from START marks the entry point and
+# an edge to END marks a terminal node.
 from langgraph.graph import END, START, StateGraph
 from langsmith.run_trees import RunTree
 
@@ -58,6 +118,10 @@ from ..tools.question_tools import validation_progress_events
 
 LOGGER = logging.getLogger(__name__)
 
+# The exact node order for a "full" run. NOTE: this mirrors the edges wired in
+# `_build_graph`, but it is kept as a plain list because the *streaming* driver
+# (`generate_events`) walks nodes by hand instead of calling the compiled graph.
+# If you change the graph edges below, keep this list in sync.
 FULL_NODE_SEQUENCE = [
     "orchestrator",
     "problem_statement",
@@ -73,11 +137,15 @@ FULL_NODE_SEQUENCE = [
     "quality_review",
 ]
 
-QC_REFINEMENT_ROUNDS = 3
-FINAL_TEST_COUNT_REPAIR_ROUNDS = 3
-ORACLE_EXPECTED_OUTPUT_REPAIR_ROUNDS = 2
-ORACLE_RUNTIME_LIMIT_SECONDS = 30
+# Retry budgets for the imperative "repair loops" that live outside the graph.
+# LangGraph edges are linear here, so correction is done by re-running work a
+# bounded number of times rather than by looping edges in the graph itself.
+QC_REFINEMENT_ROUNDS = 3  # brute-force-oracle QC passes in refine_test_cases
+FINAL_TEST_COUNT_REPAIR_ROUNDS = 3  # attempts to hit the exact requested test count
+ORACLE_EXPECTED_OUTPUT_REPAIR_ROUNDS = 2  # attempts to fix oracle-derived outputs
+ORACLE_RUNTIME_LIMIT_SECONDS = 30  # brute-force oracle gets a generous time budget
 
+# Human-friendly label per node, shown in SSE progress events and LangSmith spans.
 NODE_LABELS = {
     "orchestrator": "Preparing request",
     "problem_statement": "Writing problem statement",
@@ -95,7 +163,13 @@ NODE_LABELS = {
 
 
 class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
-    """LangGraph workflow that coordinates question-generation agents."""
+    """LangGraph workflow that coordinates question-generation agents.
+
+    This class IS the workflow. It inherits every node implementation from
+    `QuestionAgentNodesMixin` (which composes one mixin per node, e.g.
+    `_problem_statement_node`, `_solution_node`, ...). So `self._problem_statement_node`
+    below is defined in a sibling `nodes/*.py` file and mixed in here.
+    """
 
     def __init__(
         self,
@@ -104,10 +178,15 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         execution_adapter: ExecutionAdapterService,
     ) -> None:
         self._settings = settings
+        # LLM gateway: every node calls the model through this (via `_structured_completion`).
         self._ai_gateway = ai_gateway
+        # Code runner (Judge0-style): used to actually EXECUTE reference solutions
+        # against test cases during the validation node and QC repair loops.
         self._execution_adapter = execution_adapter
         self._current_recruiter_uid = ""
         self._current_workflow_mode = "interactive"
+        # Build the graph once and compile it. `compile()` freezes the node/edge
+        # wiring into an executable object; `self._graph.invoke(state)` runs it.
         self._graph = self._build_graph().compile()
 
     @property
@@ -122,7 +201,15 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         request: QuestionAIDraftRequest,
         existing_questions: list[QuestionRecord],
     ) -> QuestionAIDraftResponse:
-        """Run scoped or full generation and return a recruiter-ready draft."""
+        """Run scoped or full generation and return a recruiter-ready draft.
+
+        This is the NON-streaming entry point. It picks one of two execution
+        paths based on `request.generation_scope`:
+          - "full"  -> invoke the compiled LangGraph (runs all 12 nodes).
+          - anything else -> `_run_scoped_generation` runs just the nodes for
+            that section.
+        Everything is wrapped in a LangSmith run so the whole thing is traced.
+        """
 
         try:
             self._current_recruiter_uid = recruiter_uid
@@ -131,6 +218,8 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 if request.generation_scope == "full"
                 else "interactive"
             )
+            # Turn the API request into the initial shared state dict (the seed
+            # that flows through every node).
             state = self._build_initial_state(request, existing_questions)
             with langsmith_run(
                 self._settings,
@@ -140,6 +229,9 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 metadata=self._langsmith_metadata(recruiter_uid, request),
             ) as parent_run:
                 if request.generation_scope == "full":
+                    # ── PATH 1: real LangGraph execution ──
+                    # `invoke` walks START -> ... -> END, running each node and
+                    # merging its returned patch into the state automatically.
                     result = cast(
                         QuestionGenerationState,
                         self._graph.invoke(
@@ -154,10 +246,13 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                         ),
                     )
                 else:
+                    # ── PATH 2: scoped run ── only the nodes for this section.
                     result = self._run_scoped_generation(
                         state,
                         request.generation_scope,
                     )
+                # Deterministic guardrail: force the final testcase counts to
+                # exactly match what the recruiter asked for (the LLM can drift).
                 result = self._normalize_final_test_counts(result, request)
                 if parent_run is not None:
                     parent_run.end(
@@ -175,6 +270,18 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 solution_validation=None,
                 error=error_message,
             )
+
+    # =========================================================================
+    # REFINEMENT / QC HELPERS (run OUTSIDE the LangGraph)
+    # -------------------------------------------------------------------------
+    # `refine_test_cases` and `refine_solution` are separate entry points the
+    # UI calls on an already-existing draft (the "fix my tests / fix my
+    # solution" buttons). They do NOT run the graph. Instead they reuse the
+    # node functions and the execution adapter inside imperative repair loops.
+    # The core idea: generate an independent "brute-force oracle" solution and
+    # trust its output to decide whether a failing test has a wrong expected
+    # output (fix the test) or the reference solution is buggy (fix the code).
+    # =========================================================================
 
     def refine_test_cases(
         self,
@@ -1210,7 +1317,22 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         request: QuestionAIDraftRequest,
         existing_questions: list[QuestionRecord],
     ) -> Iterator[dict[str, Any]]:
-        """Run generation and yield graph movement progress events."""
+        """Run generation and yield graph-movement progress events (SSE).
+
+        This is PATH 3 (streaming). We do NOT call `self._graph.invoke` here,
+        because LangGraph's invoke is blocking and we want to push live UI
+        updates. So we replicate the graph traversal by hand:
+
+          1. Decide the node sequence (full order, or the scoped subset).
+          2. For each node, yield an "edge" event (moving A -> B), a
+             "node_start" event, run the node, merge its patch into `result`,
+             then yield "node_complete".
+          3. Execution-heavy nodes (validation / multi-language) additionally
+             stream per-test-case events via `_run_node_with_test_events`.
+
+        The yielded dicts become Server-Sent Events the frontend renders as a
+        live progress graph.
+        """
 
         try:
             self._current_recruiter_uid = recruiter_uid
@@ -1223,6 +1345,8 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
             run_inputs = self._langsmith_run_inputs(request, state)
             run_tags = self._langsmith_tags(request)
             run_metadata = self._langsmith_metadata(recruiter_uid, request)
+            # Full run walks every node; a scoped run always starts with the
+            # orchestrator and then only the nodes registered for that scope.
             node_sequence = (
                 FULL_NODE_SEQUENCE
                 if request.generation_scope == "full"
@@ -1231,6 +1355,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                     *SCOPE_NODE_SEQUENCE.get(request.generation_scope, []),
                 ]
             )
+            # `result` is the running state; each node's patch is merged into it.
             result = state
             total = max(len(node_sequence), 1)
             yield {
@@ -1248,8 +1373,10 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 tags=run_tags,
                 metadata=run_metadata,
             ) as parent_run:
+                # Manual traversal of the (virtual) graph, one node at a time.
                 for index, node_name in enumerate(node_sequence, start=1):
                     previous_node = node_sequence[index - 2] if index > 1 else "START"
+                    # "edge" event = we are transitioning previous_node -> node_name.
                     yield {
                         "type": "edge",
                         "scope": request.generation_scope,
@@ -1270,6 +1397,8 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                         "progress": round(((index - 1) / total) * 100),
                     }
                     if node_name in {"validation", "multi_language_solutions"}:
+                        # These nodes execute code against many tests; stream a
+                        # sub-event per test so the UI shows granular progress.
                         patch = yield from self._run_node_with_test_events(
                             node_name,
                             result,
@@ -1279,7 +1408,10 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                             end_progress=round((index / total) * 100),
                         )
                     else:
+                        # Ordinary node: run it and get back its state patch.
                         patch = self._run_traced_node(node_name, result, parent_run)
+                    # Merge the patch into the running state (this is exactly what
+                    # LangGraph does for us automatically on the "full" path).
                     result = self._merge_state(result, patch)
                     yield {
                         "type": "node_complete",
@@ -1331,7 +1463,14 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         start_progress: int,
         end_progress: int,
     ) -> Generator[dict[str, Any], None, QuestionGenerationState]:
-        """Run an execution-capable node while SSE publishes each test result."""
+        """Run an execution-capable node while SSE publishes each test result.
+
+        The node itself is blocking, so we run it on a background thread and use
+        a queue as a bridge: the node pushes per-test "event"s onto the queue
+        (via the `validation_progress_events` context manager), and this
+        generator drains the queue, `yield`ing each event to the SSE stream
+        until the thread reports its final "result" (the node's state patch).
+        """
 
         event_queue: Queue[tuple[str, Any]] = Queue()
 
@@ -1381,7 +1520,15 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         request: QuestionAIDraftRequest,
         existing_questions: list[QuestionRecord],
     ) -> QuestionGenerationState:
-        """Normalize request context for one generation run."""
+        """Normalize request context into the initial LangGraph state dict.
+
+        This produces the "seed" `QuestionGenerationState` that enters the graph
+        at the orchestrator node. It copies request settings (language, limits,
+        counts) into the state, and — crucially for scoped regeneration — if the
+        recruiter already has a partial draft (`request.current_draft`), it
+        pre-fills the state with that existing content so a node can refine
+        instead of starting from scratch.
+        """
 
         current_draft = request.current_draft
         title_hint = (
@@ -1515,7 +1662,14 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         state: QuestionGenerationState,
         scope: str,
     ) -> QuestionGenerationState:
-        """Run only the agents needed for one builder section."""
+        """Run only the nodes needed for one builder section (non-streaming).
+
+        This is the manual mini-graph for PATH 2. It always runs the
+        orchestrator first, then each node listed for this scope in
+        `SCOPE_NODE_SEQUENCE`, merging every patch into `result` just like
+        LangGraph would. Example: scope "tests" runs
+        orchestrator -> examples -> hidden_tests -> constraint_script.
+        """
 
         result = self._merge_state(
             state,
@@ -1537,6 +1691,9 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self,
         node_name: str,
     ) -> Callable[[QuestionGenerationState], QuestionGenerationState]:
+        # Maps a node's string name to its actual method (all inherited from the
+        # node mixins). This dispatch table is what lets the scoped/streaming
+        # drivers run nodes by name without going through the compiled graph.
         node_runners = {
             "orchestrator": self._orchestrator_node,
             "problem_statement": self._problem_statement_node,
@@ -2025,7 +2182,13 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         state: QuestionGenerationState,
         parent_run: RunTree | None = None,
     ) -> QuestionGenerationState:
-        """Run one node with a compact LangSmith child span."""
+        """Run one node by name, wrapped in a LangSmith child span for tracing.
+
+        Used by the scoped and streaming drivers. It looks the node up in the
+        `_node_runner` table, calls it with the current state, and returns the
+        node's patch. The LangSmith span makes each node show up as a nested
+        step in the trace UI.
+        """
 
         node_label = NODE_LABELS.get(node_name, node_name.replace("_", " ").title())
         with langsmith_run(
@@ -2166,7 +2329,29 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         }
 
     def _build_graph(self) -> StateGraph[QuestionGenerationState]:
+        """Wire the LangGraph: declare the nodes, then connect them with edges.
+
+        This is the heart of the LangGraph. Two steps:
+
+          STEP A — register nodes: `add_node(name, fn)` tells LangGraph "when we
+          reach the node called <name>, call this function with the state". The
+          functions here are the node methods inherited from the mixins.
+
+          STEP B — connect edges: `add_edge(a, b)` means "after node `a`
+          finishes, go to node `b`". Because every edge is unconditional, this
+          graph is a straight line (no branches/loops). `START -> orchestrator`
+          sets the entry point; `quality_review -> END` marks the exit.
+
+        The compiled version of this graph is what `generate()` runs for the
+        "full" scope. (Registration order does not matter; only the edges
+        define the execution order.)
+        """
+
+        # `StateGraph(QuestionGenerationState)` tells LangGraph the shape of the
+        # shared state every node reads from and writes patches to.
         graph: StateGraph[QuestionGenerationState] = StateGraph(QuestionGenerationState)
+
+        # STEP A: register each node function under a string name.
         graph.add_node("orchestrator", self._orchestrator_node)
         graph.add_node("problem_statement", self._problem_statement_node)
         graph.add_node("metadata", self._metadata_node)
@@ -2180,7 +2365,8 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         graph.add_node("duplicate_detection", self._duplicate_detection_node)
         graph.add_node("quality_review", self._quality_review_node)
 
-        graph.add_edge(START, "orchestrator")
+        # STEP B: connect the nodes into a single linear pipeline.
+        graph.add_edge(START, "orchestrator")  # entry point
         graph.add_edge("orchestrator", "problem_statement")
         graph.add_edge("problem_statement", "constraints")
         graph.add_edge("constraints", "examples")
@@ -2192,7 +2378,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         graph.add_edge("multi_language_solutions", "metadata")
         graph.add_edge("metadata", "duplicate_detection")
         graph.add_edge("duplicate_detection", "quality_review")
-        graph.add_edge("quality_review", END)
+        graph.add_edge("quality_review", END)  # exit point
         return graph
 
 

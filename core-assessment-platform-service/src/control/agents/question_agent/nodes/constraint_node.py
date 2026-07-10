@@ -16,6 +16,16 @@ class ConstraintNodeMixin(QuestionAgentToolsMixin):
     def _constraint_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
+        """NODE 3/12 — finalizes constraints and execution limits.
+
+        Reads: the problem context built so far.
+        Does: one LLM call (-> `ConstraintOutput`) to firm up the constraints
+        text and the runtime budget (candidate solve time, per-execution time
+        limit in seconds, memory limit in MB). May also tidy the I/O formats.
+        Writes: constraints + the time/memory limits used later when the
+        validation node actually executes the solution.
+        """
+
         system_prompt, user_prompt = build_constraint_prompt(state)
         model = self._structured_completion(
             schema_name="constraints",

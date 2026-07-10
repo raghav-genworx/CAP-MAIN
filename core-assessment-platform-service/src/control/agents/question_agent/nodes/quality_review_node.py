@@ -16,6 +16,15 @@ class QualityReviewNodeMixin(QuestionAgentToolsMixin):
     def _quality_review_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
+        """NODE 12/12 — the final node before END. Scores publish-readiness.
+
+        Reads: the entire completed draft.
+        Does: one LLM call (-> `QualityOutput`) giving quality / readiness /
+        AI-confidence scores (0-100) and a one-line summary. If duplicate
+        warnings exist, it appends a "Duplicate review required." note.
+        Writes: the three scores and the final `summary` shown to the recruiter.
+        """
+
         system_prompt, user_prompt = build_quality_review_prompt(state)
         model = self._structured_completion(
             schema_name="quality_review",

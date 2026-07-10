@@ -23,6 +23,11 @@ INTERNAL_TOKEN_SECRET="${INTERNAL_TOKEN_SECRET:-gwx-cap-internal-service-token}"
 CANDIDATE_SECRET_SECRET="${CANDIDATE_SECRET_SECRET:-gwx-cap-candidate-session-secret}"
 INVITE_PEPPER_SECRET="${INVITE_PEPPER_SECRET:-gwx-cap-invite-token-pepper}"
 GROQ_API_KEY_SECRET="${GROQ_API_KEY_SECRET:-gwx-cap-groq-api-key}"
+GROQ_API_KEY_1_SECRET="${GROQ_API_KEY_1_SECRET:-gwx-cap-groq-api-key-1}"
+GROQ_API_KEY_2_SECRET="${GROQ_API_KEY_2_SECRET:-gwx-cap-groq-api-key-2}"
+GROQ_API_KEY_3_SECRET="${GROQ_API_KEY_3_SECRET:-gwx-cap-groq-api-key-3}"
+GROQ_API_KEY_4_SECRET="${GROQ_API_KEY_4_SECRET:-gwx-cap-groq-api-key-4}"
+LANGSMITH_API_KEY_SECRET="${LANGSMITH_API_KEY_SECRET:-gwx-cap-langsmith-api-key}"
 BREVO_API_KEY_SECRET="${BREVO_API_KEY_SECRET:-gwx-cap-brevo-api-key}"
 
 DB_NAME="${DB_NAME:-cap_core}"
@@ -406,6 +411,26 @@ maybe_add_secret_mapping() {
   fi
 }
 
+read_core_env_var() {
+  local key="$1"
+  local file="core-assessment-platform-service/.env"
+
+  [[ -f "$file" ]] || return 0
+  python3 - "$key" "$file" <<'PY'
+import sys
+
+key, path = sys.argv[1], sys.argv[2]
+for line in open(path, encoding="utf-8"):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name, value = stripped.split("=", 1)
+    if name.strip() == key:
+        print(value.strip().strip('"').strip("'"))
+        break
+PY
+}
+
 read_frontend_env_var() {
   local key="$1"
   local file="frontend/.env"
@@ -497,6 +522,23 @@ main() {
   ensure_secret_value "$INVITE_PEPPER_SECRET" "${INVITE_TOKEN_PEPPER:-}" random_secret
   if [[ -n "${GROQ_API_KEY:-}" ]]; then
     ensure_secret_value "$GROQ_API_KEY_SECRET" "$GROQ_API_KEY"
+  fi
+  local groq_slot groq_slot_secret groq_slot_value
+  for groq_slot in 1 2 3 4; do
+    groq_slot_secret="GROQ_API_KEY_${groq_slot}_SECRET"
+    groq_slot_value="${!groq_slot_secret}"
+    local env_var="GROQ_API_KEY_${groq_slot}"
+    local resolved="${!env_var:-}"
+    if [[ -z "$resolved" ]]; then
+      resolved="$(read_core_env_var "$env_var")"
+    fi
+    if [[ -n "$resolved" ]]; then
+      ensure_secret_value "$groq_slot_value" "$resolved"
+    fi
+  done
+  local langsmith_key="${LANGSMITH_API_KEY:-$(read_core_env_var LANGSMITH_API_KEY)}"
+  if [[ -n "$langsmith_key" ]]; then
+    ensure_secret_value "$LANGSMITH_API_KEY_SECRET" "$langsmith_key"
   fi
   if [[ -n "${BREVO_API_KEY:-}" ]]; then
     ensure_secret_value "$BREVO_API_KEY_SECRET" "$BREVO_API_KEY"
@@ -600,12 +642,20 @@ main() {
     GROQ_RETRY_COUNT="${GROQ_RETRY_COUNT:-3}" \
     GROQ_RETRY_BACKOFF_SECONDS="${GROQ_RETRY_BACKOFF_SECONDS:-0.5}" \
     GROQ_REQUEST_TIMEOUT_SECONDS="${GROQ_REQUEST_TIMEOUT_SECONDS:-60}" \
+    LANGSMITH_TRACING="${LANGSMITH_TRACING:-true}" \
+    LANGSMITH_ENDPOINT="${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}" \
+    LANGSMITH_PROJECT="${LANGSMITH_PROJECT:-CAP}" \
     BREVO_BASE_URL="${BREVO_BASE_URL:-https://api.brevo.com/v3}" \
     BREVO_SENDER_EMAIL="${BREVO_SENDER_EMAIL:-}" \
     BREVO_SENDER_NAME="${BREVO_SENDER_NAME:-CAP Assessments}" \
     BREVO_REQUEST_TIMEOUT_SECONDS="${BREVO_REQUEST_TIMEOUT_SECONDS:-30}")"
   core_secrets="DATABASE_URL=${DATABASE_URL_SECRET}:latest,INTERNAL_SERVICE_TOKEN=${INTERNAL_TOKEN_SECRET}:latest,INVITE_TOKEN_PEPPER=${INVITE_PEPPER_SECRET}:latest,CANDIDATE_SESSION_SECRET=${CANDIDATE_SECRET_SECRET}:latest"
   core_secrets+="$(maybe_add_secret_mapping GROQ_API_KEY "$GROQ_API_KEY_SECRET")"
+  core_secrets+="$(maybe_add_secret_mapping GROQ_API_KEY_1 "$GROQ_API_KEY_1_SECRET")"
+  core_secrets+="$(maybe_add_secret_mapping GROQ_API_KEY_2 "$GROQ_API_KEY_2_SECRET")"
+  core_secrets+="$(maybe_add_secret_mapping GROQ_API_KEY_3 "$GROQ_API_KEY_3_SECRET")"
+  core_secrets+="$(maybe_add_secret_mapping GROQ_API_KEY_4 "$GROQ_API_KEY_4_SECRET")"
+  core_secrets+="$(maybe_add_secret_mapping LANGSMITH_API_KEY "$LANGSMITH_API_KEY_SECRET")"
   core_secrets+="$(maybe_add_secret_mapping BREVO_API_KEY "$BREVO_API_KEY_SECRET")"
 
   deploy_migration_job "$CORE_MIGRATION_JOB_NAME" "$core_image" "$core_env" "$core_secrets"

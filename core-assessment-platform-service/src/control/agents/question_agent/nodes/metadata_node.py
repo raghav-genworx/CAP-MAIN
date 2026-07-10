@@ -23,6 +23,15 @@ class MetadataNodeMixin(QuestionAgentToolsMixin):
     """Metadata node for the question agent."""
 
     def _metadata_node(self, state: QuestionGenerationState) -> QuestionGenerationState:
+        """NODE 10/12 — classifies the finished problem.
+
+        Runs late (after tests + solution exist) so it can judge the real
+        difficulty. One LLM call (-> `MetadataOutput`).
+        Writes: `difficulty`, `tags`, `category`, expected solve time, and
+        solution approach / time & space complexity. Marks metadata_status as
+        CLASSIFIED and difficulty_source as AI.
+        """
+
         system_prompt, user_prompt = build_metadata_prompt(
             state,
             sample_cases=self._prompt_cases(state.get("sample_test_cases", [])),

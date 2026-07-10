@@ -16,6 +16,18 @@ class SolutionNodeMixin(QuestionAgentToolsMixin):
     """Solution node for the question agent."""
 
     def _solution_node(self, state: QuestionGenerationState) -> QuestionGenerationState:
+        """NODE 7/12 — writes the PRIMARY reference solution (actual source code).
+
+        Reads: full problem context + sample/hidden cases in the reference language.
+        Does: one LLM call (-> `SolutionOutput`), then
+        `_ensure_runnable_reference_solution` guards against the model returning
+        prose/pseudocode instead of real, runnable code (it retries if so).
+        Writes: `reference_solution` (source), the per-language
+        `reference_solutions` map, `supported_languages`, and complexity notes.
+        NOTE: this node only WRITES the code; the next node (validation) is what
+        actually RUNS it against the tests.
+        """
+
         reference_language = state.get("reference_language", "python")
         system_prompt, user_prompt = build_solution_prompt(
             state,
