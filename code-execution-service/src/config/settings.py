@@ -73,7 +73,7 @@ class Settings(BaseSettings):
         description="Default memory limit sent to Judge0 submissions.",
     )
     java_minimum_memory_limit_kb: int = Field(
-        default=384000,
+        default=512000,
         ge=256000,
         le=512000,
         description=(

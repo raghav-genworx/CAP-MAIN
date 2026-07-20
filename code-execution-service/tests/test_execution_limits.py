@@ -39,7 +39,7 @@ class ExecutionLimitTests(TestCase):
         self.assertGreaterEqual(client._poll_attempt_budget(2), 30)
 
     def test_java_receives_room_for_vm_overhead(self) -> None:
-        service = CodeExecutionService(Settings(java_minimum_memory_limit_kb=384000))
+        service = CodeExecutionService(Settings(java_minimum_memory_limit_kb=512000))
         payload = service._build_payload(
             ExecutionRequest(
                 source_code="class Main {}",
@@ -47,10 +47,11 @@ class ExecutionLimitTests(TestCase):
                 memory_limit=256 * 1024,
             )
         )
-        self.assertEqual(payload["memory_limit"], 384000)
+        self.assertEqual(payload["memory_limit"], 512000)
+        self.assertEqual(payload["language_id"], 1003)
 
     def test_non_java_memory_limit_is_not_inflated(self) -> None:
-        service = CodeExecutionService(Settings(java_minimum_memory_limit_kb=384000))
+        service = CodeExecutionService(Settings(java_minimum_memory_limit_kb=512000))
         payload = service._build_payload(
             ExecutionRequest(
                 source_code="print(1)",

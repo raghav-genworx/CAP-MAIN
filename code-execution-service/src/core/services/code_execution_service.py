@@ -6,6 +6,7 @@ from config.settings import Settings
 from constants.languages import (
     COMPILED_JUDGE0_LANGUAGE_IDS,
     JAVA_JUDGE0_LANGUAGE_ID,
+    JAVA_RUNTIME_JUDGE0_LANGUAGE_ID,
     JUDGE0_LANGUAGE_ALIASES,
     SUPPORTED_JUDGE0_LANGUAGE_IDS,
 )
@@ -228,7 +229,7 @@ class CodeExecutionService:
             raise UnsupportedLanguageError(str(language_id))
         payload: Judge0Payload = {
             "source_code": request.source_code,
-            "language_id": language_id,
+            "language_id": self._runtime_language_id(language_id),
             "stdin": request.stdin,
             "expected_output": request.expected_output,
             "command_line_arguments": request.command_line_arguments,
@@ -243,6 +244,14 @@ class CodeExecutionService:
         if language_id in COMPILED_JUDGE0_LANGUAGE_IDS:
             payload["compiler_options"] = request.compiler_options
         return {key: value for key, value in payload.items() if value is not None}
+
+    @staticmethod
+    def _runtime_language_id(language_id: int) -> int:
+        """Map public language IDs to deployment-specific Judge0 runtimes."""
+
+        if language_id == JAVA_JUDGE0_LANGUAGE_ID:
+            return JAVA_RUNTIME_JUDGE0_LANGUAGE_ID
+        return language_id
 
     def _memory_limit_for_language(
         self,
