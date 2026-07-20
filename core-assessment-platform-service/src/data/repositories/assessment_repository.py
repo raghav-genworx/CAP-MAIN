@@ -7,6 +7,7 @@ from data.models.postgres.assessment_slot import AssessmentSlotModel
 from data.models.postgres.assessment_template import AssessmentTemplateModel
 from data.models.postgres.candidate import CandidateModel
 from data.models.postgres.candidate_assessment import CandidateAssessmentModel
+from data.models.postgres.candidate_proctor_event import CandidateProctorEventModel
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.submission import SubmissionModel
 from data.repositories.base import BaseRepository
@@ -268,6 +269,21 @@ class AssessmentRepository(BaseRepository):
         """Return a candidate assignment by ID."""
 
         return self._session.get(CandidateAssessmentModel, candidate_assessment_id)
+
+    def get_proctor_event(
+        self,
+        *,
+        candidate_assessment_id: str,
+        client_event_id: str,
+    ) -> CandidateProctorEventModel | None:
+        """Return an already accepted browser event for idempotent retries."""
+
+        stmt = select(CandidateProctorEventModel).where(
+            CandidateProctorEventModel.candidate_assessment_id
+            == candidate_assessment_id,
+            CandidateProctorEventModel.client_event_id == client_event_id,
+        )
+        return self._session.execute(stmt).scalar_one_or_none()
 
     def get_candidate_context_models(
         self,

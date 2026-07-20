@@ -1,0 +1,641 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1160" viewBox="0 0 1920 1160" role="img" aria-labelledby="title desc">
+  <title id="title">CAP Platform Architecture on Google Cloud</title>
+  <desc id="desc">Production architecture diagram for the Coding Assessment Platform deployed on Google Cloud with Cloud Run services, Cloud Run jobs, a worker pool, Artifact Registry, Secret Manager, VPC connector, PostgreSQL, Redis, Judge0 on GCE, Firebase, Groq, LangSmith, and Brevo.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7faff"/>
+      <stop offset="100%" stop-color="#eef4fb"/>
+    </linearGradient>
+    <linearGradient id="gcpHeader" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1a73e8"/>
+      <stop offset="100%" stop-color="#34a853"/>
+    </linearGradient>
+    <linearGradient id="cloudRun" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e8f0fe"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="dataFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eef7ff"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#1b2a4a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a73e8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#188038"/>
+    </marker>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f29900"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6f89"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        fill: #172033;
+      }
+      .title {
+        font-size: 48px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+      .subtitle {
+        font-size: 22px;
+        fill: #526173;
+      }
+      .header-title,
+      .header-meta {
+        fill: #ffffff;
+      }
+      .header-title {
+        font-size: 24px;
+        font-weight: 700;
+      }
+      .header-meta {
+        font-size: 18px;
+        font-weight: 600;
+      }
+      .text-blue {
+        fill: #1a73e8;
+      }
+      .text-green {
+        fill: #188038;
+      }
+      .eyebrow {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+      .section-title {
+        font-size: 23px;
+        font-weight: 700;
+      }
+      .node-title {
+        font-size: 24px;
+        font-weight: 700;
+      }
+      .node-subtitle {
+        font-size: 18px;
+        fill: #56657a;
+      }
+      .node-detail {
+        font-size: 16px;
+        fill: #637187;
+      }
+      .tiny {
+        font-size: 14px;
+        fill: #667389;
+      }
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 14px;
+        fill: #4d5c73;
+      }
+      .pill {
+        font-size: 15px;
+        font-weight: 700;
+        fill: #335b9f;
+      }
+      .label {
+        font-size: 15px;
+        font-weight: 700;
+        fill: #28415f;
+      }
+      .caption {
+        font-size: 15px;
+        fill: #5d6b80;
+      }
+      .canvas {
+        fill: url(#bg);
+      }
+      .outer {
+        fill: #ffffff;
+        stroke: #bdd0ea;
+        stroke-width: 2;
+        filter: url(#shadow);
+      }
+      .client-panel {
+        fill: #ffffff;
+        stroke: #ccd8ea;
+        stroke-width: 2;
+        filter: url(#shadow);
+      }
+      .section {
+        fill: #f8fbff;
+        stroke: #d5e0ee;
+        stroke-width: 2;
+      }
+      .section-soft {
+        fill: #ffffff;
+        stroke: #dce5f1;
+        stroke-width: 2;
+      }
+      .node {
+        fill: #ffffff;
+        stroke: #cbd8ea;
+        stroke-width: 2;
+        filter: url(#shadow);
+      }
+      .node-run {
+        fill: url(#cloudRun);
+        stroke: #9bbcf4;
+      }
+      .node-data {
+        fill: url(#dataFill);
+        stroke: #a8c7fa;
+      }
+      .node-external {
+        fill: #ffffff;
+        stroke: #d0d8e5;
+      }
+      .node-gce {
+        fill: #fff8ec;
+        stroke: #f9c66a;
+      }
+      .stripe-blue {
+        fill: #1a73e8;
+      }
+      .stripe-green {
+        fill: #188038;
+      }
+      .stripe-red {
+        fill: #d93025;
+      }
+      .stripe-yellow {
+        fill: #f29900;
+      }
+      .stripe-purple {
+        fill: #7b61ff;
+      }
+      .stripe-gray {
+        fill: #64748b;
+      }
+      .edge {
+        fill: none;
+        stroke: #1a73e8;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowBlue);
+      }
+      .edge-internal {
+        fill: none;
+        stroke: #188038;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowGreen);
+      }
+      .edge-data {
+        fill: none;
+        stroke: #5f6f89;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowGray);
+      }
+      .edge-build {
+        fill: none;
+        stroke: #f29900;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowOrange);
+      }
+      .edge-dashed {
+        fill: none;
+        stroke: #1a73e8;
+        stroke-width: 3;
+        stroke-dasharray: 10 8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowBlue);
+      }
+      .edge-secret {
+        fill: none;
+        stroke: #7b61ff;
+        stroke-width: 3;
+        stroke-dasharray: 8 8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrowGray);
+      }
+      svg > path.edge,
+      svg > path.edge-internal,
+      svg > path.edge-data,
+      svg > path.edge-build,
+      svg > path.edge-dashed,
+      svg > path.edge-secret {
+        display: none;
+      }
+      .edge-label-bg {
+        fill: #ffffff;
+        stroke: #d5e0ee;
+        stroke-width: 1;
+      }
+      .icon-stroke {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .icon-fill {
+        fill: currentColor;
+      }
+      .blue {
+        color: #1a73e8;
+      }
+      .green {
+        color: #188038;
+      }
+      .red {
+        color: #d93025;
+      }
+      .yellow {
+        color: #f29900;
+      }
+      .purple {
+        color: #7b61ff;
+      }
+      .gray {
+        color: #64748b;
+      }
+    </style>
+  </defs>
+
+  <rect class="canvas" x="0" y="0" width="1920" height="1160"/>
+
+  <text class="title" x="960" y="58" text-anchor="middle">CAP Platform Architecture on Google Cloud</text>
+  <text class="subtitle" x="960" y="94" text-anchor="middle">Production deployment view for Cloud Run, GCE Judge0, managed data, secrets, and external SaaS integrations</text>
+
+  <g id="edge-layer">
+    <path class="edge" d="M317 288 H390 Q405 288 405 442 H420"/>
+    <path class="edge" d="M317 428 H370 Q390 428 390 485 H420"/>
+    <path class="edge" d="M680 485 H758"/>
+    <path class="edge-internal" d="M838 538 V578 H555 V650"/>
+    <path class="edge-internal" d="M900 538 V592 H845 V650"/>
+    <path class="edge-internal" d="M970 538 V592 H1112 V650"/>
+    <path class="edge-internal" d="M690 713 H735"/>
+    <path class="edge-internal" d="M690 752 C810 812 880 812 1000 752"/>
+    <path class="edge-internal" d="M1224 713 H1268"/>
+    <path class="edge-internal" d="M955 713 H1508 Q1522 713 1522 642 H1565"/>
+    <path class="edge-data" d="M555 776 V830 Q555 846 571 846 H989 V906"/>
+    <path class="edge-data" d="M1112 776 V832 Q1112 846 1090 846 H989 V906"/>
+    <path class="edge-data" d="M1351 776 V832 Q1351 846 1080 846 H989 V906"/>
+    <path class="edge-data" d="M610 776 V868 Q610 884 626 884 H1292 V906"/>
+    <path class="edge-data" d="M1555 750 H1488 Q1468 750 1468 906 H1292"/>
+    <path class="edge-data" d="M1555 644 H1456 Q1430 644 1430 906 H989"/>
+    <path class="edge-data" d="M500 906 V884 Q500 860 858 860 V906"/>
+    <path class="edge-data" d="M681 906 V874 Q681 860 858 860 V906"/>
+    <path class="edge-build" d="M605 302 H645"/>
+    <path class="edge-build" d="M742 326 V354 H552 Q532 354 532 442"/>
+    <path class="edge-build" d="M742 326 V354 H904 V426"/>
+    <path class="edge-build" d="M742 326 V354 H845 V650"/>
+    <path class="edge-build" d="M741 326 V354 H1510 Q1524 354 1524 618 H1565"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V392 H936 V426"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V612 H555 V650"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V612 H845 V650"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V612 H1112 V650"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V836 H500 V906"/>
+    <path class="edge-secret" d="M974 326 V352 H1448 V836 H681 V906"/>
+    <path class="edge-dashed" d="M1199 326 V352 H1430 V433 H1419"/>
+    <path class="edge-dashed" d="M1199 326 V352 H1430 V628 H1112 V650"/>
+    <path class="edge-dashed" d="M1050 455 V360 H1510 Q1524 360 1524 229 H1565"/>
+    <path class="edge-dashed" d="M690 674 H714 V570 H1494 Q1522 570 1522 313 H1565"/>
+    <path class="edge-dashed" d="M1112 650 V570 H1494 Q1522 570 1522 313 H1565"/>
+    <path class="edge-dashed" d="M690 696 H714 V570 H1484 Q1500 570 1500 397 H1565"/>
+    <path class="edge-dashed" d="M690 735 H714 V570 H1496 Q1522 570 1522 397 H1714"/>
+  </g>
+
+  <!-- Clients -->
+  <g id="clients">
+    <rect class="client-panel" x="42" y="150" width="275" height="345" rx="24"/>
+    <text class="eyebrow text-blue" x="75" y="196">Users</text>
+    <g transform="translate(80 225)" class="blue">
+      <rect class="icon-stroke" x="0" y="17" width="58" height="40" rx="6"/>
+      <path class="icon-stroke" d="M20 68h18M29 57v11"/>
+    </g>
+    <text class="node-title" x="165" y="257">Recruiter UI</text>
+    <text class="node-subtitle" x="165" y="284">dashboard + bank</text>
+    <text class="node-subtitle" x="165" y="309">scorecards + alerts</text>
+    <line x1="74" y1="340" x2="285" y2="340" stroke="#e1e9f5" stroke-width="2"/>
+    <g transform="translate(80 365)" class="green">
+      <path class="icon-stroke" d="M29 6a22 22 0 0 1 22 22v13a22 22 0 0 1-44 0V28A22 22 0 0 1 29 6z"/>
+      <path class="icon-stroke" d="M7 55c10 14 34 14 44 0"/>
+    </g>
+    <text class="node-title" x="165" y="392">Candidate UI</text>
+    <text class="node-subtitle" x="165" y="419">invite + editor</text>
+    <text class="node-subtitle" x="165" y="444">runs + submit</text>
+  </g>
+
+  <!-- Main GCP boundary -->
+  <g id="gcp">
+    <rect class="outer" x="355" y="130" width="1145" height="910" rx="30"/>
+    <rect x="355" y="130" width="1145" height="56" rx="30" fill="url(#gcpHeader)"/>
+    <path d="M355 158q0-28 30-28h1085q30 0 30 28v28H355z" fill="url(#gcpHeader)"/>
+    <text class="header-title" x="394" y="166">Google Cloud Platform</text>
+    <text class="header-meta" x="1468" y="166" text-anchor="end">project: gwx-internship-2026-01 | region: us-east1</text>
+
+    <!-- Build and config section -->
+    <rect class="section" x="390" y="215" width="1075" height="128" rx="20"/>
+    <text class="section-title" x="420" y="253">Build, Release, and Runtime Configuration</text>
+
+    <g id="cloud-build">
+      <rect class="node" x="420" y="278" width="185" height="48" rx="14"/>
+      <rect class="stripe-yellow" x="420" y="278" width="8" height="48" rx="4"/>
+      <text class="label" x="444" y="307">Cloud Build / buildx</text>
+    </g>
+
+    <g id="artifact-registry">
+      <rect class="node" x="645" y="278" width="192" height="48" rx="14"/>
+      <rect class="stripe-yellow" x="645" y="278" width="8" height="48" rx="4"/>
+      <text class="label" x="670" y="307">Artifact Registry</text>
+    </g>
+
+    <g id="secret-manager">
+      <rect class="node" x="878" y="278" width="192" height="48" rx="14"/>
+      <rect class="stripe-purple" x="878" y="278" width="8" height="48" rx="4"/>
+      <text class="label" x="903" y="307">Secret Manager</text>
+    </g>
+
+    <g id="vpc-connector">
+      <rect class="node" x="1112" y="278" width="174" height="48" rx="14"/>
+      <rect class="stripe-green" x="1112" y="278" width="8" height="48" rx="4"/>
+      <text class="label" x="1138" y="307">VPC Connector</text>
+    </g>
+
+    <g id="service-account">
+      <rect class="node" x="1324" y="278" width="111" height="48" rx="14"/>
+      <rect class="stripe-gray" x="1324" y="278" width="8" height="48" rx="4"/>
+      <text class="label" x="1352" y="307">IAM SA</text>
+    </g>
+
+    <!-- Cloud Run public edge -->
+    <rect class="section-soft" x="390" y="380" width="1075" height="172" rx="20"/>
+    <text class="section-title" x="420" y="418">Public Cloud Run Edge</text>
+
+    <g id="frontend-service">
+      <rect class="node node-run" x="420" y="442" width="260" height="86" rx="18"/>
+      <rect class="stripe-blue" x="420" y="442" width="260" height="8" rx="4"/>
+      <text class="node-title" x="448" y="478">Frontend</text>
+      <text class="mono" x="448" y="502">cap-frontend</text>
+      <text class="node-detail" x="448" y="521">React SPA + Nginx on port 80</text>
+    </g>
+
+    <g id="gateway-service">
+      <rect class="node node-run" x="758" y="426" width="292" height="112" rx="18"/>
+      <rect class="stripe-purple" x="758" y="426" width="292" height="8" rx="4"/>
+      <text class="node-title" x="786" y="463">API Gateway</text>
+      <text class="mono" x="786" y="487">cap-api-gateway-service</text>
+      <text class="node-detail" x="786" y="509">auth policy, reverse proxy, SSE</text>
+      <text class="node-detail" x="786" y="529">injects internal service token</text>
+    </g>
+
+    <g id="edge-policy">
+      <rect x="1126" y="433" width="293" height="96" rx="16" fill="#f8fbff" stroke="#dce5f1" stroke-width="2"/>
+      <text class="label" x="1150" y="464">Gateway route policy</text>
+      <text class="node-detail" x="1150" y="489">Firebase recruiter auth</text>
+      <text class="node-detail" x="1150" y="512">Candidate session token auth</text>
+    </g>
+
+    <!-- Cloud Run application services -->
+    <rect class="section-soft" x="390" y="585" width="1075" height="220" rx="20"/>
+    <text class="section-title" x="420" y="623">Application Cloud Run Services</text>
+
+    <g id="core-service">
+      <rect class="node node-run" x="420" y="650" width="270" height="126" rx="18"/>
+      <rect class="stripe-green" x="420" y="650" width="270" height="8" rx="4"/>
+      <text class="node-title" x="448" y="687">Core Platform</text>
+      <text class="mono" x="448" y="711">cap-core-assessment-platform</text>
+      <text class="node-detail" x="448" y="735">assessments, roles, candidates</text>
+      <text class="node-detail" x="448" y="758">AI questions, invites, notifications</text>
+    </g>
+
+    <g id="execution-service">
+      <rect class="node node-run" x="735" y="650" width="220" height="126" rx="18"/>
+      <rect class="stripe-yellow" x="735" y="650" width="220" height="8" rx="4"/>
+      <text class="node-title" x="763" y="687">Code Execution</text>
+      <text class="mono" x="763" y="711">cap-code-execution</text>
+      <text class="node-detail" x="763" y="735">backend-only Judge0 adapter</text>
+      <text class="node-detail" x="763" y="758">sample + hidden batch runs</text>
+    </g>
+
+    <g id="evaluation-service">
+      <rect class="node node-run" x="1000" y="650" width="224" height="126" rx="18"/>
+      <rect class="stripe-red" x="1000" y="650" width="224" height="8" rx="4"/>
+      <text class="node-title" x="1028" y="687">Code Evaluation</text>
+      <text class="mono" x="1028" y="711">cap-code-evaluation</text>
+      <text class="node-detail" x="1028" y="735">jobs, scoring, ranking</text>
+      <text class="node-detail" x="1028" y="758">dashboards + PDF reports</text>
+    </g>
+
+    <g id="worker-pool">
+      <rect class="node node-run" x="1268" y="650" width="166" height="126" rx="18"/>
+      <rect class="stripe-red" x="1268" y="650" width="166" height="8" rx="4"/>
+      <text class="node-title" x="1296" y="687">Worker Pool</text>
+      <text class="mono" x="1296" y="711">cap-evaluation-worker</text>
+      <text class="node-detail" x="1296" y="735">polls pending jobs</text>
+      <text class="node-detail" x="1296" y="758">leased processing</text>
+    </g>
+
+    <!-- Jobs and data -->
+    <rect class="section-soft" x="390" y="842" width="398" height="148" rx="20"/>
+    <text class="section-title" x="420" y="880">Release Jobs</text>
+    <g id="core-migration-job">
+      <rect class="node" x="420" y="906" width="160" height="54" rx="14"/>
+      <rect class="stripe-green" x="420" y="906" width="8" height="54" rx="4"/>
+      <text class="label" x="444" y="930">Core Alembic</text>
+      <text class="mono" x="444" y="950">migrate job</text>
+    </g>
+    <g id="evaluation-migration-job">
+      <rect class="node" x="604" y="906" width="154" height="54" rx="14"/>
+      <rect class="stripe-red" x="604" y="906" width="8" height="54" rx="4"/>
+      <text class="label" x="628" y="930">Eval Alembic</text>
+      <text class="mono" x="628" y="950">migrate job</text>
+    </g>
+
+    <rect class="section-soft" x="828" y="842" width="637" height="148" rx="20"/>
+    <text class="section-title" x="858" y="880">Managed Data and Runtime State</text>
+
+    <g id="postgres">
+      <rect class="node node-data" x="858" y="906" width="262" height="62" rx="16"/>
+      <rect class="stripe-blue" x="858" y="906" width="8" height="62" rx="4"/>
+      <text class="label" x="885" y="931">Cloud SQL / PostgreSQL</text>
+      <text class="node-detail" x="885" y="953">cap_core, evaluation, judge0 DBs</text>
+    </g>
+
+    <g id="redis">
+      <rect class="node node-data" x="1154" y="906" width="276" height="62" rx="16"/>
+      <rect class="stripe-red" x="1154" y="906" width="8" height="62" rx="4"/>
+      <text class="label" x="1181" y="931">Memorystore Redis / Redis</text>
+      <text class="node-detail" x="1181" y="953">notifications pub/sub + Judge0 queue</text>
+    </g>
+  </g>
+
+  <!-- External SaaS -->
+  <g id="external">
+    <rect class="outer" x="1535" y="130" width="340" height="330" rx="28"/>
+    <text class="section-title" x="1565" y="174">External SaaS</text>
+
+    <g id="firebase">
+      <rect class="node node-external" x="1565" y="198" width="280" height="62" rx="16"/>
+      <rect class="stripe-yellow" x="1565" y="198" width="8" height="62" rx="4"/>
+      <text class="label" x="1592" y="224">Firebase Authentication</text>
+      <text class="node-detail" x="1592" y="247">recruiter identity + web config</text>
+    </g>
+
+    <g id="groq">
+      <rect class="node node-external" x="1565" y="282" width="280" height="62" rx="16"/>
+      <rect class="stripe-green" x="1565" y="282" width="8" height="62" rx="4"/>
+      <text class="label" x="1592" y="308">Groq / OpenAI-compatible AI</text>
+      <text class="node-detail" x="1592" y="331">question generation + code review</text>
+    </g>
+
+    <g id="langsmith">
+      <rect class="node node-external" x="1565" y="366" width="134" height="62" rx="16"/>
+      <rect class="stripe-blue" x="1565" y="366" width="8" height="62" rx="4"/>
+      <text class="label" x="1592" y="392">LangSmith</text>
+      <text class="node-detail" x="1592" y="415">AI tracing</text>
+    </g>
+
+    <g id="brevo">
+      <rect class="node node-external" x="1714" y="366" width="131" height="62" rx="16"/>
+      <rect class="stripe-blue" x="1714" y="366" width="8" height="62" rx="4"/>
+      <text class="label" x="1741" y="392">Brevo</text>
+      <text class="node-detail" x="1741" y="415">invite email</text>
+    </g>
+  </g>
+
+  <!-- GCE Judge0 -->
+  <g id="gce-judge0">
+    <rect class="outer" x="1535" y="505" width="340" height="335" rx="28"/>
+    <text class="section-title" x="1565" y="549">Compute Engine</text>
+    <text class="mono" x="1565" y="575">gwx-gce-intern-01 | us-east1-b</text>
+
+    <g id="judge0-server">
+      <rect class="node node-gce" x="1565" y="606" width="280" height="72" rx="16"/>
+      <rect class="stripe-yellow" x="1565" y="606" width="8" height="72" rx="4"/>
+      <text class="label" x="1592" y="633">Judge0 Server</text>
+      <text class="node-detail" x="1592" y="656">HTTP API :8080 mapped to 2358</text>
+    </g>
+
+    <g id="judge0-worker">
+      <rect class="node node-gce" x="1565" y="700" width="280" height="72" rx="16"/>
+      <rect class="stripe-yellow" x="1565" y="700" width="8" height="72" rx="4"/>
+      <text class="label" x="1592" y="727">Judge0 Worker</text>
+      <text class="node-detail" x="1592" y="750">privileged compile/run workers</text>
+    </g>
+
+    <text class="caption" x="1565" y="812">Runs cap-judge0-slim image and uses</text>
+    <text class="caption" x="1565" y="834">PostgreSQL + Redis for submissions.</text>
+  </g>
+
+  <!-- Security and flow legend -->
+  <g id="legend">
+    <rect class="client-panel" x="42" y="545" width="275" height="250" rx="24"/>
+    <text class="eyebrow text-blue" x="75" y="591">Key Traffic</text>
+    <line x1="78" y1="625" x2="140" y2="625" class="edge" marker-end="url(#arrowBlue)"/>
+    <text class="caption" x="158" y="631">browser HTTPS</text>
+    <line x1="78" y1="670" x2="140" y2="670" class="edge-internal" marker-end="url(#arrowGreen)"/>
+    <text class="caption" x="158" y="676">service-to-service</text>
+    <line x1="78" y1="715" x2="140" y2="715" class="edge-data" marker-end="url(#arrowGray)"/>
+    <text class="caption" x="158" y="721">data/runtime state</text>
+    <line x1="78" y1="760" x2="140" y2="760" class="edge-secret" marker-end="url(#arrowGray)"/>
+    <text class="caption" x="158" y="766">secrets/config</text>
+
+    <rect class="client-panel" x="42" y="825" width="275" height="165" rx="24"/>
+    <text class="eyebrow text-green" x="75" y="871">Security</text>
+    <text class="caption" x="75" y="910">Public entry is Cloud Run frontend</text>
+    <text class="caption" x="75" y="935">plus API gateway. Execution and</text>
+    <text class="caption" x="75" y="960">evaluation remain backend-only</text>
+    <text class="caption" x="75" y="985">behind internal service tokens.</text>
+  </g>
+
+  <!-- Edges: clients and public edge -->
+  <path class="edge" d="M317 288 H390 Q405 288 405 442 H420"/>
+  <path class="edge" d="M317 428 H370 Q390 428 390 485 H420"/>
+  <rect class="edge-label-bg" x="322" y="245" width="128" height="28" rx="12"/>
+  <text class="tiny" x="386" y="264" text-anchor="middle">HTTPS UI</text>
+
+  <path class="edge" d="M680 485 H758"/>
+  <rect class="edge-label-bg" x="684" y="449" width="73" height="28" rx="12"/>
+  <text class="tiny" x="720" y="468" text-anchor="middle">/api/v1</text>
+
+  <!-- Edges: gateway to services -->
+  <path class="edge-internal" d="M838 538 V578 H555 V650"/>
+  <rect class="edge-label-bg" x="552" y="568" width="154" height="28" rx="12"/>
+  <text class="tiny" x="629" y="587" text-anchor="middle">/core/* routes</text>
+
+  <path class="edge-internal" d="M900 538 V592 H845 V650"/>
+  <rect class="edge-label-bg" x="814" y="567" width="122" height="28" rx="12"/>
+  <text class="tiny" x="875" y="586" text-anchor="middle">internal token</text>
+
+  <path class="edge-internal" d="M970 538 V592 H1112 V650"/>
+  <rect class="edge-label-bg" x="1012" y="567" width="122" height="28" rx="12"/>
+  <text class="tiny" x="1073" y="586" text-anchor="middle">internal token</text>
+
+  <!-- Edges: app service orchestration -->
+  <path class="edge-internal" d="M690 713 H735"/>
+  <path class="edge-internal" d="M690 752 C810 812 880 812 1000 752"/>
+  <path class="edge-internal" d="M1224 713 H1268"/>
+
+  <!-- Edges: execution to Judge0 -->
+  <path class="edge-internal" d="M955 713 H1508 Q1522 713 1522 642 H1565"/>
+  <rect class="edge-label-bg" x="1334" y="676" width="134" height="28" rx="12"/>
+  <text class="tiny" x="1401" y="695" text-anchor="middle">JUDGE0_BASE_URL</text>
+
+  <!-- Edges: data layer -->
+  <path class="edge-data" d="M555 776 V830 Q555 846 571 846 H989 V906"/>
+  <path class="edge-data" d="M1112 776 V832 Q1112 846 1090 846 H989 V906"/>
+  <path class="edge-data" d="M1351 776 V832 Q1351 846 1080 846 H989 V906"/>
+
+  <path class="edge-data" d="M610 776 V868 Q610 884 626 884 H1292 V906"/>
+  <path class="edge-data" d="M1555 750 H1488 Q1468 750 1468 906 H1292"/>
+  <path class="edge-data" d="M1555 644 H1456 Q1430 644 1430 906 H989"/>
+
+  <path class="edge-data" d="M500 906 V884 Q500 860 858 860 V906"/>
+  <path class="edge-data" d="M681 906 V874 Q681 860 858 860 V906"/>
+
+  <!-- Edges: build/release/config -->
+  <path class="edge-build" d="M605 302 H645"/>
+  <path class="edge-build" d="M742 326 V354 H552 Q532 354 532 442"/>
+  <path class="edge-build" d="M742 326 V354 H904 V426"/>
+  <path class="edge-build" d="M742 326 V354 H845 V650"/>
+  <path class="edge-build" d="M741 326 V354 H1510 Q1524 354 1524 618 H1565"/>
+
+  <path class="edge-secret" d="M974 326 V352 H1448 V392 H936 V426"/>
+  <path class="edge-secret" d="M974 326 V352 H1448 V612 H555 V650"/>
+  <path class="edge-secret" d="M974 326 V352 H1448 V612 H845 V650"/>
+  <path class="edge-secret" d="M974 326 V352 H1448 V612 H1112 V650"/>
+  <path class="edge-secret" d="M974 326 V352 H1448 V836 H500 V906"/>
+  <path class="edge-secret" d="M974 326 V352 H1448 V836 H681 V906"/>
+
+  <path class="edge-dashed" d="M1199 326 V352 H1430 V433 H1419"/>
+  <path class="edge-dashed" d="M1199 326 V352 H1430 V628 H1112 V650"/>
+
+  <!-- Edges: external SaaS -->
+  <path class="edge-dashed" d="M1050 455 V360 H1510 Q1524 360 1524 229 H1565"/>
+  <path class="edge-dashed" d="M690 674 H714 V570 H1494 Q1522 570 1522 313 H1565"/>
+  <path class="edge-dashed" d="M1112 650 V570 H1494 Q1522 570 1522 313 H1565"/>
+  <path class="edge-dashed" d="M690 696 H714 V570 H1484 Q1500 570 1500 397 H1565"/>
+  <path class="edge-dashed" d="M690 735 H714 V570 H1496 Q1522 570 1522 397 H1714"/>
+
+  <!-- Callout labels -->
+  <rect class="edge-label-bg" x="1138" y="430" width="174" height="28" rx="12"/>
+  <text class="tiny" x="1225" y="449" text-anchor="middle">JWT + session checks</text>
+
+  <rect class="edge-label-bg" x="421" y="809" width="227" height="28" rx="12"/>
+  <text class="tiny" x="535" y="828" text-anchor="middle">migrations before traffic shift</text>
+
+  <rect class="edge-label-bg" x="851" y="809" width="255" height="28" rx="12"/>
+  <text class="tiny" x="979" y="828" text-anchor="middle">scores, reports, roles, submissions</text>
+
+  <rect class="edge-label-bg" x="1187" y="809" width="213" height="28" rx="12"/>
+  <text class="tiny" x="1294" y="828" text-anchor="middle">SSE notifications + queues</text>
+</svg>

@@ -11,6 +11,7 @@ export interface CandidateInviteVerificationResponse {
   end_at: string;
   allow_resume: boolean;
   status: "not_started" | "in_progress" | "submitted" | "auto_submitted";
+  slot_status: "draft" | "scheduled" | "active" | "paused" | "closed";
   can_start: boolean;
 }
 
@@ -44,6 +45,15 @@ export interface CandidateDraft {
   draft_code: string;
   final_code: string;
   status: string;
+  version: number;
+  sample_run_result: Partial<CandidateSampleRunResponse>;
+  hidden_check_result: Partial<CandidateHiddenCheckResponse>;
+  submission_result: {
+    status?: string;
+    passed_count?: number;
+    total_count?: number;
+    passed?: boolean;
+  };
   last_saved_at: string | null;
   submitted_at: string | null;
 }
@@ -67,6 +77,7 @@ export interface CandidateAssessmentPortal {
   deadline_at: string | null;
   submitted_at: string | null;
   status: "not_started" | "in_progress" | "submitted" | "auto_submitted";
+  slot_status: "draft" | "scheduled" | "active" | "paused" | "closed";
   current_question_order: number;
   time_remaining_seconds: number;
   tab_switch_count: number;
@@ -87,18 +98,21 @@ export interface CandidateCheckpointPayload {
   copy_paste_count?: number;
   fullscreen_exit_count?: number;
   question_time_seconds?: Record<string, number>;
+  base_version?: number;
 }
 
 export interface CandidateCheckpointResponse {
   question_id: string;
   saved_at: string;
   status: string;
+  version: number;
 }
 
 export interface CandidateCodeRunPayload {
   question_id: string;
   source_code: string;
   language: string;
+  base_version?: number;
 }
 
 export interface CandidateExecutionCaseResult {
@@ -122,6 +136,7 @@ export interface CandidateSampleRunResponse {
   passed_count: number;
   total_count: number;
   results: CandidateExecutionCaseResult[];
+  version: number;
 }
 
 export interface CandidateHiddenCheckResponse {
@@ -130,6 +145,7 @@ export interface CandidateHiddenCheckResponse {
   total_count: number;
   remaining_attempts: number | null;
   cooldown_remaining_seconds: number;
+  version: number;
   results: Array<{
     index: number;
     status: string;
@@ -137,6 +153,13 @@ export interface CandidateHiddenCheckResponse {
     execution_time: string;
     error_type: string;
   }>;
+}
+
+export interface CandidateProctorEventResponse {
+  accepted: boolean;
+  tab_switch_count: number;
+  copy_paste_count: number;
+  fullscreen_exit_count: number;
 }
 
 export interface CandidateSubmitPayload {

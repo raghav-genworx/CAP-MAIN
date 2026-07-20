@@ -12,6 +12,12 @@ JUDGE0_GCE_INSTANCE="${JUDGE0_GCE_INSTANCE:-gwx-gce-intern-01}"
 JUDGE0_GCE_ZONE="${JUDGE0_GCE_ZONE:-us-east1-b}"
 JUDGE0_LISTEN_PORT="${JUDGE0_LISTEN_PORT:-8080}"
 JUDGE0_BASE_URL="${JUDGE0_BASE_URL:-http://10.0.1.2:${JUDGE0_LISTEN_PORT}}"
+# The Judge0 server + worker + an actively-executing submission (up to
+# MAX_MEMORY_LIMIT) do not fit in the 1 GB of an e2-micro: the first real
+# submission drives the box into memory pressure and the API server wedges
+# permanently (every endpoint, including /languages, times out). e2-medium
+# (4 GB) runs the same workload comfortably. Enforce a minimum before deploy.
+JUDGE0_GCE_MACHINE_TYPE="${JUDGE0_GCE_MACHINE_TYPE:-e2-medium}"
 
 DATABASE_URL_SECRET="${DATABASE_URL_SECRET:-gwx-cap-database-url}"
 DB_USER="${DB_USER:-raghavs}"
@@ -22,6 +28,12 @@ POSTGRES_DB="${POSTGRES_DB:-judge0}"
 
 REDIS_HOST="${REDIS_HOST:-10.188.96.203}"
 REDIS_PORT="${REDIS_PORT:-6379}"
+# Leave empty when the Redis/Memorystore instance has AUTH disabled. An empty
+# REDIS_PASSWORD must NOT be passed to Judge0: the Ruby redis client treats an
+# empty-string password as truthy and still issues `AUTH ""`, which a no-auth
+# Redis rejects, breaking every Resque-backed operation (submission enqueue,
+# /workers) while DB-only endpoints (/languages) keep working.
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 
 JUDGE0_SECRET_KEY_BASE="${JUDGE0_SECRET_KEY_BASE:-cap-gcp-judge0-secret-change-me}"
 BUILD_MODE="${BUILD_MODE:-docker}"
@@ -142,11 +154,33 @@ ensure_compute_artifact_access() {
 
 render_startup_script() {
   local image="$1"
+  # Only pass REDIS_PASSWORD when it is actually set. Passing an empty value
+  # makes Judge0 send `AUTH ""` to a no-auth Redis and 500 on every submission.
+  local redis_password_line=""
+  if [[ -n "${REDIS_PASSWORD}" ]]; then
+    redis_password_line="  -e \"REDIS_PASSWORD=${REDIS_PASSWORD}\""
+  fi
   cat <<SCRIPT
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Judge0's isolate (v1) requires cgroup v1. Ubuntu 24.04 "Noble" defaults to
+# the unified cgroup v2 hierarchy, under which even plain isolate box setup is
+# unreliable. Force cgroup v1 via a GRUB drop-in. This only takes effect after
+# the NEXT boot, so the first stop/start applies the flag and a subsequent
+# stop/start actually runs the containers under cgroup v1. Idempotent.
+mkdir -p /etc/default/grub.d
+cat > /etc/default/grub.d/99-judge0-cgroupv1.cfg <<'GRUBCFG'
+GRUB_CMDLINE_LINUX="\$GRUB_CMDLINE_LINUX systemd.unified_cgroup_hierarchy=0 systemd.legacy_systemd_cgroup_controller=1"
+GRUBCFG
+update-grub || true
+if grep -q "systemd.unified_cgroup_hierarchy=0" /proc/cmdline; then
+  echo "JUDGE0_CGROUP_V1_ACTIVE=yes"
+else
+  echo "JUDGE0_CGROUP_V1_ACTIVE=no (reboot again to apply)"
+fi
 
 apt-get update
 apt-get install -y --no-install-recommends docker.io curl ca-certificates jq
@@ -170,11 +204,21 @@ COMMON_ENV=(
   -e "POSTGRES_PASSWORD=${DB_PASSWORD}"
   -e "REDIS_HOST=${REDIS_HOST}"
   -e "REDIS_PORT=${REDIS_PORT}"
-  -e "REDIS_PASSWORD="
+${redis_password_line}
   -e "SECRET_KEY_BASE=${JUDGE0_SECRET_KEY_BASE}"
   -e "RAILS_ENV=production"
   -e "RAILS_MAX_THREADS=2"
   -e "RAILS_SERVER_PROCESSES=1"
+  # Judge0 runs isolate with --cg whenever EITHER per-process/thread limit is
+  # disabled (the default). isolate --cg needs the memory & cpuset cgroup v1
+  # controllers, but Docker does not expose /sys/fs/cgroup/memory inside the
+  # container, so `isolate --cg --init` fails, returns an empty box path, and
+  # every submission dies with "No such file or directory - /box/script.py"
+  # (status "Internal Error"). Enabling BOTH per-process limits makes Judge0
+  # use plain `isolate --init`, which works. (Requires cgroup v1 on the host;
+  # see the GRUB drop-in written by the startup script below.)
+  -e "ENABLE_PER_PROCESS_AND_THREAD_TIME_LIMIT=true"
+  -e "ENABLE_PER_PROCESS_AND_THREAD_MEMORY_LIMIT=true"
 )
 
 docker run -d --name judge0-server --restart unless-stopped --privileged \\
@@ -190,7 +234,12 @@ sleep 10
 docker ps -a
 
 for _ in \$(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:${JUDGE0_LISTEN_PORT}/languages" >/dev/null; then
+  # /languages only needs Postgres; /workers exercises the Redis/Resque path
+  # that real submissions use. Gate on BOTH so a broken Redis connection does
+  # not falsely report the deployment as ready.
+  if curl -fsS "http://127.0.0.1:${JUDGE0_LISTEN_PORT}/languages" >/dev/null \\
+    && curl -fsS "http://127.0.0.1:${JUDGE0_LISTEN_PORT}/workers" >/dev/null; then
+    echo "JUDGE0_READY"
     exit 0
   fi
   sleep 5
@@ -227,6 +276,21 @@ deploy_to_gce() {
   gcloud compute instances stop "$JUDGE0_GCE_INSTANCE" \
     --zone="$JUDGE0_GCE_ZONE" \
     --project="$PROJECT_ID"
+
+  # A running submission needs more RAM than an e2-micro provides; ensure the
+  # VM is at least ${JUDGE0_GCE_MACHINE_TYPE} while it is stopped.
+  local current_machine_type
+  current_machine_type="$(gcloud compute instances describe "$JUDGE0_GCE_INSTANCE" \
+    --zone="$JUDGE0_GCE_ZONE" \
+    --project="$PROJECT_ID" \
+    --format='value(machineType.basename())')"
+  if [[ "$current_machine_type" != "$JUDGE0_GCE_MACHINE_TYPE" ]]; then
+    log "Resizing ${JUDGE0_GCE_INSTANCE} from ${current_machine_type} to ${JUDGE0_GCE_MACHINE_TYPE}"
+    gcloud compute instances set-machine-type "$JUDGE0_GCE_INSTANCE" \
+      --zone="$JUDGE0_GCE_ZONE" \
+      --project="$PROJECT_ID" \
+      --machine-type="$JUDGE0_GCE_MACHINE_TYPE"
+  fi
 
   log "Starting ${JUDGE0_GCE_INSTANCE}"
   gcloud compute instances start "$JUDGE0_GCE_INSTANCE" \

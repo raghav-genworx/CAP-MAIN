@@ -15118,16 +15118,28 @@ body.question-generation-locked {
   box-shadow: 0 14px 30px rgba(2, 6, 23, 0.24);
 }
 
-.candidate-portal-pro .candidate-question-button.is-submitted:not(.is-selected) {
+.candidate-portal-pro .candidate-question-button.is-submitted.is-passed:not(.is-selected) {
   border-color: rgba(34, 197, 94, 0.55);
 }
 
-.candidate-portal-pro .candidate-question-button.is-submitted em {
+.candidate-portal-pro .candidate-question-button.is-submitted.is-passed em {
   color: #86efac;
 }
 
-.candidate-portal-pro .candidate-question-button.is-selected.is-submitted em {
+.candidate-portal-pro .candidate-question-button.is-selected.is-submitted.is-passed em {
   color: #047857;
+}
+
+.candidate-portal-pro .candidate-question-button.is-submitted.is-failed:not(.is-selected) {
+  border-color: rgba(248, 113, 113, 0.7);
+}
+
+.candidate-portal-pro .candidate-question-button.is-submitted.is-failed em {
+  color: #fca5a5;
+}
+
+.candidate-portal-pro .candidate-question-button.is-selected.is-submitted.is-failed em {
+  color: #b91c1c;
 }
 
 .candidate-sidebar-checklist {
@@ -16037,12 +16049,14 @@ body.question-generation-locked {
 }
 
 .candidate-portal-pro .candidate-sidebar-header h2 {
+  color: #ffffff;
   font-size: 18px;
   line-height: 1.12;
   margin: 5px 0;
 }
 
 .candidate-portal-pro .candidate-sidebar-header p {
+  color: #e8cc7a;
   font-size: 12px;
   margin: 0;
 }

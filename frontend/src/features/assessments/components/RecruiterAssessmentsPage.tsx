@@ -692,7 +692,7 @@ function CreateAssessmentView({
   const scoringIsValid = scoringTotal === 100;
   const basicsReady =
     assessmentForm.title.trim().length >= 3 &&
-    assessmentForm.passing_score >= 0 &&
+    assessmentForm.passing_score > 0 &&
     assessmentForm.passing_score <= 100;
   const questionById = useMemo(
     () => new Map(questionBank.map((question) => [question.id, question])),
@@ -750,7 +750,18 @@ function CreateAssessmentView({
   const questionSetReady = deliveryConfigured && (assessmentForm.shuffle_questions
     ? selectedQuestionIds.length >= desiredQuestionCount && randomPoolMatchesBlueprint
     : selectedQuestionIds.length === desiredQuestionCount && blueprintMismatches.length === 0);
-  const rulesReady = scoringIsValid && assessmentForm.supported_languages.length > 0;
+  const languageMismatches = selectedQuestionIds
+    .map((questionId) => questionById.get(questionId))
+    .filter((question): question is QuestionRecord => Boolean(question))
+    .filter((question) =>
+      assessmentForm.supported_languages.some(
+        (language) => !question.supported_languages.includes(language),
+      ),
+    );
+  const rulesReady =
+    scoringIsValid &&
+    assessmentForm.supported_languages.length > 0 &&
+    languageMismatches.length === 0;
   const requiredMark = <em className="required-indicator" aria-hidden="true">*</em>;
   const sectionDefinitions = [
     {
@@ -1144,13 +1155,13 @@ function CreateAssessmentView({
                   </span>
                   <span
                     className={
-                      assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
+                      assessmentForm.passing_score > 0 && assessmentForm.passing_score <= 100
                         ? "is-ready"
                         : "is-needed"
                     }
                   >
                     Passing score{" "}
-                    {assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
+                    {assessmentForm.passing_score > 0 && assessmentForm.passing_score <= 100
                       ? "ready"
                       : "out of range"}
                   </span>
@@ -1189,7 +1200,7 @@ function CreateAssessmentView({
                         <Gauge size={16} />
                         <input
                           type="number"
-                          min={0}
+                          min={1}
                           max={100}
                           value={assessmentForm.passing_score}
                           onChange={(event) =>
@@ -1928,6 +1939,12 @@ function CreateAssessmentView({
                             );
                           })}
                         </div>
+                        {languageMismatches.length > 0 ? (
+                          <p className="form-error">
+                            Every selected language must be supported by every question.
+                            Incompatible: {languageMismatches.map((item) => item.title).join(", ")}.
+                          </p>
+                        ) : null}
                       </label>
                     </div>
 
@@ -2515,7 +2532,7 @@ function AssessmentDetailView({
                     <span>Passing score</span>
                     <input
                       type="number"
-                      min={0}
+                      min={1}
                       max={100}
                       value={assessmentEditForm.passing_score}
                       onChange={(event) =>

@@ -61,6 +61,7 @@ from data.models.postgres.assessment_slot import AssessmentSlotModel
 from data.models.postgres.assessment_template import AssessmentTemplateModel
 from data.models.postgres.candidate import CandidateModel
 from data.models.postgres.candidate_assessment import CandidateAssessmentModel
+from data.models.postgres.candidate_proctor_event import CandidateProctorEventModel
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.submission import SubmissionModel
 from data.repositories.assessment_repository import AssessmentRepository
@@ -110,6 +111,8 @@ from schemas.candidate_portal import (
     CandidateCheckpointResponse,
     CandidateCodeRunRequest,
     CandidateInviteVerificationResponse,
+    CandidateProctorEventRequest,
+    CandidateProctorEventResponse,
     CandidateQuestionDraftRecord,
     CandidateQuestionRecord,
     CandidateSessionClaims,
@@ -281,7 +284,18 @@ class AssessmentService:
         model.max_hidden_checks = 0
         model.hidden_check_cooldown_seconds = HIDDEN_CHECK_COOLDOWN_SECONDS
         if payload.supported_languages is not None:
-            model.supported_languages = normalize_languages(payload.supported_languages)
+            proposed_languages = normalize_languages(payload.supported_languages)
+            mappings = self._assessment_mappings(model.id)
+            if mappings:
+                records = self._question_bank_records(
+                    recruiter_uid,
+                    [item.question_id for item in mappings],
+                )
+                self._assert_assessment_language_coverage(
+                    proposed_languages,
+                    records,
+                )
+            model.supported_languages = proposed_languages
         if payload.status is not None:
             model.status = (
                 AssessmentStatus.ARCHIVED.value
@@ -427,7 +441,11 @@ class AssessmentService:
                 if payload.duration_minutes is not None
                 else slot.duration_minutes
             ),
-            reject_past_start=True,
+            reject_past_start=(
+                payload.start_at is not None
+                and payload.start_at.astimezone(UTC)
+                != slot.start_at.astimezone(UTC)
+            ),
         )
 
         if payload.title is not None:
@@ -497,6 +515,8 @@ class AssessmentService:
                         seconds=paused_delta,
                     )
         elif payload.action == "extend":
+            if effective_slot_status(slot, now=now) == SlotStatus.CLOSED:
+                raise AssessmentValidationError("Closed tests cannot be extended")
             if payload.extend_minutes <= 0:
                 raise AssessmentValidationError(
                     "Enter extension minutes greater than zero"
@@ -514,7 +534,30 @@ class AssessmentService:
                     )
         elif payload.action == "close":
             slot.status = SlotStatus.CLOSED.value
-            slot.end_at = min(slot.end_at.astimezone(UTC), now)
+            if now > slot.start_at.astimezone(UTC):
+                slot.end_at = min(slot.end_at.astimezone(UTC), now)
+            for assignment in assignments:
+                if assignment.status != CandidateAssessmentStatus.IN_PROGRESS.value:
+                    continue
+                self.submit_assessment(
+                    CandidateSessionClaims(
+                        candidate_assessment_id=assignment.id,
+                        assessment_id=assignment.assessment_id,
+                        slot_id=assignment.slot_id,
+                        candidate_id=assignment.candidate_id,
+                        exp=int(now.timestamp()) + 60,
+                    ),
+                    CandidateSubmitRequest(
+                        answers=[],
+                        auto_submit=True,
+                        submission_tag="slot_closed",
+                        submission_message=(
+                            "Assessment auto-submitted because the recruiter closed "
+                            "the test slot."
+                        ),
+                    ),
+                    auto_submit=True,
+                )
         else:
             raise AssessmentValidationError("Unsupported slot action")
 
@@ -582,7 +625,6 @@ class AssessmentService:
         slot = self._get_slot(recruiter_uid, slot_id)
         if slot is None:
             raise AssessmentNotFoundError("Assessment slot not found")
-
         existing_assignments = self._slot_candidate_assignments(recruiter_uid, slot_id)
         existing_emails = {item.email.lower() for item in existing_assignments}
         parsed = parse_candidate_csv(
@@ -1315,6 +1357,7 @@ class AssessmentService:
         slot = self._get_slot(recruiter_uid, slot_id)
         if slot is None:
             raise AssessmentNotFoundError("Assessment slot not found")
+        self._assert_slot_accepts_invites(slot)
 
         try:
             items = self._repository.list_invite_targets(
@@ -1365,6 +1408,7 @@ class AssessmentService:
         slot = self._get_slot(recruiter_uid, slot_id)
         if slot is None:
             raise AssessmentNotFoundError("Assessment slot not found")
+        self._assert_slot_accepts_invites(slot)
         assessment = self._get_assessment(recruiter_uid, slot.assessment_id)
         if assessment is None:
             raise AssessmentNotFoundError()
@@ -1511,6 +1555,7 @@ class AssessmentService:
             end_at=context.slot.end_at,
             allow_resume=context.assessment.allow_resume,
             status=CandidateAssessmentStatus(context.candidate_assessment.status),
+            slot_status=effective_slot_status(context.slot),
             can_start=self._candidate_can_start(context),
         )
 
@@ -1526,13 +1571,6 @@ class AssessmentService:
         now = datetime.now(UTC)
         assignment = context.candidate_assessment
         assessment = context.assessment
-        if (
-            assignment.started_at
-            and not assessment.allow_resume
-            and assignment.status != CandidateAssessmentStatus.NOT_STARTED.value
-        ):
-            raise CandidateInviteError("Resume is disabled for this assessment")
-
         if (
             assignment.started_at is None
             or assignment.status == CandidateAssessmentStatus.NOT_STARTED.value
@@ -1559,7 +1597,13 @@ class AssessmentService:
                     )
                 ),
             )
-        if assignment.deadline_at.astimezone(UTC) <= now:
+        session_deadline = assignment.deadline_at.astimezone(UTC)
+        if (
+            effective_slot_status(context.slot, now=now) == SlotStatus.PAUSED
+            and context.slot.paused_at is not None
+        ):
+            session_deadline += now - context.slot.paused_at.astimezone(UTC)
+        if session_deadline <= now:
             raise CandidateInviteError(
                 "This assessment no longer has time remaining to start"
             )
@@ -1567,7 +1611,7 @@ class AssessmentService:
         assignment.last_activity_at = now
         self._ensure_submission_rows(context)
         expires_at = self._candidate_session_service.expires_at_from_deadline(
-            assignment.deadline_at
+            session_deadline
         )
         token = self._candidate_session_service.issue_session(
             candidate_assessment_id=assignment.id,
@@ -1599,6 +1643,11 @@ class AssessmentService:
         context = self._load_candidate_context_by_claims(claims)
         self._auto_submit_if_expired(context)
         context = self._load_candidate_context_by_claims(claims)
+        if effective_slot_status(context.slot) in {
+            SlotStatus.DRAFT,
+            SlotStatus.SCHEDULED,
+        }:
+            raise AssessmentValidationError("This assessment is not active")
 
         instructions = (
             context.slot.instructions_override.strip()
@@ -1612,6 +1661,10 @@ class AssessmentService:
                 draft_code=submission.draft_code,
                 final_code=submission.final_code,
                 status=SubmissionStatus(submission.status),
+                version=submission.version,
+                sample_run_result=dict(submission.sample_run_result or {}),
+                hidden_check_result=dict(submission.hidden_check_result or {}),
+                submission_result=self._candidate_safe_submission_result(submission),
                 last_saved_at=submission.last_saved_at,
                 submitted_at=submission.submitted_at,
             )
@@ -1641,11 +1694,9 @@ class AssessmentService:
             deadline_at=context.candidate_assessment.deadline_at,
             submitted_at=context.candidate_assessment.submitted_at,
             status=CandidateAssessmentStatus(context.candidate_assessment.status),
+            slot_status=effective_slot_status(context.slot),
             current_question_order=context.candidate_assessment.current_question_order,
-            time_remaining_seconds=max(
-                0,
-                time_remaining_seconds(context.candidate_assessment.deadline_at) or 0,
-            ),
+            time_remaining_seconds=self._candidate_time_remaining_seconds(context),
             tab_switch_count=context.candidate_assessment.tab_switch_count,
             copy_paste_count=context.candidate_assessment.copy_paste_count,
             fullscreen_exit_count=context.candidate_assessment.fullscreen_exit_count,
@@ -1668,10 +1719,12 @@ class AssessmentService:
         self._assert_candidate_can_edit(context)
         self._validate_question_language(context, payload.question_id, payload.language)
         submission = self._get_submission_for_question(context, payload.question_id)
+        self._assert_draft_version(submission, payload.base_version)
         now = datetime.now(UTC)
         submission.draft_code = payload.source_code
         submission.source_language = payload.language.strip().lower()
         submission.last_saved_at = now
+        submission.version += 1
         context.candidate_assessment.current_question_order = (
             payload.current_question_order
         )
@@ -1693,6 +1746,7 @@ class AssessmentService:
             question_id=payload.question_id,
             saved_at=now,
             status=SubmissionStatus(submission.status),
+            version=submission.version,
         )
 
     def run_sample(
@@ -1706,6 +1760,8 @@ class AssessmentService:
         self._assert_candidate_can_edit(context)
         question = self._question_by_id(context, payload.question_id)
         self._validate_question_language(context, payload.question_id, payload.language)
+        submission = self._get_submission_for_question(context, payload.question_id)
+        self._assert_draft_version(submission, payload.base_version)
         sample_tests = complete_test_cases(question.sample_test_cases)
         results, passed_count, total_count = self._execute_candidate_test_batch(
             question=question,
@@ -1715,7 +1771,6 @@ class AssessmentService:
             run_type="sample_run",
         )
 
-        submission = self._get_submission_for_question(context, payload.question_id)
         now = datetime.now(UTC)
         submission.draft_code = payload.source_code
         submission.source_language = payload.language.strip().lower()
@@ -1725,6 +1780,7 @@ class AssessmentService:
             "results": [item.model_dump(mode="json") for item in results],
         }
         submission.last_saved_at = now
+        submission.version += 1
         context.candidate_assessment.last_activity_at = now
 
         try:
@@ -1740,6 +1796,7 @@ class AssessmentService:
             passed_count=passed_count,
             total_count=total_count,
             results=results,
+            version=submission.version,
         )
 
     def run_hidden_check(
@@ -1753,6 +1810,8 @@ class AssessmentService:
         self._assert_candidate_can_edit(context)
         question = self._question_by_id(context, payload.question_id)
         self._validate_question_language(context, payload.question_id, payload.language)
+        submission = self._get_submission_for_question(context, payload.question_id)
+        self._assert_draft_version(submission, payload.base_version)
 
         assignment = context.candidate_assessment
         now = datetime.now(UTC)
@@ -1773,7 +1832,6 @@ class AssessmentService:
             test_cases=hidden_tests,
             run_type="hidden_check",
         )
-        submission = self._get_submission_for_question(context, payload.question_id)
         assignment.hidden_checks_used += 1
         assignment.last_hidden_check_at = now
         assignment.last_activity_at = now
@@ -1794,6 +1852,7 @@ class AssessmentService:
             ],
         }
         submission.last_saved_at = now
+        submission.version += 1
         try:
             self._repository.commit()
         except SQLAlchemyError as exc:
@@ -1818,6 +1877,52 @@ class AssessmentService:
                 )
                 for item in results
             ],
+            version=submission.version,
+        )
+
+    def record_proctor_event(
+        self,
+        claims: CandidateSessionClaims,
+        payload: CandidateProctorEventRequest,
+    ) -> CandidateProctorEventResponse:
+        """Persist one idempotent violation and increment server-owned counters."""
+
+        context = self._load_candidate_context_by_claims(claims)
+        self._assert_candidate_can_edit(context)
+        assignment = context.candidate_assessment
+        existing = self._repository.get_proctor_event(
+            candidate_assessment_id=assignment.id,
+            client_event_id=payload.client_event_id,
+        )
+        accepted = existing is None
+        if accepted:
+            event = CandidateProctorEventModel(
+                candidate_assessment_id=assignment.id,
+                client_event_id=payload.client_event_id,
+                event_type=payload.event_type,
+                occurred_at=payload.occurred_at.astimezone(UTC),
+            )
+            self._repository.add(event)
+            if payload.event_type in {"tab_hidden", "window_blur"}:
+                assignment.tab_switch_count += 1
+            elif payload.event_type == "clipboard":
+                assignment.copy_paste_count += 1
+            elif payload.event_type == "fullscreen_exit":
+                assignment.fullscreen_exit_count += 1
+            assignment.last_activity_at = datetime.now(UTC)
+            try:
+                self._repository.commit()
+            except SQLAlchemyError as exc:
+                self._repository.rollback()
+                raise AssessmentStoreUnavailableError(
+                    "Unable to store proctoring event"
+                ) from exc
+
+        return CandidateProctorEventResponse(
+            accepted=accepted,
+            tab_switch_count=assignment.tab_switch_count,
+            copy_paste_count=assignment.copy_paste_count,
+            fullscreen_exit_count=assignment.fullscreen_exit_count,
         )
 
     def submit_assessment(
@@ -1848,6 +1953,17 @@ class AssessmentService:
                 submission_message=context.candidate_assessment.submission_message,
             )
 
+        if not auto_submit:
+            slot_status = effective_slot_status(context.slot)
+            deadline = context.candidate_assessment.deadline_at
+            if slot_status == SlotStatus.CLOSED or (
+                deadline is not None
+                and datetime.now(UTC) > deadline.astimezone(UTC)
+            ):
+                self._auto_submit_if_expired(context)
+                return self.submit_assessment(claims, payload, auto_submit=True)
+            self._assert_candidate_can_edit(context)
+
         answer_by_question = {item.question_id: item for item in payload.answers}
         summaries: list[SubmissionExecutionSummary] = []
         now = datetime.now(UTC)
@@ -1872,6 +1988,7 @@ class AssessmentService:
                 self._validate_question_language(context, question.id, answer.language)
                 submission.draft_code = answer.source_code
                 submission.source_language = answer.language.strip().lower()
+                submission.version += 1
             source_code = submission.draft_code.strip()
             if not source_code:
                 source_code = submission.final_code.strip()
@@ -2048,20 +2165,11 @@ class AssessmentService:
         assignment: CandidateAssessmentModel,
         payload: CandidateCheckpointRequest | CandidateSubmitRequest,
     ) -> None:
-        """Keep cumulative browser evidence monotonic across retries and resumes."""
+        """Merge timing evidence without trusting client-supplied violation totals."""
 
-        assignment.tab_switch_count = max(
-            assignment.tab_switch_count,
-            payload.tab_switch_count,
-        )
-        assignment.copy_paste_count = max(
-            assignment.copy_paste_count,
-            payload.copy_paste_count,
-        )
-        assignment.fullscreen_exit_count = max(
-            assignment.fullscreen_exit_count,
-            payload.fullscreen_exit_count,
-        )
+        # Violation counters are incremented only by record_proctor_event. Legacy
+        # aggregate fields remain in the payload for rollout compatibility but are
+        # intentionally ignored so a browser cannot reset or replace server totals.
         merged_times = dict(assignment.question_time_seconds or {})
         for question_id, seconds in payload.question_time_seconds.items():
             merged_times[question_id] = max(
@@ -2354,6 +2462,12 @@ class AssessmentService:
             language=language,
             test_cases=test_cases,
             run_type=run_type,
+            time_limit_seconds=(
+                getattr(question, "execution_time_limit_seconds", 2) or 2
+            ),
+            memory_limit_kb=(
+                (getattr(question, "memory_limit_mb", 256) or 256) * 1024
+            ),
         )
         return self._score_results_for_question(question, results)
 
@@ -2632,6 +2746,10 @@ class AssessmentService:
             raise AssessmentValidationError(
                 "Only validated questions can be added to an assessment"
             )
+        self._assert_assessment_language_coverage(
+            list(assessment.supported_languages or []),
+            records,
+        )
         question_count = int(assessment.question_count_per_candidate or 0)
         blueprint = list(assessment.difficulty_blueprint or [])
         if question_count <= 0:
@@ -2703,6 +2821,24 @@ class AssessmentService:
             ):
                 item["marks"] = template_marks[index]
         return sorted(normalized, key=lambda item: item["question_order"])
+
+    @staticmethod
+    def _assert_assessment_language_coverage(
+        assessment_languages: list[str],
+        questions: list[QuestionBankQuestionModel],
+    ) -> None:
+        required = set(normalize_languages(assessment_languages))
+        incompatible: list[str] = []
+        for question in questions:
+            supported = set(normalize_languages(question.supported_languages or []))
+            missing = sorted(required - supported)
+            if missing:
+                incompatible.append(f"{question.title} (missing {', '.join(missing)})")
+        if incompatible:
+            raise AssessmentValidationError(
+                "Every assessment language must be supported by every question: "
+                + "; ".join(incompatible)
+            )
 
     def _question_bank_records(
         self,
@@ -2914,15 +3050,18 @@ class AssessmentService:
             CandidateAssessmentStatus.REVOKED.value,
         }:
             return False
-        if effective_slot_status(context.slot) != SlotStatus.ACTIVE:
-            return False
-        if now < context.slot.start_at.astimezone(
-            UTC
-        ) or now > context.slot.end_at.astimezone(UTC):
+        slot_status = effective_slot_status(context.slot)
+        if (
+            slot_status == SlotStatus.PAUSED
+            and context.candidate_assessment.status
+            == CandidateAssessmentStatus.IN_PROGRESS.value
+        ):
+            return True
+        if slot_status != SlotStatus.ACTIVE:
             return False
         return not (
-            context.candidate_assessment.started_at
-            and not context.assessment.allow_resume
+            now < context.slot.start_at.astimezone(UTC)
+            or now > context.slot.end_at.astimezone(UTC)
         )
 
     def _ensure_submission_rows(self, context: CandidateAssessmentContext) -> None:
@@ -3063,16 +3202,19 @@ class AssessmentService:
         )
 
     def _assert_candidate_can_edit(self, context: CandidateAssessmentContext) -> None:
-        self._auto_submit_if_expired(context)
-        if effective_slot_status(context.slot) == SlotStatus.PAUSED:
+        slot_status = effective_slot_status(context.slot)
+        if slot_status == SlotStatus.PAUSED:
             raise AssessmentValidationError(
                 "This assessment is temporarily paused by the recruiter"
             )
+        self._auto_submit_if_expired(context)
         if context.candidate_assessment.status in {
             CandidateAssessmentStatus.SUBMITTED.value,
             CandidateAssessmentStatus.AUTO_SUBMITTED.value,
         }:
             raise AssessmentValidationError("Assessment has already been submitted")
+        if slot_status != SlotStatus.ACTIVE:
+            raise AssessmentValidationError("This assessment is not active")
         if context.candidate_assessment.deadline_at and datetime.now(
             UTC
         ) > context.candidate_assessment.deadline_at.astimezone(UTC):
@@ -3088,6 +3230,30 @@ class AssessmentService:
         if submission is None:
             raise AssessmentValidationError("Question is not part of this assessment")
         return submission
+
+    @staticmethod
+    def _assert_draft_version(
+        submission: SubmissionModel,
+        base_version: int | None,
+    ) -> None:
+        if base_version is not None and base_version != submission.version:
+            raise AssessmentValidationError(
+                "This draft changed in another tab. Reload before saving again."
+            )
+
+    @staticmethod
+    def _candidate_safe_submission_result(
+        submission: SubmissionModel,
+    ) -> dict[str, object]:
+        result = dict(submission.final_hidden_result or {})
+        passed_count = int(result.get("passed_count") or 0)
+        total_count = int(result.get("total_count") or 0)
+        return {
+            "status": submission.status,
+            "passed_count": passed_count,
+            "total_count": total_count,
+            "passed": total_count > 0 and passed_count == total_count,
+        }
 
     def _question_by_id(
         self,
@@ -3122,15 +3288,22 @@ class AssessmentService:
             )
 
     def _auto_submit_if_expired(self, context: CandidateAssessmentContext) -> None:
+        slot_status = effective_slot_status(context.slot)
+        if slot_status == SlotStatus.PAUSED:
+            return
         deadline = context.candidate_assessment.deadline_at
-        if deadline is None:
+        if deadline is None and slot_status != SlotStatus.CLOSED:
             return
         if context.candidate_assessment.status in {
             CandidateAssessmentStatus.SUBMITTED.value,
             CandidateAssessmentStatus.AUTO_SUBMITTED.value,
         }:
             return
-        if datetime.now(UTC) <= deadline.astimezone(UTC):
+        if (
+            slot_status != SlotStatus.CLOSED
+            and deadline is not None
+            and datetime.now(UTC) <= deadline.astimezone(UTC)
+        ):
             return
         self.submit_assessment(
             CandidateSessionClaims(
@@ -3138,11 +3311,36 @@ class AssessmentService:
                 assessment_id=context.assessment.id,
                 slot_id=context.slot.id,
                 candidate_id=context.candidate.id,
-                exp=int(deadline.astimezone(UTC).timestamp()) + 1,
+                exp=int(datetime.now(UTC).timestamp()) + 60,
             ),
             CandidateSubmitRequest(answers=[]),
             auto_submit=True,
         )
+
+    @staticmethod
+    def _candidate_time_remaining_seconds(context: CandidateAssessmentContext) -> int:
+        """Return a pause-aware server projection of candidate time remaining."""
+
+        deadline = context.candidate_assessment.deadline_at
+        if deadline is None:
+            return 0
+        reference = datetime.now(UTC)
+        if (
+            effective_slot_status(context.slot, now=reference) == SlotStatus.PAUSED
+            and context.slot.paused_at is not None
+        ):
+            reference = context.slot.paused_at.astimezone(UTC)
+        return max(0, int((deadline.astimezone(UTC) - reference).total_seconds()))
+
+    @staticmethod
+    def _assert_slot_accepts_invites(slot: AssessmentSlotModel) -> None:
+        """Prevent invite delivery for non-operational slot states."""
+
+        status = effective_slot_status(slot)
+        if status not in {SlotStatus.SCHEDULED, SlotStatus.ACTIVE}:
+            raise CandidateInviteError(
+                "Invites can only be sent for scheduled or active test slots"
+            )
 
     def _submitted_question_counts(
         self,

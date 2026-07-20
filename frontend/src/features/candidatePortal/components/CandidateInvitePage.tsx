@@ -12,6 +12,7 @@ import {
 import {
   clearSubmissionResult,
   saveCandidateSessionToken,
+  saveCandidateInviteToken,
 } from "../utils/sessionStorage";
 
 function formatDateTime(value: string) {
@@ -49,6 +50,7 @@ export function CandidateInvitePage() {
     mutationFn: async () => startCandidateAssessment(token),
     onSuccess: (data) => {
       clearSubmissionResult();
+      saveCandidateInviteToken(token);
       saveCandidateSessionToken(data.session_token);
       navigate("/candidate/portal");
     },
@@ -69,6 +71,22 @@ export function CandidateInvitePage() {
       return {
         status: "loading",
         label: "Checking assessment window...",
+        secondsUntilStart: 0,
+        secondsUntilClose: 0,
+      };
+    }
+    if (invite.slot_status === "paused") {
+      return {
+        status: "paused",
+        label: "This assessment is temporarily paused by the recruiter.",
+        secondsUntilStart: 0,
+        secondsUntilClose: 0,
+      };
+    }
+    if (invite.slot_status === "closed") {
+      return {
+        status: "closed",
+        label: "This assessment window is closed.",
         secondsUntilStart: 0,
         secondsUntilClose: 0,
       };

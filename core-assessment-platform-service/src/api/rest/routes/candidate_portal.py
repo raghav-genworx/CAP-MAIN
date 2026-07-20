@@ -19,6 +19,8 @@ from schemas.candidate_portal import (
     CandidateCodeRunRequest,
     CandidateInviteVerificationRequest,
     CandidateInviteVerificationResponse,
+    CandidateProctorEventRequest,
+    CandidateProctorEventResponse,
     CandidateSessionClaims,
     CandidateStartRequest,
     CandidateStartResponse,
@@ -92,6 +94,25 @@ async def checkpoint(
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
 ) -> CandidateCheckpointResponse:
     return await run_in_threadpool(service.save_checkpoint, claims, payload)
+
+
+@router.post(
+    "/proctoring-events",
+    response_model=CandidateProctorEventResponse,
+    summary="Record candidate proctoring event",
+    description="Idempotently stores one violation and returns server-owned totals.",
+)
+@limiter.limit("120/minute")
+async def record_proctor_event(
+    request: Request,
+    claims: Annotated[
+        CandidateSessionClaims,
+        Depends(get_current_candidate_session),
+    ],
+    payload: CandidateProctorEventRequest,
+    service: Annotated[AssessmentService, Depends(get_assessment_service)],
+) -> CandidateProctorEventResponse:
+    return await run_in_threadpool(service.record_proctor_event, claims, payload)
 
 
 @router.post(

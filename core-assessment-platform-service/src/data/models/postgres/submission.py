@@ -3,7 +3,15 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +58,9 @@ class SubmissionModel(Base):
         nullable=False,
         index=True,
         default="draft",
+    )
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
     sample_run_result: Mapped[dict[str, object]] = mapped_column(
         JSONB,

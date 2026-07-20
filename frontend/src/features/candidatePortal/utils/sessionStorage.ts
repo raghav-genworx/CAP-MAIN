@@ -1,6 +1,7 @@
 import type { CandidateSubmitResponse } from "../types/CandidatePortal";
 
 const SESSION_KEY = "cap_candidate_session_token";
+const INVITE_KEY = "cap_candidate_invite_token";
 const SUBMISSION_KEY = "cap_candidate_submission_result";
 
 export interface CandidateSubmissionReceipt extends CandidateSubmitResponse {
@@ -8,15 +9,23 @@ export interface CandidateSubmissionReceipt extends CandidateSubmitResponse {
 }
 
 export function saveCandidateSessionToken(token: string) {
-  sessionStorage.setItem(SESSION_KEY, token);
+  localStorage.setItem(SESSION_KEY, token);
 }
 
 export function readCandidateSessionToken() {
-  return sessionStorage.getItem(SESSION_KEY);
+  return localStorage.getItem(SESSION_KEY);
 }
 
 export function clearCandidateSessionToken() {
-  sessionStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(SESSION_KEY);
+}
+
+export function saveCandidateInviteToken(token: string) {
+  localStorage.setItem(INVITE_KEY, token);
+}
+
+export function readCandidateInviteToken() {
+  return localStorage.getItem(INVITE_KEY);
 }
 
 export function clearSubmissionResult() {

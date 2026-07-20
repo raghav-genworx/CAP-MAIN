@@ -22,7 +22,7 @@
     is_archived: false,
     source_file: "Main.java",
     compile_cmd: "/usr/bin/javac %s Main.java",
-    run_cmd: "/usr/bin/java Main"
+    run_cmd: "/usr/bin/java -Xms16m -Xmx128m -XX:+UseSerialGC Main"
   },
   {
     id: 71,

@@ -6,6 +6,7 @@ import type {
   CandidateCodeRunPayload,
   CandidateHiddenCheckResponse,
   CandidateInviteVerificationResponse,
+  CandidateProctorEventResponse,
   CandidateSampleRunResponse,
   CandidateStartResponse,
   CandidateSubmitPayload,
@@ -60,6 +61,22 @@ export async function saveCandidateCheckpoint(
     {
       headers: candidateAuthHeader(sessionToken),
     },
+  );
+  return response.data;
+}
+
+export async function recordCandidateProctorEvent(
+  sessionToken: string,
+  payload: {
+    client_event_id: string;
+    event_type: "tab_hidden" | "window_blur" | "clipboard" | "fullscreen_exit";
+    occurred_at: string;
+  },
+): Promise<CandidateProctorEventResponse> {
+  const response = await coreApiClient.post<CandidateProctorEventResponse>(
+    "/candidate/proctoring-events",
+    payload,
+    { headers: candidateAuthHeader(sessionToken) },
   );
   return response.data;
 }

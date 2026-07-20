@@ -64,7 +64,10 @@ def run_migrations_offline() -> None:
         version_table_schema=EVALUATION_SCHEMA,
     )
     if should_create_schema():
-        context.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+        try:
+            context.execute(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+        except Exception as e:
+            print(f"Skipping schema creation in offline mode: {e}")
     with context.begin_transaction():
         context.run_migrations()
 
@@ -79,10 +82,14 @@ def run_migrations_online() -> None:
     )
     with connectable.connect() as connection:
         if connection.dialect.name == "postgresql" and should_create_schema():
-            connection.execute(
-                text(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
-            )
-            connection.commit()
+            try:
+                connection.execute(
+                    text(f'CREATE SCHEMA IF NOT EXISTS "{EVALUATION_SCHEMA}"')
+                )
+                connection.commit()
+            except Exception as e:
+                connection.rollback()
+                print(f"Skipping schema creation: {e}")
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
