@@ -29,6 +29,8 @@ export interface CandidateQuestion {
   constraints: string;
   input_format: string;
   output_format: string;
+  answer_validation_mode: "exact" | "unordered" | "floating" | "multiple_valid" | "constructive";
+  output_checker_explanation: string;
   sample_test_cases: Array<{ input: string; expected_output: string }>;
   supported_languages: string[];
   question_order: number;
@@ -67,6 +69,10 @@ export interface CandidateAssessmentPortal {
   status: "not_started" | "in_progress" | "submitted" | "auto_submitted";
   current_question_order: number;
   time_remaining_seconds: number;
+  tab_switch_count: number;
+  copy_paste_count: number;
+  fullscreen_exit_count: number;
+  question_time_seconds: Record<string, number>;
   supported_languages: string[];
   questions: CandidateQuestion[];
   drafts: CandidateDraft[];
@@ -77,6 +83,10 @@ export interface CandidateCheckpointPayload {
   source_code: string;
   language: string;
   current_question_order: number;
+  tab_switch_count?: number;
+  copy_paste_count?: number;
+  fullscreen_exit_count?: number;
+  question_time_seconds?: Record<string, number>;
 }
 
 export interface CandidateCheckpointResponse {
@@ -101,6 +111,7 @@ export interface CandidateExecutionCaseResult {
   stderr: string;
   compile_output: string;
   message: string;
+  checker_message: string;
   execution_time: string;
   memory_kb: number | null;
   token: string;
@@ -137,6 +148,10 @@ export interface CandidateSubmitPayload {
   auto_submit?: boolean;
   submission_tag?: string;
   submission_message?: string;
+  tab_switch_count?: number;
+  copy_paste_count?: number;
+  fullscreen_exit_count?: number;
+  question_time_seconds?: Record<string, number>;
 }
 
 export interface CandidateSubmitResponse {

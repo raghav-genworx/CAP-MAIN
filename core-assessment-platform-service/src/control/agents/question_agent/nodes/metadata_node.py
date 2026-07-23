@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from core.question_tag_taxonomy import (
+    normalize_question_category,
+    normalize_question_tags,
+)
 from schemas.question_bank import (
     DifficultySource,
     MetadataStatus,
@@ -34,13 +38,17 @@ class MetadataNodeMixin(QuestionAgentToolsMixin):
         notes = self._append_notes(state.get("notes", []), *model.notes)
         execution_history = self._append_notes(
             state.get("execution_history", []),
-            "Metadata Classifier Agent: classified difficulty, topics, and category",
+            "Metadata Classifier Agent: classified difficulty, tags, and category",
+        )
+        tags = normalize_question_tags(
+            [*model.tags, *model.topics],
+            limit=6,
         )
         return {
             "difficulty": model.difficulty.value,
-            "topics": self._normalize_tokens(model.topics),
-            "tags": self._normalize_tokens(model.tags),
-            "category": model.category.strip().lower(),
+            "topics": [],
+            "tags": tags,
+            "category": normalize_question_category(model.category, tags),
             "expected_solve_time_minutes": model.expected_solve_time_minutes,
             "candidate_solve_time_minutes": model.expected_solve_time_minutes,
             "metadata_status": MetadataStatus.CLASSIFIED.value,

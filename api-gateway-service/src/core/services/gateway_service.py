@@ -116,6 +116,17 @@ class GatewayService:
     async def get_core_firebase_config(self) -> dict[str, Any]:
         """Proxy Firebase web config from the core platform service."""
 
+        if self._settings.firebase_project_id:
+            return {
+                "apiKey": self._settings.firebase_api_key,
+                "authDomain": self._settings.firebase_auth_domain,
+                "projectId": self._settings.firebase_project_id,
+                "appId": self._settings.firebase_app_id,
+                "storageBucket": None,
+                "messagingSenderId": None,
+                "measurementId": None,
+            }
+
         base_url = self._get_base_url("core")
         target_url = f"{base_url}/api/v1/auth/firebase-config"
 
@@ -144,6 +155,7 @@ class GatewayService:
         query: str,
         headers: Mapping[str, str],
         body: bytes,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[httpx.AsyncClient, httpx.Response]:
         """Open a streaming request to an approved upstream service."""
 
@@ -157,6 +169,8 @@ class GatewayService:
             upstream_headers["X-Internal-Service-Token"] = (
                 self._settings.internal_service_token
             )
+        if extra_headers:
+            upstream_headers.update(extra_headers)
 
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(

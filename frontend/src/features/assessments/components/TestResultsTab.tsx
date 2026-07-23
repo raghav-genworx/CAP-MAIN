@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Download } from "lucide-react";
 
 import { StatusBadge } from "../../../components/common/StatusBadge";
 import { Button } from "../../../components/ui/Button";
@@ -7,8 +8,8 @@ import { useAuth } from "../../auth";
 import {
   downloadCandidateEvaluationReport,
   downloadTestEvaluationReport,
-  fetchCandidateEvaluationReport,
-  type CandidateEvaluationSummary,
+  fetchCandidateScorecardReport,
+  type CandidateEvaluationReport,
 } from "../../codeEvaluation";
 import type {
   EvaluationBackfillResponse,
@@ -40,7 +41,7 @@ export function TestResultsTab({
   const { currentUser } = useAuth();
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedScorecard, setSelectedScorecard] =
-    useState<CandidateEvaluationSummary | null>(null);
+    useState<CandidateEvaluationReport | null>(null);
   const [scorecardError, setScorecardError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const [downloadingReport, setDownloadingReport] = useState<string | null>(null);
@@ -92,13 +93,13 @@ export function TestResultsTab({
         if (!currentUser) {
           throw new Error("Recruiter session is required.");
         }
-        const candidate = await fetchCandidateEvaluationReport(
+        const report = await fetchCandidateScorecardReport(
           await currentUser.getIdToken(),
           assessmentId,
           selectedCandidateId,
           controller.signal,
         );
-        setSelectedScorecard(candidate);
+        setSelectedScorecard(report);
       } catch (error: unknown) {
         if (controller.signal.aborted) {
           return;
@@ -153,6 +154,23 @@ export function TestResultsTab({
     } finally {
       setDownloadingReport(null);
     }
+  }
+
+  if (selectedCandidateId) {
+    return (
+      <Card className="assessment-panel assessment-panel-wide scorecard-page-card">
+        <RecruiterScorecardPreview
+          candidate={selectedScorecard?.candidate ?? null}
+          benchmark={selectedScorecard?.benchmark}
+          loading={!selectedScorecard && !scorecardError}
+          error={scorecardError}
+          downloadPending={downloadingReport === selectedCandidateId}
+          onDownload={() => void downloadCandidateReport(selectedCandidateId)}
+          onBack={() => setSelectedCandidateId(null)}
+          fullPage
+        />
+      </Card>
+    );
   }
 
   return (
@@ -245,16 +263,7 @@ export function TestResultsTab({
                   <td>{candidate.rank ? `#${candidate.rank}` : "-"}</td>
                   <td>
                     <div className="assessment-name-cell">
-                      <button
-                        type="button"
-                        className="table-link-button"
-                        disabled={candidate.percentage === null}
-                        onClick={() =>
-                          setSelectedCandidateId(candidate.candidate_assessment_id)
-                        }
-                      >
-                        {candidate.name}
-                      </button>
+                      <strong>{candidate.name}</strong>
                       <span>{candidate.email}</span>
                     </div>
                   </td>
@@ -271,19 +280,21 @@ export function TestResultsTab({
                   <td>
                     {candidate.percentage !== null ? (
                       <div className="assessment-row-actions compact-actions">
-                        <button
+                        <Button
                           type="button"
-                          className="table-link-button"
+                          variant="secondary"
                           onClick={() =>
                             setSelectedCandidateId(candidate.candidate_assessment_id)
                           }
                         >
-                          View
-                        </button>
+                          View Scorecard
+                        </Button>
                         <button
                           type="button"
-                          className="table-link-button"
+                          className="icon-button scorecard-download-icon"
                           disabled={downloadingReport !== null}
+                          aria-label={`Download ${candidate.name} scorecard`}
+                          title="Download scorecard PDF"
                           onClick={() =>
                             void downloadCandidateReport(
                               candidate.candidate_assessment_id,
@@ -291,8 +302,8 @@ export function TestResultsTab({
                           }
                         >
                           {downloadingReport === candidate.candidate_assessment_id
-                            ? "Preparing..."
-                            : "PDF"}
+                            ? <span className="scorecard-download-spinner" aria-hidden="true" />
+                            : <Download size={17} aria-hidden="true" />}
                         </button>
                       </div>
                     ) : (
@@ -314,15 +325,6 @@ export function TestResultsTab({
           </tbody>
         </table>
       </div>
-      {selectedCandidateId ? (
-        <RecruiterScorecardPreview
-          candidate={selectedScorecard}
-          loading={!selectedScorecard && !scorecardError}
-          error={scorecardError}
-          downloadPending={downloadingReport === selectedCandidateId}
-          onDownload={() => void downloadCandidateReport(selectedCandidateId)}
-        />
-      ) : null}
     </Card>
   );
 }

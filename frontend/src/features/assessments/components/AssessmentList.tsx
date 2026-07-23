@@ -1,16 +1,17 @@
 import { Fragment, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 import { StatusBadge } from "../../../components/common/StatusBadge";
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
 import { formatDateTime, statusTone } from "../utils/recruiterAssessmentViewModel";
+import { assessmentPath, assessmentTestPath } from "../utils/assessmentRoutes";
 import type { Assessment } from "../types/Assessment";
 
 interface AssessmentListProps {
   assessments: Assessment[];
   loading: boolean;
   onAddNew: () => void;
-  onOpen: (assessmentId: string) => void;
 }
 
 function HealthDot({ status }: { status: string }) {
@@ -34,8 +35,8 @@ export function AssessmentList({
   assessments,
   loading,
   onAddNew,
-  onOpen,
 }: AssessmentListProps) {
+  const navigate = useNavigate();
   const [expandedAssessmentIds, setExpandedAssessmentIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -56,17 +57,24 @@ export function AssessmentList({
     });
   }
 
+  function shouldIgnoreRowOpen(target: EventTarget | null) {
+    return (
+      target instanceof HTMLElement &&
+      Boolean(target.closest("a, button, input, select, textarea"))
+    );
+  }
+
+  function openAssessment(assessmentId: string) {
+    const found = assessments.find((a) => a.id === assessmentId);
+    navigate(assessmentPath(assessmentId, found?.title));
+  }
+
   return (
     <section className="assessment-list-view">
       <Card className="assessment-library-hero">
         <div>
           <span className="panel-eyebrow">Recruiter Workspace</span>
-          <h2>Assessments at a glance</h2>
-          <p>
-            Pick an assessment to manage its tests, candidates, monitoring, and
-            results. Create a new template only when you need a new question set or
-            assessment policy.
-          </p>
+          <h2>Assessments</h2>
         </div>
         <div className="assessment-hero-metrics">
           <span>
@@ -94,14 +102,6 @@ export function AssessmentList({
       </Card>
 
       <Card className="assessment-panel assessment-table-card">
-        <div className="assessment-table-toolbar">
-          <div>
-            <span className="panel-eyebrow">Assessment Library</span>
-            <h2>All Assessments</h2>
-            <p>Select an assessment to view its tests and candidate batches.</p>
-          </div>
-        </div>
-
         {loading ? <ListMessage>Loading assessments...</ListMessage> : null}
         {!loading && assessments.length ? (
           <div className="assessment-table-shell">
@@ -136,20 +136,30 @@ export function AssessmentList({
                         className="assessment-clickable-row"
                         role="button"
                         tabIndex={0}
-                        onClick={() => onOpen(assessment.id)}
+                        onClick={(event) => {
+                          if (shouldIgnoreRowOpen(event.target)) {
+                            return;
+                          }
+                          openAssessment(assessment.id);
+                        }}
                         onKeyDown={(event) => {
-                          if (event.target !== event.currentTarget) {
+                          if (shouldIgnoreRowOpen(event.target)) {
                             return;
                           }
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
-                            onOpen(assessment.id);
+                            openAssessment(assessment.id);
                           }
                         }}
                       >
                         <td>
                           <div className="assessment-name-cell">
-                            <strong>{assessment.title}</strong>
+                            <Link
+                              className="entity-link"
+                              to={assessmentPath(assessment.id, assessment.title)}
+                            >
+                              {assessment.title}
+                            </Link>
                             <span>
                               {assessment.description || "No description added yet"}
                             </span>
@@ -176,10 +186,7 @@ export function AssessmentList({
                                 aria-expanded={expanded}
                                 type="button"
                                 variant="secondary"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  toggleExpanded(assessment.id);
-                                }}
+                                onClick={() => toggleExpanded(assessment.id)}
                               >
                                 {expanded ? "Hide Tests" : "Show Tests"}
                               </Button>
@@ -200,7 +207,12 @@ export function AssessmentList({
                                   className="assessment-test-mini-card"
                                 >
                                   <div>
-                                    <strong>{slot.title}</strong>
+                                    <Link
+                                      className="entity-link"
+                                      to={assessmentTestPath(assessment.id, slot.id, assessment.title, slot.title)}
+                                    >
+                                      {slot.title}
+                                    </Link>
                                     <span>
                                       {formatDateTime(slot.start_at)} to{" "}
                                       {formatDateTime(slot.end_at)}
@@ -211,6 +223,12 @@ export function AssessmentList({
                                     <StatusBadge value={slot.effective_status} />
                                   </div>
                                   <span>{slot.candidate_count} candidates</span>
+                                  <Link
+                                    className="button button-secondary assessment-open-link"
+                                    to={assessmentTestPath(assessment.id, slot.id, assessment.title, slot.title)}
+                                  >
+                                    Open Test
+                                  </Link>
                                 </article>
                               ))}
                             </div>

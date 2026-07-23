@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from core.services.ai_gateway_service import AIGatewayService
+from handlers.http_clients.ai_gateway import AIGatewayService
 from schemas.question_bank import (
     SolutionValidationReport,
     SolutionValidationRound,
@@ -34,7 +34,7 @@ class QuestionAgentUtilsMixin:
         return [
             case
             for case in test_cases
-            if case.input.strip() and case.expected_output.strip()
+            if case.expected_output.strip()
         ]
 
     @staticmethod

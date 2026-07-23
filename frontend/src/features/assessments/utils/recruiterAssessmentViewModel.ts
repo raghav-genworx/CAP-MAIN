@@ -23,6 +23,25 @@ export const TIME_ZONE_OPTIONS = [
 
 const MINUTE_MS = 60_000;
 
+export function addMinutesToLocalInput(value: string, minutes: number) {
+  if (!value) {
+    return "";
+  }
+  const [datePart, timePart] = value.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute] = timePart.split(":").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day, hour, minute + minutes));
+  return shifted.toISOString().slice(0, 16);
+}
+
+export function nextAvailableTimeInput(
+  timezoneName: string,
+  offsetMinutes: number,
+) {
+  const nextMinute = new Date(Math.ceil(Date.now() / MINUTE_MS) * MINUTE_MS);
+  return toTimezoneInputValue(nextMinute.toISOString(), timezoneName, offsetMinutes);
+}
+
 export function buildCandidateCsv(rows: ManualCandidateRow[]) {
   const body = rows
     .filter((row) => row.name.trim() || row.email.trim() || row.external_id.trim())

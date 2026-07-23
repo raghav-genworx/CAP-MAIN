@@ -1,6 +1,6 @@
 """Repository for assessment and candidate portal persistence."""
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from data.models.postgres.assessment_question import AssessmentQuestionModel
 from data.models.postgres.assessment_slot import AssessmentSlotModel
@@ -10,6 +10,7 @@ from data.models.postgres.candidate_assessment import CandidateAssessmentModel
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.submission import SubmissionModel
 from data.repositories.base import BaseRepository
+from schemas.question_bank import QuestionVisibility
 
 
 class AssessmentRepository(BaseRepository):
@@ -124,7 +125,10 @@ class AssessmentRepository(BaseRepository):
             return []
 
         stmt = select(QuestionBankQuestionModel).where(
-            QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+            or_(
+                QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+                QuestionBankQuestionModel.visibility == QuestionVisibility.PUBLIC.value,
+            ),
             QuestionBankQuestionModel.id.in_(question_ids),
         )
         return list(self._session.execute(stmt).scalars().all())

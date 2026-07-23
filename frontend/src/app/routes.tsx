@@ -122,6 +122,30 @@ export const router = createBrowserRouter([
             element: <RecruiterAssessmentsPage />,
           },
           {
+            path: "/recruiter/assessments/new",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
+            path: "/recruiter/assessments/:assessmentId",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
+            path: "/recruiter/assessments/:assessmentSlug/:assessmentId",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
+            path: "/recruiter/assessments/:assessmentSlug/:assessmentId/tests",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
+            path: "/recruiter/assessments/:assessmentSlug/:assessmentId/tests/:testSlug/:assessmentTestId",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
+            path: "/recruiter/tests/:testId",
+            element: <RecruiterAssessmentsPage />,
+          },
+          {
             path: "/recruiter/candidates",
             element: <Navigate to="/recruiter/assessments" replace />,
           },

@@ -10,6 +10,7 @@ export interface EvaluationScores {
 
 export interface AICodeQualitySignal {
   score: number;
+  score_breakdown?: Record<string, number>;
   approach: string;
   time_complexity: string;
   space_complexity: string;
@@ -32,6 +33,7 @@ export interface QuestionTestCaseResult {
   expected_output: string;
   actual_output: string;
   message: string;
+  case_category?: string;
 }
 
 export interface QuestionEvaluationBreakdown {
@@ -51,6 +53,14 @@ export interface QuestionEvaluationBreakdown {
   coding_score?: number;
   ai_score?: number;
   ai_quality?: AICodeQualitySignal | null;
+  difficulty?: string;
+  tags?: string[];
+  problem_statement?: string;
+  input_format?: string;
+  output_format?: string;
+  constraints?: string;
+  suggested_solution?: string;
+  suggested_improvement_notes?: string[];
   mandatory_failed: boolean;
   test_cases: QuestionTestCaseResult[];
 }
@@ -68,13 +78,49 @@ export interface CandidateEvaluationSummary {
   scores: EvaluationScores;
   hidden_passed: number;
   hidden_total: number;
+  weights?: {
+    test_case_weight: number;
+    coding_weight: number;
+    ai_weight: number;
+  };
   total_execution_time_ms: number;
   peak_memory_kb: number;
   ai_quality: AICodeQualitySignal;
   question_breakdown: QuestionEvaluationBreakdown[];
+  activity?: {
+    started_at: string | null;
+    submitted_at: string | null;
+    total_time_seconds: number | null;
+    question_time_seconds: Record<string, number>;
+  } | null;
+  integrity?: {
+    proctoring_mode: string;
+    tab_switches: number | null;
+    copy_paste_count: number | null;
+    fullscreen_exits: number | null;
+    suspicious_activity: string[];
+    plagiarism_similarity_score: number | null;
+  } | null;
   submitted_at: string;
   evaluated_at: string | null;
   time_taken_seconds: number | null;
+}
+
+export interface CandidateBenchmarkContext {
+  candidate_rank: number | null;
+  total_candidates: number;
+  average_score: number | null;
+  average_completion_time_seconds: number | null;
+  percentile: number | null;
+}
+
+export interface CandidateEvaluationReport {
+  assessment_id: string;
+  candidate_assessment_id: string;
+  candidate: CandidateEvaluationSummary;
+  benchmark: CandidateBenchmarkContext | null;
+  generated_at: string;
+  download_label: string;
 }
 
 export interface EvaluationJobResponse {

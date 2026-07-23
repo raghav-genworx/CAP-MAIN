@@ -22,3 +22,10 @@ class QuestionBankStoreUnavailableError(COEApplicationError):
 
     def __init__(self, message: str = "Question store is unavailable") -> None:
         super().__init__(message=message, status_code=503)
+
+
+class QuestionGuardrailError(COEApplicationError):
+    """Raised when a question generation or code validation violates guardrails."""
+
+    def __init__(self, message: str = "Guardrail violation detected") -> None:
+        super().__init__(message=message, status_code=400)

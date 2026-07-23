@@ -406,6 +406,7 @@ class ExecutionCaseResult(BaseModel):
     stderr: str = ""
     compile_output: str = ""
     message: str = ""
+    checker_message: str = ""
     execution_time: str = ""
     memory_kb: int | None = None
     token: str = ""

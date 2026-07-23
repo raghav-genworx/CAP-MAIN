@@ -2,8 +2,22 @@
 
 from __future__ import annotations
 
-from ..prompts.problem_statement_prompt import build_problem_statement_prompt
+from core.question_tag_taxonomy import (
+    normalize_question_category,
+    normalize_question_tags,
+)
+from core.services.output_validation import (
+    default_checker_explanation,
+    normalize_answer_validation_mode,
+)
+from schemas.question_bank import AnswerValidationMode
+
+from ..prompts.problem_statement_prompt import (
+    build_checker_generation_prompt,
+    build_problem_statement_prompt,
+)
 from ..states.question_state import (
+    CheckerOutput,
     ProblemStatementOutput,
     QuestionGenerationState,
 )
@@ -35,18 +49,62 @@ class ProblemStatementNodeMixin(QuestionAgentToolsMixin):
             state.get("execution_history", []),
             "Problem Statement Agent: generated title and statement",
         )
+        tags = normalize_question_tags(
+            [
+                *model.tags,
+                *model.topics,
+                *state.get("focus_tags", []),
+            ],
+            limit=6,
+        )
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(model.answer_validation_mode),
+        )
+        output_checker = model.output_checker.strip()
+        output_checker_explanation = model.output_checker_explanation.strip()
+
+        if answer_mode in {
+            AnswerValidationMode.MULTIPLE_VALID,
+            AnswerValidationMode.CONSTRUCTIVE,
+        }:
+            checker_system, checker_user = build_checker_generation_prompt(
+                problem_statement=model.problem_statement,
+                input_format=model.input_format,
+                output_format=model.output_format,
+                constraints=model.constraints or state.get("constraints", ""),
+                mode=answer_mode.value,
+            )
+            checker_model = self._structured_completion(
+                schema_name="output_checker",
+                schema_model=CheckerOutput,
+                system_prompt=checker_system,
+                user_prompt=checker_user,
+            )
+            output_checker = checker_model.output_checker.strip()
+            output_checker_explanation = (
+                checker_model.output_checker_explanation.strip()
+            )
+            execution_history = self._append_notes(
+                execution_history,
+                "Problem Statement Agent: generated custom output checker "
+                f"for mode {answer_mode.value}",
+            )
+
         return {
             "title": model.title.strip(),
             "problem_statement": model.problem_statement.strip(),
-            "topics": self._normalize_tokens(
-                model.topics or state.get("topics", []),
-            ),
-            "tags": self._normalize_tokens(model.tags or state.get("focus_tags", [])),
-            "category": model.category.strip().lower() or state.get("category", ""),
+            "topics": [],
+            "tags": tags,
+            "category": normalize_question_category(model.category, tags),
             "input_format": model.input_format.strip(),
             "input_explanation": model.input_explanation.strip(),
             "output_format": model.output_format.strip(),
             "output_explanation": model.output_explanation.strip(),
+            "answer_validation_mode": answer_mode,
+            "output_checker": output_checker,
+            "output_checker_explanation": (
+                output_checker_explanation or default_checker_explanation(answer_mode)
+            ),
             "constraints": model.constraints.strip() or state.get("constraints", ""),
             "sample_test_cases": [
                 case.model_copy(update={"is_sample": True})

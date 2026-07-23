@@ -1,20 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Download, FileText, Users } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { FileText } from "lucide-react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 
 import { StatusBadge } from "../../../components/common/StatusBadge";
-import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
 import { useAuth } from "../../auth";
 import {
-  downloadAssessmentEvaluationReport,
-  downloadCandidateEvaluationReport,
   fetchAssessmentEvaluationDashboard,
   type CandidateEvaluationSummary,
 } from "../../codeEvaluation";
+import { fetchSlotCandidates } from "../services/assessmentService";
+import { generateAssessmentAnalyticsPdf } from "../services/pdfReportService";
 import type { EvaluationBackfillResponse } from "../types/Assessment";
-import type { Assessment, AssessmentSlot } from "../types/Assessment";
-import { RecruiterScorecardPreview } from "./RecruiterScorecardPreview";
+import type { Assessment, AssessmentSlot, SlotCandidate } from "../types/Assessment";
+import { assessmentTestPath } from "../utils/assessmentRoutes";
 
 interface AssessmentEvaluationPanelProps {
   assessment: Assessment;
@@ -23,31 +23,48 @@ interface AssessmentEvaluationPanelProps {
   backfillError: string;
   backfillResult: EvaluationBackfillResponse | null;
   onBackfill: () => Promise<unknown> | void;
-  onOpenTest: (slotId: string) => void;
+  downloadError?: string;
+  pdfTrigger?: number;
 }
 
-interface QuestionAnalytics {
+interface SlotCandidateLookup {
+  [slotId: string]: SlotCandidate[];
+}
+
+interface SlotAnalytics {
   id: string;
   title: string;
-  candidates: number;
-  score: number;
-  passed: number;
-  total: number;
+  status: AssessmentSlot["effective_status"];
+  startsAt: string;
+  candidateCount: number;
+  submittedCount: number;
+  evaluatedCount: number;
+  averageScore: number;
+  topScore: number;
+  passRate: number;
+  submissionRate: number;
+  evaluationRate: number;
+  hiddenPassRate: number;
+  averageCodingScore: number;
+  averageAiScore: number;
+  averageDurationSeconds: number | null;
+  bands: {
+    excellent: number;
+    pass: number;
+    review: number;
+  };
 }
 
 export function AssessmentEvaluationPanel({
   assessment,
   slots,
-  backfillPending,
   backfillError,
   backfillResult,
-  onBackfill,
-  onOpenTest,
+  downloadError,
+  pdfTrigger,
 }: AssessmentEvaluationPanelProps) {
   const { currentUser } = useAuth();
-  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
-  const [downloadTarget, setDownloadTarget] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState("");
+  const slotIds = useMemo(() => slots.map((slot) => slot.id), [slots]);
   const dashboardQuery = useQuery({
     queryKey: ["code-evaluation-dashboard", assessment.id],
     queryFn: async () => {
@@ -62,63 +79,66 @@ export function AssessmentEvaluationPanel({
     enabled: Boolean(currentUser),
     retry: 1,
   });
+  const slotCandidatesQuery = useQuery({
+    queryKey: ["assessment-analytics-slot-candidates", currentUser?.uid, assessment.id, slotIds],
+    queryFn: async (): Promise<SlotCandidateLookup> => {
+      if (!currentUser) {
+        throw new Error("Recruiter session is required.");
+      }
+      const idToken = await currentUser.getIdToken();
+      const entries = await Promise.all(
+        slots.map(async (slot) => {
+          const response = await fetchSlotCandidates(idToken, slot.id);
+          return [slot.id, response.items] as const;
+        }),
+      );
+      return Object.fromEntries(entries);
+    },
+    enabled: Boolean(currentUser && slots.length),
+    retry: 1,
+  });
   const dashboard = dashboardQuery.data;
-  const selectedCandidate =
-    dashboard?.leaderboard.find(
-      (candidate) => candidate.candidate_assessment_id === selectedCandidateId,
-    ) ?? dashboard?.leaderboard[0] ?? null;
-  const questionAnalytics = useMemo(
-    () => buildQuestionAnalytics(dashboard?.leaderboard ?? []),
-    [dashboard?.leaderboard],
+  const slotAnalytics = useMemo(
+    () =>
+      buildSlotAnalytics(
+        assessment.passing_score,
+        slots,
+        slotCandidatesQuery.data ?? {},
+        dashboard?.leaderboard ?? [],
+      ),
+    [assessment.passing_score, dashboard?.leaderboard, slotCandidatesQuery.data, slots],
   );
 
-  async function downloadAssessmentReport() {
-    setDownloadError("");
-    setDownloadTarget("assessment");
-    try {
-      if (!currentUser) {
-        throw new Error("Recruiter session is required.");
-      }
-      await downloadAssessmentEvaluationReport(
-        await currentUser.getIdToken(),
-        assessment.id,
-      );
-    } catch (error: unknown) {
-      setDownloadError(
-        error instanceof Error ? error.message : "Unable to download report.",
-      );
-    } finally {
-      setDownloadTarget(null);
-    }
-  }
+  const maxDuration = useMemo(() => {
+    const durations = slotAnalytics
+      .map((slot) => slot.averageDurationSeconds)
+      .filter((duration): duration is number => duration !== null);
+    return durations.length ? Math.max(...durations) : 0;
+  }, [slotAnalytics]);
 
-  async function downloadCandidateReport(candidateAssessmentId: string) {
-    setDownloadError("");
-    setDownloadTarget(candidateAssessmentId);
-    try {
-      if (!currentUser) {
-        throw new Error("Recruiter session is required.");
+  // PDF generation trigger
+  const pdfTriggerRef = useRef(pdfTrigger ?? 0);
+  useEffect(() => {
+    if (pdfTrigger !== undefined && pdfTrigger > pdfTriggerRef.current && dashboard) {
+      pdfTriggerRef.current = pdfTrigger;
+      const candidateLookup: Record<string, { candidate_assessment_id: string; assessment_status: string }[]> = {};
+      const rawLookup = slotCandidatesQuery.data ?? {};
+      for (const [slotId, candidates] of Object.entries(rawLookup)) {
+        candidateLookup[slotId] = candidates.map((c) => ({
+          candidate_assessment_id: c.candidate_assessment_id,
+          assessment_status: c.assessment_status,
+        }));
       }
-      await downloadCandidateEvaluationReport(
-        await currentUser.getIdToken(),
-        assessment.id,
-        candidateAssessmentId,
-      );
-    } catch (error: unknown) {
-      setDownloadError(
-        error instanceof Error ? error.message : "Unable to download scorecard.",
-      );
-    } finally {
-      setDownloadTarget(null);
+      generateAssessmentAnalyticsPdf(assessment, slots, dashboard, candidateLookup);
     }
-  }
+  }, [pdfTrigger, assessment, slots, dashboard, slotCandidatesQuery.data]);
 
-  if (dashboardQuery.isLoading) {
-    return <PanelState label="Loading evaluation workspace..." />;
+  if (dashboardQuery.isLoading || (slots.length > 0 && slotCandidatesQuery.isLoading)) {
+    return <PanelState label="Loading assessment analytics..." />;
   }
 
   if (dashboardQuery.isError || !dashboard) {
-    return <PanelState label="Evaluation data is temporarily unavailable." />;
+    return <PanelState label="Assessment analytics are temporarily unavailable." />;
   }
 
   const overview = dashboard.overview;
@@ -128,35 +148,6 @@ export function AssessmentEvaluationPanel({
 
   return (
     <div className="assessment-evaluation-view">
-      <section className="assessment-evaluation-header">
-        <div>
-          <span className="panel-eyebrow">Evaluation command center</span>
-          <h2>Assessment performance</h2>
-          <p>
-            Track scoring quality, investigate question difficulty, and open
-            evidence-backed candidate scorecards.
-          </p>
-        </div>
-        <div className="assessment-row-actions">
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={backfillPending}
-            onClick={() => void onBackfill()}
-          >
-            <Activity size={16} aria-hidden="true" />
-            {backfillPending ? "Evaluating..." : "Evaluate previous"}
-          </Button>
-          <Button
-            type="button"
-            disabled={downloadTarget !== null || !overview.completed_candidates}
-            onClick={() => void downloadAssessmentReport()}
-          >
-            <Download size={16} aria-hidden="true" />
-            {downloadTarget === "assessment" ? "Preparing..." : "Assessment PDF"}
-          </Button>
-        </div>
-      </section>
 
       {backfillError || backfillResult ? (
         <p
@@ -173,6 +164,12 @@ export function AssessmentEvaluationPanel({
       {downloadError ? (
         <p className="test-feedback-message is-error" role="alert">
           {downloadError}
+        </p>
+      ) : null}
+      {slotCandidatesQuery.isError ? (
+        <p className="test-feedback-message is-error" role="alert">
+          Slot comparison could not load candidate totals. Showing available
+          assessment-level analytics.
         </p>
       ) : null}
 
@@ -194,145 +191,168 @@ export function AssessmentEvaluationPanel({
 
       <div className="assessment-evaluation-grid">
         <section className="assessment-evaluation-main">
-          <EvaluationSection eyebrow="Tests" title="Scheduled test performance">
-            <div className="assessment-test-report-list">
-              {slots.map((slot) => (
-                <button
-                  key={slot.id}
-                  type="button"
-                  onClick={() => onOpenTest(slot.id)}
-                >
-                  <FileText size={18} aria-hidden="true" />
-                  <span>
-                    <strong>{slot.title}</strong>
-                    <small>
-                      {slot.submitted_count}/{slot.candidate_count} submitted
-                    </small>
-                  </span>
-                  <StatusBadge value={slot.effective_status} />
-                </button>
-              ))}
-              {!slots.length ? <p className="empty-state">No scheduled tests yet.</p> : null}
-            </div>
-          </EvaluationSection>
-
-          <EvaluationSection eyebrow="Question analytics" title="Difficulty and pass signals">
-            <div className="evaluation-analytics-grid">
-              {questionAnalytics.map((question) => {
-                const passRate = question.total
-                  ? (question.passed / question.total) * 100
-                  : 0;
-                return (
-                  <article key={question.id} className="evaluation-analytics-card">
+          <EvaluationSection eyebrow="Comparative analysis" title="Slot performance overview">
+            <div className="evaluation-slot-grid">
+              {slotAnalytics.map((slot) => (
+                <article key={slot.id} className="evaluation-slot-card">
+                  <header>
                     <div>
-                      <strong>{question.title}</strong>
-                      <span>{question.candidates} evaluated</span>
+                      <span>{formatDateTime(slot.startsAt)}</span>
+                      <strong>{slot.title}</strong>
                     </div>
-                    <dl>
-                      <div>
-                        <dt>Average</dt>
-                        <dd>{Math.round(question.score / question.candidates)}%</dd>
-                      </div>
-                      <div>
-                        <dt>Pass rate</dt>
-                        <dd>{Math.round(passRate)}%</dd>
-                      </div>
-                      <div>
-                        <dt>Cases</dt>
-                        <dd>{question.passed}/{question.total}</dd>
-                      </div>
-                    </dl>
-                  </article>
-                );
-              })}
-              {!questionAnalytics.length ? (
-                <p className="empty-state">Question analytics appear after evaluation.</p>
+                    <StatusBadge value={slot.status} />
+                  </header>
+                  <div className="evaluation-slot-score">
+                    <strong>{formatPercent(slot.averageScore)}</strong>
+                    <span>average final score</span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Submissions</dt>
+                      <dd>
+                        {slot.submittedCount}/{slot.candidateCount}
+                        <small>{formatPercent(slot.submissionRate)}</small>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Evaluated</dt>
+                      <dd>
+                        {slot.evaluatedCount}/{slot.submittedCount}
+                        <small>{formatPercent(slot.evaluationRate)}</small>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Pass rate</dt>
+                      <dd>{formatPercent(slot.passRate)}</dd>
+                    </div>
+                    <div>
+                      <dt>Avg time</dt>
+                      <dd>{formatDuration(slot.averageDurationSeconds)}</dd>
+                    </div>
+                    <div>
+                      <dt>Hidden cases</dt>
+                      <dd>{formatPercent(slot.hiddenPassRate)}</dd>
+                    </div>
+                    <div>
+                      <dt>Coding score</dt>
+                      <dd>{formatPercent(slot.averageCodingScore)}</dd>
+                    </div>
+                    <div>
+                      <dt>AI score</dt>
+                      <dd>{formatPercent(slot.averageAiScore)}</dd>
+                    </div>
+                  </dl>
+                  <div className="evaluation-band-stack" aria-label={`${slot.title} score distribution`}>
+                    <span
+                      className="is-excellent"
+                      style={{ width: `${bandWidth(slot.bands.excellent, slot.evaluatedCount)}%` }}
+                    />
+                    <span
+                      className="is-pass"
+                      style={{ width: `${bandWidth(slot.bands.pass, slot.evaluatedCount)}%` }}
+                    />
+                    <span
+                      className="is-review"
+                      style={{ width: `${bandWidth(slot.bands.review, slot.evaluatedCount)}%` }}
+                    />
+                  </div>
+                  <Link
+                    className="assessment-test-report-link evaluation-slot-link"
+                    to={assessmentTestPath(assessment.id, slot.id, assessment.title, slot.title)}
+                  >
+                    <FileText size={17} aria-hidden="true" />
+                    <span>Open test analytics</span>
+                  </Link>
+                </article>
+              ))}
+              {!slotAnalytics.length ? (
+                <p className="empty-state">Create test slots to compare analytics.</p>
               ) : null}
             </div>
           </EvaluationSection>
 
-          <EvaluationSection eyebrow="Leaderboard" title="Candidate ranking">
-            <div className="assessment-table-shell">
-              <table className="assessment-table compact-table">
-                <thead>
-                  <tr>
-                    <th>Rank</th>
-                    <th>Candidate</th>
-                    <th>Final</th>
-                    <th>Hidden cases</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dashboard.leaderboard.map((candidate) => (
-                    <tr
-                      key={candidate.candidate_assessment_id}
-                      className={
-                        selectedCandidate?.candidate_assessment_id ===
-                        candidate.candidate_assessment_id
-                          ? "is-selected"
-                          : ""
-                      }
-                    >
-                      <td>#{candidate.rank ?? "-"}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="table-link-button"
-                          onClick={() =>
-                            setSelectedCandidateId(candidate.candidate_assessment_id)
-                          }
-                        >
-                          {candidate.candidate_name}
-                        </button>
-                        <small>{candidate.candidate_email}</small>
-                      </td>
-                      <td>{Math.round(candidate.scores.final_score)}%</td>
-                      <td>{candidate.hidden_passed}/{candidate.hidden_total}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="table-link-button"
-                          onClick={() =>
-                            setSelectedCandidateId(candidate.candidate_assessment_id)
-                          }
-                        >
-                          Scorecard
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {!dashboard.leaderboard.length ? (
-                    <tr><td colSpan={5}>No completed evaluations yet.</td></tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </EvaluationSection>
+          {slotAnalytics.length > 0 ? (
+            <EvaluationSection eyebrow="Visual comparisons" title="Key metrics by test slot">
+              <div className="analytics-charts-grid">
+                
+                {/* Average Final Score Comparison */}
+                <div className="analytics-chart-card">
+                  <h3>Average Final Score</h3>
+                  <div className="chart-bars-container">
+                    {slotAnalytics.map((slot) => (
+                      <div key={slot.id} className="chart-bar-row">
+                        <div className="chart-bar-label">
+                          <span className="chart-bar-title">{slot.title}</span>
+                          <span className="chart-bar-value">{formatPercent(slot.averageScore)}</span>
+                        </div>
+                        <div className="chart-bar-bg">
+                          <div
+                            className="chart-bar-fill score-fill"
+                            style={{ width: `${slot.averageScore}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Participation / Submission Rate Comparison */}
+                <div className="analytics-chart-card">
+                  <h3>Participation Rate</h3>
+                  <div className="chart-bars-container">
+                    {slotAnalytics.map((slot) => (
+                      <div key={slot.id} className="chart-bar-row">
+                        <div className="chart-bar-label">
+                          <span className="chart-bar-title">{slot.title}</span>
+                          <span className="chart-bar-value">{formatPercent(slot.submissionRate)}</span>
+                        </div>
+                        <div className="chart-bar-bg">
+                          <div
+                            className="chart-bar-fill participation-fill"
+                            style={{ width: `${slot.submissionRate}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Average Duration Comparison */}
+                <div className="analytics-chart-card">
+                  <h3>Average Duration</h3>
+                  <div className="chart-bars-container">
+                    {slotAnalytics.map((slot) => {
+                      const widthPercent = maxDuration && slot.averageDurationSeconds
+                        ? (slot.averageDurationSeconds / maxDuration) * 100
+                        : 0;
+                      return (
+                        <div key={slot.id} className="chart-bar-row">
+                          <div className="chart-bar-label">
+                            <span className="chart-bar-title">{slot.title}</span>
+                            <span className="chart-bar-value">
+                              {slot.averageDurationSeconds !== null
+                                ? formatDuration(slot.averageDurationSeconds)
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="chart-bar-bg">
+                            <div
+                              className="chart-bar-fill duration-fill"
+                              style={{ width: `${widthPercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+              </div>
+            </EvaluationSection>
+          ) : null}
         </section>
 
         <aside className="assessment-evaluation-side">
-          {selectedCandidate ? (
-            <RecruiterScorecardPreview
-              candidate={selectedCandidate}
-              loading={false}
-              error=""
-              downloadPending={
-                downloadTarget === selectedCandidate.candidate_assessment_id
-              }
-              onDownload={() =>
-                void downloadCandidateReport(
-                  selectedCandidate.candidate_assessment_id,
-                )
-              }
-            />
-          ) : (
-            <div className="evaluation-empty-state">
-              <Users size={22} aria-hidden="true" />
-              <strong>No scorecard yet</strong>
-              <p>Completed candidates will appear here.</p>
-            </div>
-          )}
           <div className="evaluation-pipeline-summary">
             <span>Evaluation pipeline</span>
             <strong>
@@ -354,28 +374,140 @@ export function AssessmentEvaluationPanel({
   );
 }
 
-function buildQuestionAnalytics(
+function buildSlotAnalytics(
+  passingScore: number,
+  slots: AssessmentSlot[],
+  slotCandidates: SlotCandidateLookup,
   leaderboard: CandidateEvaluationSummary[],
-): QuestionAnalytics[] {
-  const rows = new Map<string, QuestionAnalytics>();
-  leaderboard.forEach((candidate) => {
-    candidate.question_breakdown.forEach((question) => {
-      const row = rows.get(question.question_id) ?? {
-        id: question.question_id,
-        title: question.question_title,
-        candidates: 0,
-        score: 0,
-        passed: 0,
-        total: 0,
-      };
-      row.candidates += 1;
-      row.score += question.score;
-      row.passed += question.passed_count;
-      row.total += question.total_count;
-      rows.set(question.question_id, row);
-    });
+): SlotAnalytics[] {
+  const evaluationByCandidateId = new Map(
+    leaderboard.map((candidate) => [
+      candidate.candidate_assessment_id,
+      candidate,
+    ]),
+  );
+
+  return slots.map((slot) => {
+    const candidates = slotCandidates[slot.id] ?? [];
+    const submittedFromCandidates = candidates.filter((candidate) =>
+      ["submitted", "auto_submitted"].includes(candidate.assessment_status),
+    ).length;
+    const evaluated = candidates
+      .map((candidate) => evaluationByCandidateId.get(candidate.candidate_assessment_id))
+      .filter((candidate): candidate is CandidateEvaluationSummary => Boolean(candidate));
+    const candidateCount = Math.max(slot.candidate_count, candidates.length);
+    const submittedCount = Math.max(slot.submitted_count, submittedFromCandidates);
+    const scoreTotal = evaluated.reduce(
+      (sum, candidate) => sum + candidate.scores.final_score,
+      0,
+    );
+    const codingTotal = evaluated.reduce(
+      (sum, candidate) => sum + candidate.scores.coding_score,
+      0,
+    );
+    const aiTotal = evaluated.reduce(
+      (sum, candidate) => sum + candidate.scores.ai_score,
+      0,
+    );
+    const hiddenPassed = evaluated.reduce(
+      (sum, candidate) => sum + candidate.hidden_passed,
+      0,
+    );
+    const hiddenTotal = evaluated.reduce(
+      (sum, candidate) => sum + candidate.hidden_total,
+      0,
+    );
+    const durations = evaluated
+      .map((candidate) => candidate.time_taken_seconds ?? candidate.activity?.total_time_seconds)
+      .filter((duration): duration is number => typeof duration === "number");
+    const bands = evaluated.reduce(
+      (accumulator, candidate) => {
+        const score = candidate.scores.final_score;
+        if (score >= Math.max(90, passingScore + 15)) {
+          accumulator.excellent += 1;
+        } else if (score >= passingScore) {
+          accumulator.pass += 1;
+        } else {
+          accumulator.review += 1;
+        }
+        return accumulator;
+      },
+      { excellent: 0, pass: 0, review: 0 },
+    );
+
+    return {
+      id: slot.id,
+      title: slot.title,
+      status: slot.effective_status,
+      startsAt: slot.start_at,
+      candidateCount,
+      submittedCount,
+      evaluatedCount: evaluated.length,
+      averageScore: average(scoreTotal, evaluated.length),
+      topScore: evaluated.length
+        ? Math.max(...evaluated.map((candidate) => candidate.scores.final_score))
+        : 0,
+      passRate: percentage(
+        evaluated.filter((candidate) => candidate.scores.final_score >= passingScore)
+          .length,
+        evaluated.length,
+      ),
+      submissionRate: percentage(submittedCount, candidateCount),
+      evaluationRate: percentage(evaluated.length, submittedCount),
+      hiddenPassRate: percentage(hiddenPassed, hiddenTotal),
+      averageCodingScore: average(codingTotal, evaluated.length),
+      averageAiScore: average(aiTotal, evaluated.length),
+      averageDurationSeconds: durations.length
+        ? average(
+            durations.reduce((sum, duration) => sum + duration, 0),
+            durations.length,
+          )
+        : null,
+      bands,
+    };
   });
-  return Array.from(rows.values());
+}
+
+
+
+function average(total: number, count: number) {
+  return count ? total / count : 0;
+}
+
+function percentage(value: number, total: number) {
+  return total ? (value / total) * 100 : 0;
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(value)}%`;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Schedule pending";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function formatDuration(seconds: number | null) {
+  if (seconds === null || !Number.isFinite(seconds)) {
+    return "-";
+  }
+  const rounded = Math.round(seconds);
+  const minutes = Math.floor(rounded / 60);
+  const remainingSeconds = rounded % 60;
+  if (minutes < 1) {
+    return `${remainingSeconds}s`;
+  }
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
+function bandWidth(count: number, total: number) {
+  return total ? (count / total) * 100 : 0;
 }
 
 function MetricTile({ label, value }: { label: string; value: string }) {
@@ -386,6 +518,8 @@ function MetricTile({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+
 
 function EvaluationSection({
   eyebrow,

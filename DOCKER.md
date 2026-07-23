@@ -57,6 +57,38 @@ docker compose up frontend
 
 The root `docker-compose.yml` is the single Compose entry point. It uses `docker/judge0/judge0.conf` so Judge0 connects to the shared Compose `postgres` and `redis` services.
 
+## Cloud Run Notes
+
+The API images listen on `${PORT:-8000}` and the frontend Nginx image listens on
+`8080`, so they are ready for Cloud Run's default port contract. Deploy each API
+as its own Cloud Run service and set the browser-facing frontend build argument
+to the API gateway URL before building the frontend image:
+
+```sh
+docker build \
+  --build-arg VITE_API_GATEWAY_BASE_URL=https://API_GATEWAY_URL/api/v1 \
+  -t REGION-docker.pkg.dev/PROJECT/REPOSITORY/cap-frontend:TAG \
+  frontend
+```
+
+Use Cloud Run environment variables or Secret Manager bindings for production
+settings. At minimum, replace local defaults for `APP_ENV`, `CORS_ALLOWED_ORIGINS`,
+`APP_BASE_URL`, `DATABASE_URL`, `INTERNAL_SERVICE_TOKEN`,
+`INVITE_TOKEN_PEPPER`, `CANDIDATE_SESSION_SECRET`, Firebase values, Groq/Brevo
+keys, and the internal upstream URLs:
+
+- API gateway: `CORE_SERVICE_BASE_URL`, `CODE_EXECUTION_SERVICE_BASE_URL`,
+  `CODE_EVALUATION_SERVICE_BASE_URL`
+- Core service: `CODE_EXECUTION_API_BASE_URL`,
+  `CODE_EVALUATION_API_BASE_URL`
+- Code execution service: `JUDGE0_BASE_URL`
+- Code evaluation service and worker: `EVALUATION_REPORT_DIR`
+
+Run the core and evaluation Alembic migrations as Cloud Run Jobs or another
+one-shot release step before shifting traffic to a new API revision. The compose
+migration containers are local orchestration helpers; Cloud Run services should
+start only after the target database schema is current.
+
 ## Evaluation Persistence
 
 Evaluation jobs, source evidence, scorecards, and report metadata are stored in

@@ -10,6 +10,7 @@ from schemas.question_bank import (
     DifficultyLevel,
     QuestionGroupStatus,
     QuestionStatus,
+    QuestionVisibility,
 )
 
 
@@ -29,7 +30,10 @@ class QuestionBankRepository(BaseRepository):
         """Return recruiter-owned questions using optional filters and sorting."""
 
         stmt = select(QuestionBankQuestionModel).where(
-            QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+            or_(
+                QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+                QuestionBankQuestionModel.visibility == QuestionVisibility.PUBLIC.value,
+            ),
         )
 
         conditions: list[ColumnElement[bool]] = []
@@ -144,7 +148,10 @@ class QuestionBankRepository(BaseRepository):
         """Return selected question IDs that exist for a recruiter."""
 
         stmt = select(QuestionBankQuestionModel.id).where(
-            QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+            or_(
+                QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+                QuestionBankQuestionModel.visibility == QuestionVisibility.PUBLIC.value,
+            ),
             QuestionBankQuestionModel.id.in_(question_ids),
         )
         return {row[0] for row in self._session.execute(stmt).all()}
@@ -161,7 +168,10 @@ class QuestionBankRepository(BaseRepository):
             return []
 
         stmt = select(QuestionBankQuestionModel).where(
-            QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+            or_(
+                QuestionBankQuestionModel.recruiter_uid == recruiter_uid,
+                QuestionBankQuestionModel.visibility == QuestionVisibility.PUBLIC.value,
+            ),
             QuestionBankQuestionModel.id.in_(question_ids),
         )
         return list(self._session.execute(stmt).scalars().all())

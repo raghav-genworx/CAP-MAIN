@@ -45,6 +45,10 @@ def build_solution_prompt(
                 "constraints": state.get("constraints", ""),
             },
             "testcases": {"sample": sample_cases, "hidden": hidden_cases},
+            "answer_validation": {
+                "mode": state.get("answer_validation_mode", "exact"),
+                "explanation": state.get("output_checker_explanation", ""),
+            },
             "difficulty": state.get("difficulty", "medium"),
             "reference_language": reference_language,
             "requested_languages": state["generation_settings"].supported_languages,
@@ -71,6 +75,11 @@ def build_solution_prompt(
             (
                 "The reference solution must be the optimized intended solution, "
                 "not a brute-force oracle or teaching-only baseline."
+            ),
+            (
+                "If answer_validation.mode is multiple_valid or constructive, "
+                "the program may print any valid answer accepted by the checker; "
+                "it does not need to reproduce the exemplar expected_output."
             ),
             "Use notes only for a material assumption.",
         ),

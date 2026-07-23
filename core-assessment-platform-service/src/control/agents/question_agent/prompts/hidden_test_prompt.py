@@ -24,6 +24,7 @@ def build_hidden_test_prompt(
             "Derive expected outputs independently from the problem contract.",
             "Never duplicate a public sample or another hidden input.",
             "Stress cases must remain representable as exact complete input strings.",
+            "The requested hidden count is a hard output contract.",
         ),
     )
     user_prompt = build_task_user_prompt(
@@ -37,6 +38,10 @@ def build_hidden_test_prompt(
                 "constraints": state.get("constraints", ""),
             },
             "difficulty": state.get("difficulty", "medium"),
+            "answer_validation": {
+                "mode": state.get("answer_validation_mode", "exact"),
+                "explanation": state.get("output_checker_explanation", ""),
+            },
             "public_samples": sample_cases,
             "counts": {
                 "hidden_total": settings.hidden_test_case_count,
@@ -47,7 +52,8 @@ def build_hidden_test_prompt(
         requirements=(
             (
                 "Return exactly counts.hidden_total rows and set is_sample=false "
-                "for every row."
+                "for every row. If counts.hidden_total is 10, the array length "
+                "must be 10."
             ),
             (
                 "Include edge and stress rows within the total; do not add them "
@@ -58,6 +64,20 @@ def build_hidden_test_prompt(
                 "duplicates, signs, ordering, and overflow when applicable."
             ),
             "Use only contract-valid inputs and exact deterministic STDOUT outputs.",
+            (
+                "When answer_validation.mode is not exact, expected_output must "
+                "be one valid exemplar output for the input; the checker defines "
+                "the full acceptance rule."
+            ),
+            (
+                "Every hidden input must be distinct from public_samples and "
+                "from every other hidden row by raw input string."
+            ),
+            (
+                "Never omit a required hidden row because one category is not "
+                "applicable; fill the remaining slots with valid branch, "
+                "boundary, or representative correctness cases."
+            ),
             (
                 "Keep hidden explanations short and do not reveal hidden cases "
                 "through notes."

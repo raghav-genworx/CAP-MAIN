@@ -19,7 +19,15 @@ const STATUS_TONES: Record<string, StatusTone> = {
 };
 
 function formatStatus(value: string) {
+  if (value.toLowerCase() === "active") {
+    return "Live";
+  }
+
   return value.replaceAll("_", " ");
+}
+
+function isLiveStatus(value: string) {
+  return ["active", "live"].includes(value.toLowerCase());
 }
 
 function statusTone(value: string): StatusTone {
@@ -30,7 +38,15 @@ export function StatusBadge({ value }: { value: string }) {
   const tone = statusTone(value);
 
   return (
-    <span className={`status-badge status-${tone}`}>
+    <span
+      className={[
+        "status-badge",
+        `status-${tone}`,
+        isLiveStatus(value) ? "is-live-status" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
       {formatStatus(value)}
     </span>
   );

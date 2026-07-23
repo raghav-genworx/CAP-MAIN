@@ -23,6 +23,7 @@ import type {
   QuestionAIDraftProgressEvent,
   QuestionBulkImportRequest,
   QuestionCreatePayload,
+  QuestionDraftRefinementRequest,
   QuestionDraftValidationRequest,
   QuestionGroupCreatePayload,
   QuestionGroupStatus,
@@ -128,31 +129,39 @@ export function useStreamQuestionBankDraft(user: User | null) {
     mutationFn: async ({
       payload,
       onProgress,
+      signal,
     }: {
       payload: QuestionAIDraftRequest;
       onProgress: (event: QuestionAIDraftProgressEvent) => void;
-    }) => streamQuestionBankDraft(await getRequiredIdToken(user), payload, onProgress),
+      signal?: AbortSignal;
+    }) => streamQuestionBankDraft(await getRequiredIdToken(user), payload, onProgress, signal),
   });
 }
 
 export function useValidateQuestionBankDraft(user: User | null) {
   return useMutation({
-    mutationFn: async (payload: QuestionDraftValidationRequest) =>
-      validateQuestionBankDraft(await getRequiredIdToken(user), payload),
+    mutationFn: async (variables: QuestionDraftValidationRequest & { signal?: AbortSignal }) => {
+      const { signal, ...payload } = variables;
+      return validateQuestionBankDraft(await getRequiredIdToken(user), payload, signal);
+    },
   });
 }
 
 export function useRefineQuestionBankTestCases(user: User | null) {
   return useMutation({
-    mutationFn: async (payload: QuestionDraftValidationRequest) =>
-      refineQuestionBankTestCases(await getRequiredIdToken(user), payload),
+    mutationFn: async (variables: QuestionDraftRefinementRequest & { signal?: AbortSignal }) => {
+      const { signal, ...payload } = variables;
+      return refineQuestionBankTestCases(await getRequiredIdToken(user), payload, signal);
+    },
   });
 }
 
 export function useRefineQuestionBankSolution(user: User | null) {
   return useMutation({
-    mutationFn: async (payload: QuestionDraftValidationRequest) =>
-      refineQuestionBankSolution(await getRequiredIdToken(user), payload),
+    mutationFn: async (variables: QuestionDraftRefinementRequest & { signal?: AbortSignal }) => {
+      const { signal, ...payload } = variables;
+      return refineQuestionBankSolution(await getRequiredIdToken(user), payload, signal);
+    },
   });
 }
 

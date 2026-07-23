@@ -42,8 +42,21 @@ class Judge0Client:
     async def execute(self, payload: Judge0Payload) -> Judge0SubmissionResult:
         """Create a Judge0 submission and wait for the final result."""
 
-        token = await self._create_submission(payload)
-        return await self._wait_for_submission(token)
+        async with self._client() as client:
+            token = await self._create_submission(client, payload)
+            return await self._wait_for_submission(client, token)
+
+    async def execute_batch(
+        self,
+        payloads: list[Judge0Payload],
+    ) -> list[Judge0SubmissionResult]:
+        """Create Judge0 batch submissions and wait for every final result."""
+
+        if not payloads:
+            return []
+        async with self._client() as client:
+            tokens = await self._create_batch_submission(client, payloads)
+            return await self._wait_for_batch_submission(client, tokens)
 
     async def get_languages(self) -> list[LanguageResponse]:
         """Fetch supported languages from Judge0."""
@@ -64,15 +77,18 @@ class Judge0Client:
                 "Judge0 returned an invalid languages response."
             ) from exc
 
-    async def _create_submission(self, payload: Judge0Payload) -> str:
+    async def _create_submission(
+        self,
+        client: httpx.AsyncClient,
+        payload: Judge0Payload,
+    ) -> str:
         encoded_payload = self._encode_payload(payload)
         try:
-            async with self._client() as client:
-                response = await client.post(
-                    "/submissions",
-                    params={"base64_encoded": "true", "wait": "false"},
-                    json=encoded_payload,
-                )
+            response = await client.post(
+                "/submissions",
+                params={"base64_encoded": "true", "wait": "false"},
+                json=encoded_payload,
+            )
         except httpx.HTTPError as exc:
             raise Judge0ServiceError("Unable to reach Judge0.") from exc
         self._raise_for_judge0_error(response)
@@ -86,22 +102,81 @@ class Judge0Client:
         )
         return token
 
-    async def _wait_for_submission(self, token: str) -> Judge0SubmissionResult:
+    async def _create_batch_submission(
+        self,
+        client: httpx.AsyncClient,
+        payloads: list[Judge0Payload],
+    ) -> list[str]:
+        encoded_payloads = [self._encode_payload(payload) for payload in payloads]
+        try:
+            response = await client.post(
+                "/submissions/batch",
+                params={"base64_encoded": "true"},
+                json={"submissions": encoded_payloads},
+            )
+        except httpx.HTTPError as exc:
+            raise Judge0ServiceError("Unable to reach Judge0.") from exc
+        self._raise_for_judge0_error(response)
+        data = self._json_body(response)
+        tokens = self._extract_batch_tokens(data)
+        if len(tokens) != len(payloads):
+            raise Judge0ServiceError("Judge0 returned an invalid batch token response.")
+        logger.info(
+            "judge0_batch_submission_created count=%s first_token_fingerprint=%s",
+            len(tokens),
+            hashlib.sha256(tokens[0].encode("utf-8")).hexdigest()[:12],
+        )
+        return tokens
+
+    async def _wait_for_submission(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+    ) -> Judge0SubmissionResult:
         result: Judge0SubmissionResult | None = None
         for _ in range(self._max_poll_attempts):
-            result = await self._get_submission(token)
+            result = await self._get_submission(client, token)
             if result.status is not None and result.status.id not in PENDING_STATUS_IDS:
                 return self._decode_result(result)
             await asyncio.sleep(self._poll_interval)
         raise CodeExecutionTimeoutError()
 
-    async def _get_submission(self, token: str) -> Judge0SubmissionResult:
-        try:
-            async with self._client() as client:
-                response = await client.get(
-                    f"/submissions/{token}",
-                    params={"base64_encoded": "true"},
+    async def _wait_for_batch_submission(
+        self,
+        client: httpx.AsyncClient,
+        tokens: list[str],
+    ) -> list[Judge0SubmissionResult]:
+        token_set = set(tokens)
+        latest_by_token: dict[str, Judge0SubmissionResult] = {}
+        for _ in range(self._max_poll_attempts):
+            results = await self._get_batch_submission(client, tokens)
+            latest_by_token = {
+                result.token: result for result in results if result.token in token_set
+            }
+            if len(latest_by_token) != len(tokens):
+                raise Judge0ServiceError(
+                    "Judge0 returned an incomplete batch submission response."
                 )
+            if all(
+                result.status is not None and result.status.id not in PENDING_STATUS_IDS
+                for result in latest_by_token.values()
+            ):
+                return [
+                    self._decode_result(latest_by_token[token]) for token in tokens
+                ]
+            await asyncio.sleep(self._poll_interval)
+        raise CodeExecutionTimeoutError()
+
+    async def _get_submission(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+    ) -> Judge0SubmissionResult:
+        try:
+            response = await client.get(
+                f"/submissions/{token}",
+                params={"base64_encoded": "true"},
+            )
         except httpx.HTTPError as exc:
             raise Judge0ServiceError("Unable to reach Judge0.") from exc
         self._raise_for_judge0_error(response)
@@ -110,6 +185,42 @@ class Judge0Client:
         except ValidationError as exc:
             raise Judge0ServiceError(
                 "Judge0 returned an invalid submission response."
+            ) from exc
+
+    async def _get_batch_submission(
+        self,
+        client: httpx.AsyncClient,
+        tokens: list[str],
+    ) -> list[Judge0SubmissionResult]:
+        try:
+            response = await client.get(
+                "/submissions/batch",
+                params={
+                    "tokens": ",".join(tokens),
+                    "base64_encoded": "true",
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise Judge0ServiceError("Unable to reach Judge0.") from exc
+        self._raise_for_judge0_error(response)
+        data = self._json_body(response)
+        submissions = (
+            data.get("submissions")
+            if isinstance(data, dict)
+            else data
+            if isinstance(data, list)
+            else None
+        )
+        if not isinstance(submissions, list):
+            raise Judge0ServiceError("Judge0 returned an invalid batch response.")
+        try:
+            return [
+                Judge0SubmissionResult.model_validate(submission)
+                for submission in submissions
+            ]
+        except ValidationError as exc:
+            raise Judge0ServiceError(
+                "Judge0 returned an invalid batch submission response."
             ) from exc
 
     def _client(self) -> httpx.AsyncClient:
@@ -138,6 +249,26 @@ class Judge0Client:
             if value is not None:
                 setattr(result, field, self._decode_text(value))
         return result
+
+    def _extract_batch_tokens(self, data: object) -> list[str]:
+        submissions = (
+            data.get("submissions")
+            if isinstance(data, dict)
+            else data
+            if isinstance(data, list)
+            else None
+        )
+        if not isinstance(submissions, list):
+            raise Judge0ServiceError("Judge0 returned an invalid batch token response.")
+        tokens: list[str] = []
+        for submission in submissions:
+            token = submission.get("token") if isinstance(submission, dict) else None
+            if not isinstance(token, str) or not token:
+                raise Judge0ServiceError(
+                    "Judge0 returned an invalid batch token response."
+                )
+            tokens.append(token)
+        return tokens
 
     def _raise_for_judge0_error(self, response: httpx.Response) -> None:
         if response.status_code < 400:

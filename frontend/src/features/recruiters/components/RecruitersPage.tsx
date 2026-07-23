@@ -1,27 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  CheckCircle2,
   ClipboardList,
   FilePlus2,
-  PlayCircle,
-  Plus,
-  Users,
 } from "lucide-react";
 import { useDeferredValue, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { DataTable } from "../../../components/common/DataTable";
 import { EmptyState } from "../../../components/common/EmptyState";
-import { MetricStrip } from "../../../components/common/MetricStrip";
 import { StatusBadge } from "../../../components/common/StatusBadge";
-import { Button } from "../../../components/ui/Button";
 import { useAuth } from "../../auth";
 import {
   useAssessments,
+  assessmentPath,
+  assessmentTestPath,
   fetchAssessmentSlots,
   fetchSlotMonitoring,
 } from "../../assessments";
+import {
+  DashboardCompletionByTest,
+  RecruiterDashboardAnalytics,
+} from "./RecruiterDashboardAnalytics";
 import type {
   Assessment,
   AssessmentStatus,
@@ -31,7 +31,7 @@ import type {
   SlotStatus,
 } from "../../assessments";
 
-type SessionFilter = "all" | "active" | "upcoming";
+type SessionFilter = "all" | "active" | "upcoming" | "attention" | "closed";
 type CandidateStatusCounts = Record<CandidateAssessmentStatus, number>;
 
 interface AssessmentActivityBundle {
@@ -43,12 +43,14 @@ interface AssessmentActivityBundle {
 }
 
 interface SessionRow {
+  assessmentId: string;
   assessmentTitle: string;
   assessmentStatus: AssessmentStatus;
   questionCount: number;
   slotId: string;
   slotTitle: string;
   slotStatus: SlotStatus;
+  effectiveStatus: SlotStatus;
   startAt: string;
   endAt: string;
   candidateCount: number;
@@ -99,31 +101,39 @@ function buildSessionRow(
     return counts;
   }, createStatusCounts());
 
-  const submittedCount =
-    statusCounts.submitted + statusCounts.auto_submitted;
   const candidateCount = Math.max(slot.candidate_count, monitoring.length);
-  const isLive = slot.status === "active" || statusCounts.in_progress > 0;
+  const submittedCount = Math.min(
+    candidateCount,
+    Math.max(
+      slot.submitted_count,
+      statusCounts.submitted + statusCounts.auto_submitted,
+    ),
+  );
+  const isLive =
+    slot.effective_status === "active" || statusCounts.in_progress > 0;
   const startsAt = new Date(slot.start_at).getTime();
   const startsSoon =
     !isLive &&
-    slot.status === "scheduled" &&
+    slot.effective_status === "scheduled" &&
     startsAt >= now &&
     startsAt - now <= 1000 * 60 * 60 * 48;
   const needsAttention =
     statusCounts.revoked > 0 ||
     (isLive && candidateCount === 0) ||
-    (slot.status === "active" &&
+    (slot.effective_status === "active" &&
       candidateCount > 0 &&
       statusCounts.in_progress === 0 &&
       submittedCount === 0);
 
   return {
+    assessmentId: assessment.id,
     assessmentTitle: assessment.title,
     assessmentStatus: assessment.status,
     questionCount: assessment.question_count,
     slotId: slot.id,
     slotTitle: slot.title,
     slotStatus: slot.status,
+    effectiveStatus: slot.effective_status,
     startAt: slot.start_at,
     endAt: slot.end_at,
     candidateCount,
@@ -172,11 +182,58 @@ function buildSessionNote(session: SessionRow) {
     return "This test is live and waiting for candidate activity.";
   }
 
+  if (session.effectiveStatus === "paused") {
+    return "Candidate activity is paused until the test is continued.";
+  }
+
+  if (session.effectiveStatus === "closed") {
+    return session.submittedCount
+      ? `${pluralize(session.submittedCount, "submission")} ready for review.`
+      : "This test is closed with no submissions.";
+  }
+
+  if (session.effectiveStatus === "draft") {
+    return "Finish the schedule and candidate setup before publishing.";
+  }
+
   if (session.slotStatus === "scheduled" && session.candidateCount > 0) {
     return `${pluralize(session.candidateCount, "candidate")} assigned for this upcoming test.`;
   }
 
   return "Scheduled and ready for the next candidate batch.";
+}
+
+function buildTimingLabel(session: SessionRow) {
+  if (session.effectiveStatus === "active") {
+    return "Live now";
+  }
+  if (session.effectiveStatus === "paused") {
+    return "Paused";
+  }
+  if (session.effectiveStatus === "closed") {
+    return "Closed";
+  }
+  if (session.effectiveStatus === "draft") {
+    return "Draft schedule";
+  }
+
+  const minutesUntilStart = Math.max(
+    0,
+    Math.ceil((new Date(session.startAt).getTime() - Date.now()) / 60_000),
+  );
+  if (minutesUntilStart < 60) {
+    return `Starts in ${minutesUntilStart} min`;
+  }
+  if (minutesUntilStart < 1_440) {
+    return `Starts in ${Math.ceil(minutesUntilStart / 60)} hr`;
+  }
+  return `Starts in ${Math.ceil(minutesUntilStart / 1_440)} days`;
+}
+
+function completionPercentage(session: SessionRow) {
+  return session.candidateCount
+    ? Math.round((session.submittedCount / session.candidateCount) * 100)
+    : 0;
 }
 
 function matchesSearch(session: SessionRow, search: string) {
@@ -197,7 +254,6 @@ function matchesSearch(session: SessionRow, search: string) {
 }
 
 export function RecruitersPage() {
-  const navigate = useNavigate();
   const { currentUser } = useAuth();
   const [search, setSearch] = useState("");
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
@@ -270,14 +326,16 @@ export function RecruitersPage() {
           buildSessionRow(assessment, slot, monitoring),
         );
       })
-      .filter((session) => session.isLive || session.slotStatus === "scheduled")
       .sort((left, right) => {
         const rankGap = sessionRank(left) - sessionRank(right);
         if (rankGap !== 0) {
           return rankGap;
         }
 
-        return new Date(left.startAt).getTime() - new Date(right.startAt).getTime();
+        if (sessionRank(left) < 3) {
+          return new Date(left.startAt).getTime() - new Date(right.startAt).getTime();
+        }
+        return new Date(right.startAt).getTime() - new Date(left.startAt).getTime();
       });
   }, [activityQuery.data, assessments]);
 
@@ -290,7 +348,18 @@ export function RecruitersPage() {
           return false;
         }
 
-        if (sessionFilter === "upcoming" && session.isLive) {
+        if (
+          sessionFilter === "upcoming" &&
+          session.effectiveStatus !== "scheduled"
+        ) {
+          return false;
+        }
+
+        if (sessionFilter === "attention" && !session.needsAttention) {
+          return false;
+        }
+
+        if (sessionFilter === "closed" && session.effectiveStatus !== "closed") {
           return false;
         }
 
@@ -298,130 +367,66 @@ export function RecruitersPage() {
       }),
     [normalizedSearch, sessionFilter, sessionRows],
   );
-
-  const liveCount = sessionRows.filter((session) => session.isLive).length;
-  const upcomingCount = sessionRows.filter((session) => !session.isLive).length;
-  const attentionCount = sessionRows.filter(
+  const recentAssessments = assessments.slice(0, 6);
+  const liveSessionCount = sessionRows.filter((session) => session.isLive).length;
+  const upcomingSessionCount = sessionRows.filter(
+    (session) => session.effectiveStatus === "scheduled",
+  ).length;
+  const attentionSessionCount = sessionRows.filter(
     (session) => session.needsAttention,
   ).length;
-  const availableAssessments = assessments.filter(
-    (assessment) => assessment.status === "available",
-  ).length;
-  const recentAssessments = assessments.slice(0, 6);
 
   return (
     <main className="recruiter-dashboard">
       <div className="dashboard-shell">
-        <section className="dashboard-intro" aria-label="Recruiter dashboard header">
-          <div className="dashboard-intro-copy">
-            <p className="dashboard-eyebrow">Recruiter dashboard</p>
-            <h1>Command center</h1>
+        <section className="recruiter-welcome-banner" aria-label="Recruiter dashboard header">
+          <div className="dashboard-welcome-copy">
+            <p className="dashboard-eyebrow">Recruiter Dashboard</p>
+            <h1>Welcome back, {currentUser?.displayName || currentUser?.email?.split("@")[0] || "Recruiter"}!</h1>
+            <p>Track live tests, candidate progress, and assessment readiness from one clean workspace.</p>
           </div>
-
-          <div className="dashboard-status-strip" aria-label="Important test status">
-            <span className="dashboard-status-chip is-live">
-              <strong>{liveCount}</strong> Active
-            </span>
-            <span className="dashboard-status-chip is-upcoming">
-              <strong>{upcomingCount}</strong> Upcoming
-            </span>
-            <span className="dashboard-status-chip is-alert">
-              <strong>{attentionCount}</strong> Attention
-            </span>
+          <div className="dashboard-welcome-side">
+            <section className="dashboard-action-bar" aria-label="Main workspaces">
+              <Link
+                className="dashboard-action-link is-primary"
+                to="/recruiter/assessments"
+              >
+                <ClipboardList size={18} aria-hidden="true" />
+                All assessments
+              </Link>
+              <Link
+                className="dashboard-action-link"
+                to="/recruiter/question-management"
+              >
+                <FilePlus2 size={18} aria-hidden="true" />
+                Manage questions
+              </Link>
+            </section>
+            <div className="dashboard-welcome-stats" aria-label="Test slot summary">
+              <span className="is-live"><strong>{liveSessionCount}</strong> Live</span>
+              <span className="is-upcoming"><strong>{upcomingSessionCount}</strong> Upcoming</span>
+              <span className="is-attention"><strong>{attentionSessionCount}</strong> Attention</span>
+            </div>
           </div>
         </section>
 
-        <MetricStrip
-          items={[
-            {
-              icon: <ClipboardList size={18} aria-hidden="true" />,
-              label: "Assessments",
-              value: assessments.length,
-            },
-            {
-              icon: <CheckCircle2 size={18} aria-hidden="true" />,
-              label: "Available",
-              value: availableAssessments,
-            },
-            {
-              icon: <PlayCircle size={18} aria-hidden="true" />,
-              label: "Active tests",
-              value: liveCount,
-            },
-            {
-              icon: <AlertTriangle size={18} aria-hidden="true" />,
-              label: "Pending review",
-              value: attentionCount,
-            },
-          ]}
+
+        <RecruiterDashboardAnalytics
+          assessmentCount={assessments.length}
+          sessions={sessionRows}
         />
 
-        <section className="dashboard-action-bar" aria-label="Quick actions">
-          <Button type="button" onClick={() => navigate("/recruiter/assessments")}>
-            <Plus size={16} aria-hidden="true" />
-            Create assessment
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => navigate("/recruiter/question-management/new")}
-          >
-            <FilePlus2 size={16} aria-hidden="true" />
-            Add question
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => navigate("/recruiter/assessments")}
-          >
-            <Users size={16} aria-hidden="true" />
-            Candidate batches
-          </Button>
-        </section>
-
         <section className="dashboard-table-grid">
-          <section className="dashboard-panel">
+          <section className="dashboard-panel dashboard-test-slots-panel">
             <div className="dashboard-section-heading">
               <div>
-                <p className="dashboard-eyebrow">Recent</p>
-                <h2>Assessments</h2>
+                <h2>Test slots</h2>
+                <p>{visibleSessions.length} tests in the current view</p>
               </div>
-            </div>
-            <DataTable
-              rows={recentAssessments}
-              isLoading={assessmentsQuery.isPending}
-              getRowKey={(assessment) => assessment.id}
-              emptyState={
-                <EmptyState
-                  title="No assessments yet"
-                  description="Create an assessment to start scheduling candidate tests."
-                />
-              }
-              columns={[
-                {
-                  header: "Name",
-                  key: "name",
-                  render: (assessment) => <strong>{assessment.title}</strong>,
-                },
-                {
-                  header: "Questions",
-                  key: "questions",
-                  render: (assessment) => assessment.question_count,
-                },
-                {
-                  header: "Status",
-                  key: "status",
-                  render: (assessment) => <StatusBadge value={assessment.status} />,
-                },
-              ]}
-            />
-          </section>
-
-          <section className="dashboard-panel">
-            <div className="dashboard-section-heading">
-              <div>
-                <p className="dashboard-eyebrow">Attempts</p>
-                <h2>Active and upcoming</h2>
+              <div className="dashboard-section-meta">
+                <span>{sessionRows.length} total</span>
+                <span>{liveSessionCount} live</span>
+                <span>{attentionSessionCount} need review</span>
               </div>
             </div>
 
@@ -444,9 +449,11 @@ export function RecruitersPage() {
                     setSessionFilter(event.target.value as SessionFilter)
                   }
                 >
-                  <option value="all">Active and upcoming</option>
+                  <option value="all">All test slots</option>
                   <option value="active">Active only</option>
                   <option value="upcoming">Upcoming only</option>
+                  <option value="attention">Needs attention</option>
+                  <option value="closed">Closed only</option>
                 </select>
               </label>
             </div>
@@ -462,45 +469,79 @@ export function RecruitersPage() {
               emptyState={
                 <EmptyState
                   title="No tests in view"
-                  description="Active and scheduled tests will appear here."
+                  description="No test slots match the selected scope and filters."
                 />
               }
               columns={[
                 {
-                  header: "Assessment",
+                  header: "Test",
                   key: "assessment",
                   render: (session) => (
                     <div className="table-primary-cell">
-                      <strong>{session.assessmentTitle}</strong>
-                      <span>{formatStatusLabel(session.assessmentStatus)}</span>
+                      <Link
+                        className="entity-link"
+                        to={assessmentTestPath(
+                          session.assessmentId,
+                          session.slotId,
+                          session.assessmentTitle,
+                          session.slotTitle,
+                        )}
+                      >
+                        {session.slotTitle}
+                      </Link>
+                      <Link
+                        className="entity-secondary-link"
+                        to={assessmentPath(session.assessmentId, session.assessmentTitle)}
+                      >
+                        {session.assessmentTitle} -{" "}
+                        {formatStatusLabel(session.assessmentStatus)}
+                      </Link>
                     </div>
                   ),
                 },
                 {
-                  header: "Window",
+                  header: "Schedule",
                   key: "window",
                   render: (session) => (
                     <div className="table-primary-cell">
-                      <strong>{formatDateTime(session.startAt)}</strong>
-                      <span>Ends {formatDateTime(session.endAt)}</span>
+                      <strong>{buildTimingLabel(session)}</strong>
+                      <span>{formatDateTime(session.startAt)}</span>
+                      <span>Closes {formatDateTime(session.endAt)}</span>
                     </div>
                   ),
                 },
                 {
-                  header: "Candidates",
+                  header: "Completion",
                   key: "candidates",
-                  render: (session) => session.candidateCount,
+                  render: (session) => {
+                    const completion = completionPercentage(session);
+                    return (
+                      <div className="dashboard-slot-completion">
+                        <div>
+                          <strong>{session.submittedCount}/{session.candidateCount}</strong>
+                          <span>{completion}% submitted</span>
+                        </div>
+                        <span className="dashboard-slot-progress" aria-hidden="true">
+                          <i style={{ width: `${completion}%` }} />
+                        </span>
+                      </div>
+                    );
+                  },
                 },
                 {
                   header: "Status",
                   key: "status",
                   render: (session) => (
                     <div className="dashboard-tag-stack">
+                      {session.isLive ? <span className="pulse-indicator" title="Live Now" /> : null}
                       <StatusBadge
-                        value={session.isLive ? "active" : "scheduled"}
+                        value={session.effectiveStatus}
                       />
                       {session.needsAttention ? (
-                        <StatusBadge value="evaluating" />
+                        <span className="dashboard-attention-label">
+                          <AlertTriangle size={13} aria-hidden="true" />
+                          Needs attention
+                        </span>
                       ) : null}
                     </div>
                   ),
@@ -515,7 +556,59 @@ export function RecruitersPage() {
               ]}
             />
           </section>
+
+          <section className="dashboard-panel dashboard-recent-assessments">
+            <div className="dashboard-section-heading">
+              <div>
+                <p className="dashboard-eyebrow">Recent</p>
+                <h2>Assessments</h2>
+              </div>
+              <div className="dashboard-section-meta">
+                <span>{assessments.length} total</span>
+              </div>
+            </div>
+            <DataTable
+              rows={recentAssessments}
+              isLoading={assessmentsQuery.isPending}
+              getRowKey={(assessment) => assessment.id}
+              emptyState={
+                <EmptyState
+                  title="No assessments yet"
+                  description="Create an assessment to start scheduling candidate tests."
+                />
+              }
+              columns={[
+                {
+                  header: "Name",
+                  key: "name",
+                  render: (assessment) => (
+                    <Link
+                      className="entity-link"
+                      to={assessmentPath(assessment.id, assessment.title)}
+                    >
+                      {assessment.title}
+                    </Link>
+                  ),
+                },
+                {
+                  header: "Questions",
+                  key: "questions",
+                  render: (assessment) => assessment.question_count,
+                },
+                {
+                  header: "Status",
+                  key: "status",
+                  render: (assessment) => <StatusBadge value={assessment.status} />,
+                },
+              ]}
+            />
+          </section>
         </section>
+
+        <DashboardCompletionByTest
+          isLoading={activityQuery.isPending}
+          sessions={sessionRows}
+        />
       </div>
     </main>
   );

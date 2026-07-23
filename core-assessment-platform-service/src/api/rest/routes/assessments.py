@@ -1,8 +1,10 @@
 """Assessment recruiter routes."""
 
+import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Path, Request, Response
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from api.rest.dependencies import get_assessment_service, require_role
@@ -536,3 +538,53 @@ async def slot_monitoring(
     slot_id: str = Path(min_length=1),
 ) -> MonitoringResponse:
     return await run_in_threadpool(service.monitoring, current_user.uid, slot_id)
+
+
+@router.get(
+    "/slots/{slot_id}/monitoring/stream",
+    summary="Stream assessment slot monitoring",
+    description="Streams recruiter-visible monitoring updates for a slot.",
+)
+async def slot_monitoring_stream(
+    request: Request,
+    current_user: Annotated[
+        AuthenticatedUser,
+        Depends(require_role(UserRole.RECRUITER)),
+    ],
+    service: Annotated[AssessmentService, Depends(get_assessment_service)],
+    slot_id: str = Path(min_length=1),
+) -> StreamingResponse:
+    initial_payload = await run_in_threadpool(
+        service.monitoring,
+        current_user.uid,
+        slot_id,
+    )
+
+    async def monitoring_events():
+        last_payload = initial_payload.model_dump_json()
+        yield f"event: monitoring\ndata: {last_payload}\n\n"
+
+        while not await request.is_disconnected():
+            await asyncio.sleep(3)
+            payload = await run_in_threadpool(
+                service.monitoring,
+                current_user.uid,
+                slot_id,
+            )
+            serialized = payload.model_dump_json()
+            if serialized == last_payload:
+                yield "event: heartbeat\ndata: {}\n\n"
+                continue
+
+            last_payload = serialized
+            yield f"event: monitoring\ndata: {serialized}\n\n"
+
+    return StreamingResponse(
+        monitoring_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

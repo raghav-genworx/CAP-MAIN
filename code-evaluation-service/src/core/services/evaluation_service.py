@@ -11,12 +11,10 @@ from core.exceptions.evaluation import (
     EvaluationJobNotFoundError,
     EvaluationRetryError,
 )
-from core.services.code_quality_evaluator import (
-    CodeQualityEvaluator,
-    GroqCodeQualityEvaluator,
-)
+from core.services.code_quality_evaluator import CodeQualityEvaluator
 from core.services.report_pdf_service import GeneratedReport, ReportPdfService
 from data.repositories.evaluation_repository import EvaluationRepository
+from handlers.http_clients.groq_code_quality import GroqCodeQualityEvaluator
 from schemas.evaluation import (
     AICodeQualitySignal,
     AssessmentEvaluationDashboard,
@@ -71,6 +69,28 @@ class EvaluationService:
     ) -> EvaluationJobResponse:
         """Create an evaluation job and optionally process it immediately."""
 
+        force = request.force
+        request_payload = request.model_dump(mode="json", exclude={"force"})
+        existing = self._repository.get_job_by_candidate_assessment(
+            request.candidate_assessment_id
+        )
+        if existing is not None:
+            if not force:
+                return existing
+            reset_job = existing.model_copy(
+                update={
+                    "status": EvaluationJobStatus.PENDING,
+                    "attempt_count": existing.attempt_count + 1,
+                    "error_message": None,
+                    "result": None,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self._repository.save_job(reset_job, request_payload=request_payload)
+            if process_inline:
+                return self.process_job(existing.job_id)
+            return reset_job
+
         now = datetime.now(UTC)
         job = EvaluationJobResponse(
             job_id=f"eval_{uuid4().hex[:12]}",
@@ -83,7 +103,7 @@ class EvaluationService:
         )
         stored_job, created = self._repository.create_job_if_absent(
             job,
-            request.model_dump(mode="json"),
+            request_payload,
         )
         if not created:
             return stored_job
@@ -612,9 +632,10 @@ class EvaluationService:
     ) -> float:
         if total_marks <= 0:
             return 0
-        return sum(
-            float(getattr(item, field)) * item.assigned_marks for item in breakdown
-        ) / total_marks
+        return (
+            sum(float(getattr(item, field)) * item.assigned_marks for item in breakdown)
+            / total_marks
+        )
 
     @staticmethod
     def _split_source_by_question(source_code: str) -> dict[str, str]:

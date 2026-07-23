@@ -16,20 +16,35 @@ from sqlalchemy.orm import Session
 
 from config.settings import get_settings
 from control.agents.question_generation_graph import QuestionGenerationWorkflow
+from core.exceptions.assessment import ExecutionAdapterError
 from core.exceptions.question_bank import (
     QuestionBankStoreUnavailableError,
     QuestionBankValidationError,
+    QuestionGuardrailError,
     QuestionNotFoundError,
 )
-from core.services.ai_gateway_service import AIGatewayService
-from core.services.execution_adapter_service import ExecutionAdapterService
+from core.guardrails.guardrails import check_code_sast, check_input_guardrails
+from core.question_tag_taxonomy import (
+    normalize_question_category,
+    normalize_question_tags,
+)
+from core.services.output_validation import (
+    apply_answer_validation,
+    default_checker_explanation,
+    normalize_answer_validation_mode,
+    validate_output_checker_source,
+)
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.question_group import QuestionGroupModel
 from data.repositories.question_bank_repository import QuestionBankRepository
+from handlers.http_clients.ai_gateway import AIGatewayService
+from handlers.http_clients.execution import ExecutionAdapterService
 from schemas.question_bank import (
+    AnswerValidationMode,
     DifficultyLevel,
     DifficultySource,
     MetadataStatus,
+    QuestionAIDraftContext,
     QuestionAIDraftRequest,
     QuestionAIDraftResponse,
     QuestionBulkImportRequest,
@@ -41,6 +56,7 @@ from schemas.question_bank import (
     QuestionDraftRefinementResponse,
     QuestionDraftValidationRequest,
     QuestionDraftValidationResponse,
+    QuestionGenerationSettings,
     QuestionGroupCreateRequest,
     QuestionGroupDifficultyBreakdown,
     QuestionGroupListResponse,
@@ -52,6 +68,7 @@ from schemas.question_bank import (
     QuestionRecord,
     QuestionStatus,
     QuestionUpdateRequest,
+    QuestionVisibility,
     ReferenceSolutionArtifact,
     SolutionValidationCaseResult,
     SolutionValidationReport,
@@ -79,6 +96,9 @@ BULK_IMPORT_TEMPLATE_HEADERS = [
     "reference_solution",
     "reference_language",
     "supported_languages",
+    "answer_validation_mode",
+    "output_checker",
+    "output_checker_explanation",
     "execution_time_limit_seconds",
     "memory_limit_mb",
     "solution_approach",
@@ -156,15 +176,23 @@ class QuestionBankService:
             payload.supported_languages,
             payload.reference_language,
         )
+        tags = normalize_question_tags([*payload.tags, *payload.topics], limit=6)
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(payload.answer_validation_mode),
+        )
+        checker_explanation = (
+            payload.output_checker_explanation.strip()
+            or default_checker_explanation(answer_mode)
+        )
         model = QuestionBankQuestionModel(
             id=str(uuid4()),
             recruiter_uid=recruiter_uid,
             title=payload.title.strip(),
             problem_statement=payload.problem_statement.strip(),
             difficulty=payload.difficulty.value,
-            topics=self._normalize_tokens(payload.topics),
-            tags=self._normalize_tokens(payload.tags),
-            category=payload.category.strip().lower(),
+            topics=[],
+            tags=tags,
+            category=normalize_question_category(payload.category, tags),
             constraints=payload.constraints.strip(),
             input_format=payload.input_format.strip(),
             input_explanation=payload.input_explanation.strip(),
@@ -197,11 +225,15 @@ class QuestionBankService:
                 payload.reference_language,
                 payload.reference_solution,
             ),
+            answer_validation_mode=answer_mode.value,
+            output_checker=payload.output_checker.strip(),
+            output_checker_explanation=checker_explanation,
             solution_approach=payload.solution_approach.strip(),
             time_complexity=payload.time_complexity.strip(),
             space_complexity=payload.space_complexity.strip(),
             status=payload.status.value,
             creation_mode=payload.creation_mode.value,
+            visibility=payload.visibility.value,
         )
 
         try:
@@ -298,12 +330,20 @@ class QuestionBankService:
             payload.supported_languages,
             payload.reference_language,
         )
+        tags = normalize_question_tags([*payload.tags, *payload.topics], limit=6)
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(payload.answer_validation_mode),
+        )
+        checker_explanation = (
+            payload.output_checker_explanation.strip()
+            or default_checker_explanation(answer_mode)
+        )
         model.title = payload.title.strip()
         model.problem_statement = payload.problem_statement.strip()
         model.difficulty = payload.difficulty.value
-        model.topics = self._normalize_tokens(payload.topics)
-        model.tags = self._normalize_tokens(payload.tags)
-        model.category = payload.category.strip().lower()
+        model.topics = []
+        model.tags = tags
+        model.category = normalize_question_category(payload.category, tags)
         model.constraints = payload.constraints.strip()
         model.input_format = payload.input_format.strip()
         model.input_explanation = payload.input_explanation.strip()
@@ -336,10 +376,14 @@ class QuestionBankService:
             payload.reference_language,
             payload.reference_solution,
         )
+        model.answer_validation_mode = answer_mode.value
+        model.output_checker = payload.output_checker.strip()
+        model.output_checker_explanation = checker_explanation
         model.solution_approach = payload.solution_approach.strip()
         model.time_complexity = payload.time_complexity.strip()
         model.space_complexity = payload.space_complexity.strip()
         model.status = payload.status.value
+        model.visibility = payload.visibility.value
 
         try:
             self._repository.commit()
@@ -470,15 +514,36 @@ class QuestionBankService:
     ) -> QuestionAIDraftResponse:
         """Generate a recruiter-ready draft using the LangGraph workflow."""
 
+        self._assert_ai_draft_input_guardrails(request)
+
         existing_questions = self.list_questions(
             recruiter_uid,
             QuestionFilters(),
         ).items
-        return self._question_generation_workflow.generate(
+        response = self._question_generation_workflow.generate(
             recruiter_uid=recruiter_uid,
             request=request,
             existing_questions=existing_questions,
         )
+
+        # 2. Post-model output solutions SAST check
+        if response.draft:
+            self._assert_output_checker_guardrails(response.draft.output_checker)
+            primary_sast_error = check_code_sast(
+                response.draft.reference_solution,
+                response.draft.reference_language,
+            )
+            if primary_sast_error:
+                raise QuestionGuardrailError(primary_sast_error)
+            for lang_sol in (response.draft.reference_solutions or {}).values():
+                secondary_sast_error = check_code_sast(
+                    lang_sol.source_code,
+                    lang_sol.language,
+                )
+                if secondary_sast_error:
+                    raise QuestionGuardrailError(secondary_sast_error)
+
+        return response
 
     def stream_ai_draft_events(
         self,
@@ -487,15 +552,43 @@ class QuestionBankService:
     ) -> Iterator[dict[str, object]]:
         """Stream question generation graph progress events."""
 
+        self._assert_ai_draft_input_guardrails(request)
+
         existing_questions = self.list_questions(
             recruiter_uid,
             QuestionFilters(),
         ).items
-        yield from self._question_generation_workflow.generate_events(
+        for event in self._question_generation_workflow.generate_events(
             recruiter_uid=recruiter_uid,
             request=request,
             existing_questions=existing_questions,
-        )
+        ):
+            # 2. Post-model output solutions SAST check on completion event
+            if event.get("type") == "complete" and "response" in event:
+                draft_dict = event["response"].get("draft")
+                if draft_dict:
+                    primary_sol = draft_dict.get("reference_solution")
+                    ref_lang = draft_dict.get("reference_language")
+                    self._assert_output_checker_guardrails(
+                        str(draft_dict.get("output_checker") or ""),
+                    )
+                    primary_sast_error = check_code_sast(primary_sol, ref_lang)
+                    if primary_sast_error:
+                        raise QuestionGuardrailError(primary_sast_error)
+                    ref_sols = draft_dict.get("reference_solutions") or {}
+                    for lang_sol in ref_sols.values():
+                        secondary_sast_error = check_code_sast(
+                            lang_sol.get("source_code"), lang_sol.get("language")
+                        )
+                        if secondary_sast_error:
+                            raise QuestionGuardrailError(secondary_sast_error)
+
+            provider, model = self._question_generation_workflow.current_ai_target
+            yield {
+                **event,
+                "ai_provider": provider,
+                "ai_model": model,
+            }
 
     def validate_draft(
         self,
@@ -503,6 +596,7 @@ class QuestionBankService:
     ) -> QuestionDraftValidationResponse:
         """Run an unsaved draft through the execution engine."""
 
+        self._assert_output_checker_guardrails(request.draft.output_checker)
         report = self._validate_reference_solution(
             request.draft.reference_solution,
             request.draft.reference_language,
@@ -510,6 +604,9 @@ class QuestionBankService:
             request.draft.hidden_test_cases,
             request.draft.execution_time_limit_seconds,
             request.draft.memory_limit_mb,
+            request.draft.answer_validation_mode,
+            request.draft.output_checker,
+            request.draft.output_checker_explanation,
         )
         return QuestionDraftValidationResponse(validation_report=report)
 
@@ -520,9 +617,11 @@ class QuestionBankService:
     ) -> QuestionDraftRefinementResponse:
         """Repair existing testcase outputs using execution and semantic review."""
 
+        self._assert_refinement_input_guardrails(request)
         return self._question_generation_workflow.refine_test_cases(
             recruiter_uid,
             request.draft,
+            request.generation_settings,
         )
 
     def refine_draft_solution(
@@ -532,10 +631,116 @@ class QuestionBankService:
     ) -> QuestionDraftRefinementResponse:
         """Repair existing source using the problem contract and failure evidence."""
 
+        self._assert_refinement_input_guardrails(request)
         return self._question_generation_workflow.refine_solution(
             recruiter_uid,
             request.draft,
+            request.generation_settings,
         )
+
+    def _assert_ai_draft_input_guardrails(
+        self,
+        request: QuestionAIDraftRequest,
+    ) -> None:
+        """Reject unsafe user-controlled context before calling the question agent."""
+
+        for label, value in self._ai_draft_guardrail_inputs(request):
+            input_error = check_input_guardrails(value)
+            if input_error:
+                raise QuestionGuardrailError(f"{label}: {input_error}")
+        if request.current_draft is not None:
+            self._assert_output_checker_guardrails(request.current_draft.output_checker)
+
+    def _assert_refinement_input_guardrails(
+        self,
+        request: QuestionDraftRefinementRequest,
+    ) -> None:
+        """Reject unsafe refinement context before repair agents see it."""
+
+        for label, value in self._draft_context_guardrail_inputs(request.draft):
+            input_error = check_input_guardrails(value)
+            if input_error:
+                raise QuestionGuardrailError(f"{label}: {input_error}")
+        self._assert_output_checker_guardrails(request.draft.output_checker)
+        if request.generation_settings is not None:
+            for label, value in self._settings_guardrail_inputs(
+                request.generation_settings,
+            ):
+                input_error = check_input_guardrails(value)
+                if input_error:
+                    raise QuestionGuardrailError(f"{label}: {input_error}")
+
+    @staticmethod
+    def _assert_output_checker_guardrails(source: str) -> None:
+        checker_source = source.strip()
+        if not checker_source:
+            return
+        checker_sast_error = check_code_sast(checker_source, "python")
+        if checker_sast_error:
+            raise QuestionGuardrailError(f"Output checker: {checker_sast_error}")
+        checker_error = validate_output_checker_source(checker_source)
+        if checker_error:
+            raise QuestionGuardrailError(checker_error)
+
+    def _ai_draft_guardrail_inputs(
+        self,
+        request: QuestionAIDraftRequest,
+    ) -> Iterator[tuple[str, str]]:
+        yield "AI prompt", request.prompt
+        if request.title_hint:
+            yield "Title hint", request.title_hint
+        if request.target_language:
+            yield "Target language", request.target_language
+        for index, tag in enumerate(request.focus_tags, start=1):
+            yield f"Focus tag {index}", tag
+        yield from self._settings_guardrail_inputs(request.generation_settings)
+        if request.current_draft is not None:
+            yield from self._draft_context_guardrail_inputs(request.current_draft)
+
+    @staticmethod
+    def _settings_guardrail_inputs(
+        settings: QuestionGenerationSettings,
+    ) -> Iterator[tuple[str, str]]:
+        for index, topic in enumerate(settings.topics, start=1):
+            yield f"Generation topic {index}", topic
+        for index, language in enumerate(settings.supported_languages, start=1):
+            yield f"Supported language {index}", language
+        yield "Interview style", settings.interview_style
+        yield "Company style", settings.company_style
+
+    @staticmethod
+    def _draft_context_guardrail_inputs(
+        draft: QuestionAIDraftContext,
+    ) -> Iterator[tuple[str, str]]:
+        text_fields = {
+            "Draft title": draft.title,
+            "Draft problem statement": draft.problem_statement,
+            "Draft category": draft.category,
+            "Draft constraints": draft.constraints,
+            "Draft input format": draft.input_format,
+            "Draft input explanation": draft.input_explanation,
+            "Draft output format": draft.output_format,
+            "Draft output explanation": draft.output_explanation,
+            "Draft output checker explanation": draft.output_checker_explanation,
+            "Draft reference solution": draft.reference_solution,
+            "Draft solution approach": draft.solution_approach,
+            "Draft time complexity": draft.time_complexity,
+            "Draft space complexity": draft.space_complexity,
+        }
+        yield from text_fields.items()
+        for index, topic in enumerate(draft.topics, start=1):
+            yield f"Draft topic {index}", topic
+        for index, tag in enumerate(draft.tags, start=1):
+            yield f"Draft tag {index}", tag
+        for index, test_case in enumerate(draft.sample_test_cases, start=1):
+            yield f"Sample testcase {index} explanation", test_case.explanation
+        for index, test_case in enumerate(draft.hidden_test_cases, start=1):
+            yield f"Hidden testcase {index} explanation", test_case.explanation
+        for language, artifact in draft.reference_solutions.items():
+            label = language or artifact.language
+            yield f"{label} reference solution", artifact.source_code
+            for index, note in enumerate(artifact.notes, start=1):
+                yield f"{label} reference solution note {index}", note
 
     def _question_payload_from_csv_row(
         self,
@@ -585,6 +790,18 @@ class QuestionBankService:
                 self._csv_value(row, header_map, "supported_languages"),
             )
             or [reference_language],
+            answer_validation_mode=AnswerValidationMode(
+                normalize_answer_validation_mode(
+                    self._csv_value(row, header_map, "answer_validation_mode")
+                    or AnswerValidationMode.EXACT.value,
+                ),
+            ),
+            output_checker=self._csv_value(row, header_map, "output_checker"),
+            output_checker_explanation=self._csv_value(
+                row,
+                header_map,
+                "output_checker_explanation",
+            ),
             execution_time_limit_seconds=self._parse_optional_int(
                 self._csv_value(row, header_map, "execution_time_limit_seconds"),
                 2,
@@ -803,10 +1020,26 @@ class QuestionBankService:
     ) -> None:
         """Enforce lifecycle-specific question requirements."""
 
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(payload.answer_validation_mode),
+        )
+        checker_source = payload.output_checker.strip()
+        if checker_source:
+            checker_sast_error = check_code_sast(checker_source, "python")
+            if checker_sast_error:
+                raise QuestionGuardrailError(
+                    f"Output checker: {checker_sast_error}",
+                )
+            checker_error = validate_output_checker_source(checker_source)
+            if checker_error:
+                raise QuestionBankValidationError(checker_error)
+
         if payload.status != QuestionStatus.VALIDATED:
             return
 
         missing: list[str] = []
+        if len(payload.problem_statement.strip()) < 20:
+            missing.append("a problem statement with at least 20 characters")
         if not payload.constraints.strip():
             missing.append("constraints")
         if not payload.reference_solution.strip():
@@ -821,6 +1054,15 @@ class QuestionBankService:
             missing.append("a passing execution validation")
         if payload.metadata_status != MetadataStatus.CLASSIFIED:
             missing.append("AI metadata classification")
+        if (
+            answer_mode
+            in {
+                AnswerValidationMode.MULTIPLE_VALID,
+                AnswerValidationMode.CONSTRUCTIVE,
+            }
+            and not checker_source
+        ):
+            missing.append("a safe custom output checker")
 
         if missing:
             raise QuestionBankValidationError(
@@ -837,19 +1079,30 @@ class QuestionBankService:
         hidden_test_cases: list[TestCase],
         execution_time_limit_seconds: int,
         memory_limit_mb: int,
+        answer_validation_mode: str | AnswerValidationMode = AnswerValidationMode.EXACT,
+        output_checker: str = "",
+        output_checker_explanation: str = "",
     ) -> SolutionValidationReport:
         """Execute a draft reference solution against sample and hidden tests."""
 
         source = source_code.strip()
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(answer_validation_mode),
+        )
+        checker_source = output_checker.strip()
+        checker_explanation = (
+            output_checker_explanation.strip()
+            or default_checker_explanation(answer_mode)
+        )
         sample_tests = [
             case.model_copy(update={"is_sample": True})
             for case in sample_test_cases
-            if case.input.strip() and case.expected_output.strip()
+            if case.expected_output.strip()
         ]
         hidden_tests = [
             case.model_copy(update={"is_sample": False})
             for case in hidden_test_cases
-            if case.input.strip() and case.expected_output.strip()
+            if case.expected_output.strip()
         ]
         if not source:
             return SolutionValidationReport(
@@ -893,60 +1146,87 @@ class QuestionBankService:
 
         results: list[SolutionValidationCaseResult] = []
         memory_limit_kb = memory_limit_mb * 1024 if memory_limit_mb else None
-        if sample_tests:
-            sample_results, _, _ = self._execution_adapter.execute_batch(
-                source_code=source,
-                language=language.strip().lower() or "python",
-                test_cases=sample_tests,
-                run_type="question_bank_sample_validation",
-                time_limit_seconds=execution_time_limit_seconds,
-                memory_limit_kb=memory_limit_kb,
-            )
-            for index, result in enumerate(sample_results, start=1):
-                results.append(
-                    SolutionValidationCaseResult(
-                        bucket="sample",
-                        index=index,
-                        passed=result.passed,
-                        status=result.status,
-                        stdin=result.input,
-                        expected_output=result.expected_output,
-                        actual_output=result.actual_output,
-                        stderr=result.stderr,
-                        compile_output=result.compile_output,
-                        message=result.message,
-                        token=result.token,
-                        execution_time=result.execution_time,
-                        memory_kb=result.memory_kb,
-                    )
+        try:
+            if sample_tests:
+                sample_results, _, _ = self._execution_adapter.execute_batch(
+                    source_code=source,
+                    language=language.strip().lower() or "python",
+                    test_cases=sample_tests,
+                    run_type="question_bank_sample_validation",
+                    time_limit_seconds=execution_time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
                 )
-        if hidden_tests:
-            hidden_results, _, _ = self._execution_adapter.execute_batch(
-                source_code=source,
-                language=language.strip().lower() or "python",
-                test_cases=hidden_tests,
-                run_type="question_bank_hidden_validation",
-                time_limit_seconds=execution_time_limit_seconds,
-                memory_limit_kb=memory_limit_kb,
-            )
-            for index, result in enumerate(hidden_results, start=1):
-                results.append(
-                    SolutionValidationCaseResult(
-                        bucket="hidden",
-                        index=index,
-                        passed=result.passed,
-                        status=result.status,
-                        stdin=result.input,
-                        expected_output=result.expected_output,
-                        actual_output=result.actual_output,
-                        stderr=result.stderr,
-                        compile_output=result.compile_output,
-                        message=result.message,
-                        token=result.token,
-                        execution_time=result.execution_time,
-                        memory_kb=result.memory_kb,
+                for index, result in enumerate(sample_results, start=1):
+                    scored_result = apply_answer_validation(
+                        result,
+                        mode=answer_mode,
+                        checker_source=checker_source,
                     )
+                    results.append(
+                        SolutionValidationCaseResult(
+                            bucket="sample",
+                            index=index,
+                            passed=scored_result.passed,
+                            status=scored_result.status,
+                            stdin=scored_result.input,
+                            expected_output=scored_result.expected_output,
+                            actual_output=scored_result.actual_output,
+                            stderr=scored_result.stderr,
+                            compile_output=scored_result.compile_output,
+                            message=scored_result.message,
+                            checker_message=scored_result.checker_message,
+                            token=scored_result.token,
+                            execution_time=scored_result.execution_time,
+                            memory_kb=scored_result.memory_kb,
+                        )
+                    )
+            if hidden_tests:
+                hidden_results, _, _ = self._execution_adapter.execute_batch(
+                    source_code=source,
+                    language=language.strip().lower() or "python",
+                    test_cases=hidden_tests,
+                    run_type="question_bank_hidden_validation",
+                    time_limit_seconds=execution_time_limit_seconds,
+                    memory_limit_kb=memory_limit_kb,
                 )
+                for index, result in enumerate(hidden_results, start=1):
+                    scored_result = apply_answer_validation(
+                        result,
+                        mode=answer_mode,
+                        checker_source=checker_source,
+                    )
+                    results.append(
+                        SolutionValidationCaseResult(
+                            bucket="hidden",
+                            index=index,
+                            passed=scored_result.passed,
+                            status=scored_result.status,
+                            stdin=scored_result.input,
+                            expected_output=scored_result.expected_output,
+                            actual_output=scored_result.actual_output,
+                            stderr=scored_result.stderr,
+                            compile_output=scored_result.compile_output,
+                            message=scored_result.message,
+                            checker_message=scored_result.checker_message,
+                            token=scored_result.token,
+                            execution_time=scored_result.execution_time,
+                            memory_kb=scored_result.memory_kb,
+                        )
+                    )
+        except ExecutionAdapterError as exc:
+            return SolutionValidationReport(
+                status=ValidationStatus.FAILED.value,
+                summary=f"Execution validation failed: {str(exc)}",
+                passed_count=0,
+                failed_count=len(sample_tests) + len(hidden_tests),
+                sample_count=len(sample_tests),
+                hidden_count=len(hidden_tests),
+                runner_notes=[
+                    str(exc),
+                    "Ensure the code-execution-service is running and healthy.",
+                ],
+                results=[],
+            )
 
         passed_count = sum(1 for item in results if item.passed)
         failed_count = len(results) - passed_count
@@ -970,16 +1250,18 @@ class QuestionBankService:
             hidden_count=len(hidden_tests),
             runner_notes=[
                 "Validated as a complete CodeChef-style STDIN/STDOUT program.",
+                f"Answer validation mode: {answer_mode.value}.",
+                checker_explanation,
             ],
             results=results,
         )
 
     @staticmethod
     def _has_complete_test_case(test_cases: list[TestCase]) -> bool:
-        """Return true when at least one test has input and expected output."""
+        """Return true when at least one test has an expected output."""
 
         return any(
-            test_case.input.strip() and test_case.expected_output.strip()
+            test_case.expected_output.strip()
             for test_case in test_cases
         )
 
@@ -1076,15 +1358,37 @@ class QuestionBankService:
     ) -> QuestionRecord:
         """Map the ORM model to an API record."""
 
+        tags = normalize_question_tags(
+            [
+                *list(model.tags or []),
+                *list(getattr(model, "topics", []) or []),
+            ],
+            limit=6,
+        )
+        answer_mode = AnswerValidationMode(
+            normalize_answer_validation_mode(
+                getattr(
+                    model,
+                    "answer_validation_mode",
+                    AnswerValidationMode.EXACT.value,
+                ),
+            ),
+        )
+        checker_explanation = (
+            getattr(model, "output_checker_explanation", "") or ""
+        ).strip() or default_checker_explanation(answer_mode)
         return QuestionRecord(
             id=model.id,
             recruiter_uid=model.recruiter_uid,
             title=model.title,
             problem_statement=model.problem_statement,
             difficulty=DifficultyLevel(model.difficulty),
-            topics=list(getattr(model, "topics", []) or []),
-            tags=list(model.tags or []),
-            category=getattr(model, "category", "") or "",
+            topics=[],
+            tags=tags,
+            category=normalize_question_category(
+                getattr(model, "category", "") or "",
+                tags,
+            ),
             constraints=model.constraints,
             input_format=model.input_format,
             input_explanation=getattr(model, "input_explanation", "") or "",
@@ -1132,11 +1436,18 @@ class QuestionBankService:
                     getattr(model, "reference_solutions", {}) or {}
                 ).items()
             },
+            answer_validation_mode=answer_mode,
+            output_checker=getattr(model, "output_checker", "") or "",
+            output_checker_explanation=checker_explanation,
             solution_approach=getattr(model, "solution_approach", "") or "",
             time_complexity=getattr(model, "time_complexity", "") or "",
             space_complexity=getattr(model, "space_complexity", "") or "",
             status=QuestionStatus(model.status),
             creation_mode=QuestionCreationMode(model.creation_mode),
+            visibility=QuestionVisibility(
+                getattr(model, "visibility", QuestionVisibility.PRIVATE.value)
+                or QuestionVisibility.PRIVATE.value,
+            ),
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

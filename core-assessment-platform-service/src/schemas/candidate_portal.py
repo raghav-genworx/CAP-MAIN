@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from schemas.assessments import (
     CandidateAssessmentStatus,
@@ -11,7 +11,7 @@ from schemas.assessments import (
     SampleRunResponse,
     SubmissionStatus,
 )
-from schemas.question_bank import DifficultyLevel, TestCase
+from schemas.question_bank import AnswerValidationMode, DifficultyLevel, TestCase
 
 
 class CandidateSessionClaims(BaseModel):
@@ -73,6 +73,8 @@ class CandidateQuestionRecord(BaseModel):
     constraints: str
     input_format: str
     output_format: str
+    answer_validation_mode: AnswerValidationMode = AnswerValidationMode.EXACT
+    output_checker_explanation: str = ""
     sample_test_cases: list[TestCase] = Field(default_factory=list)
     supported_languages: list[str] = Field(default_factory=list)
     question_order: int
@@ -117,12 +119,39 @@ class CandidateAssessmentPortalResponse(BaseModel):
     status: CandidateAssessmentStatus
     current_question_order: int = 1
     time_remaining_seconds: int = 0
+    tab_switch_count: int = 0
+    copy_paste_count: int = 0
+    fullscreen_exit_count: int = 0
+    question_time_seconds: dict[str, int] = Field(default_factory=dict)
     supported_languages: list[str] = Field(default_factory=list)
     questions: list[CandidateQuestionRecord] = Field(default_factory=list)
     drafts: list[CandidateQuestionDraftRecord] = Field(default_factory=list)
 
 
-class CandidateCheckpointRequest(BaseModel):
+class CandidateActivityEvidence(BaseModel):
+    """Browser-observed report evidence persisted during the assessment."""
+
+    tab_switch_count: int = Field(default=0, ge=0, le=1000)
+    copy_paste_count: int = Field(default=0, ge=0, le=10000)
+    fullscreen_exit_count: int = Field(default=0, ge=0, le=1000)
+    question_time_seconds: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("question_time_seconds")
+    @classmethod
+    def validate_question_times(cls, value: dict[str, int]) -> dict[str, int]:
+        """Bound browser timing evidence before storing it."""
+
+        if len(value) > 200:
+            raise ValueError("Question timing cannot contain more than 200 entries")
+        for question_id, seconds in value.items():
+            if not question_id.strip() or len(question_id) > 80:
+                raise ValueError("Question timing contains an invalid question ID")
+            if isinstance(seconds, bool) or seconds < 0 or seconds > 604800:
+                raise ValueError("Question timing seconds must be between 0 and 604800")
+        return value
+
+
+class CandidateCheckpointRequest(CandidateActivityEvidence):
     """Draft save request."""
 
     question_id: str = Field(min_length=1)
@@ -155,7 +184,7 @@ class CandidateQuestionSubmitPayload(BaseModel):
     language: str = Field(min_length=1, max_length=40)
 
 
-class CandidateSubmitRequest(BaseModel):
+class CandidateSubmitRequest(CandidateActivityEvidence):
     """Final assessment submission."""
 
     answers: list[CandidateQuestionSubmitPayload] = Field(default_factory=list)

@@ -86,6 +86,24 @@ class QuestionBankQuestionModel(Base):
         nullable=False,
         default=dict,
     )
+    answer_validation_mode: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="exact",
+        server_default="exact",
+    )
+    output_checker: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        server_default="",
+    )
+    output_checker_explanation: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        server_default="",
+    )
     solution_approach: Mapped[str] = mapped_column(Text, nullable=False, default="")
     time_complexity: Mapped[str] = mapped_column(
         String(160), nullable=False, default=""
@@ -103,6 +121,13 @@ class QuestionBankQuestionModel(Base):
         String(20),
         nullable=False,
         default="manual",
+    )
+    visibility: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+        default="private",
+        server_default="private",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

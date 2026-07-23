@@ -249,6 +249,7 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
             rounds=[],
             time_limit_seconds=time_limit_seconds,
             memory_limit_kb=memory_limit_kb,
+            **self._answer_validation_kwargs(state),
         )
         notes.append(report.summary)
 
@@ -300,6 +301,7 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
                 rounds=[],
                 time_limit_seconds=time_limit_seconds,
                 memory_limit_kb=memory_limit_kb,
+                **self._answer_validation_kwargs(state),
             )
             notes.append(report.summary)
 

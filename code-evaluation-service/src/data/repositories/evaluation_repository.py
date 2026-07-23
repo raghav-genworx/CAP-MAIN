@@ -12,7 +12,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from data.database import create_session_factory
+from data.clients.database import create_session_factory
 from data.models.postgres import AssessmentReportModel, EvaluationJobModel
 from schemas.evaluation import EvaluationJobResponse, EvaluationJobStatus
 
