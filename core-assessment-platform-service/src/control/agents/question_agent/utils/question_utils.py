@@ -31,11 +31,7 @@ class QuestionAgentUtilsMixin:
 
     @staticmethod
     def _complete_test_cases(test_cases: list[TestCase]) -> list[TestCase]:
-        return [
-            case
-            for case in test_cases
-            if case.expected_output.strip()
-        ]
+        return [case for case in test_cases if case.expected_output.strip()]
 
     @staticmethod
     def _prompt_cases(test_cases: Any) -> list[dict[str, Any]]:

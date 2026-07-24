@@ -78,7 +78,7 @@ class AssessmentCreateRequest(BaseModel):
     description: str = ""
     instructions: str = ""
     duration_minutes: int = Field(default=60, ge=15, le=360)
-    passing_score: float = Field(default=40.0, ge=0.0, le=100.0)
+    passing_score: float = Field(default=40.0, gt=0.0, le=100.0)
     test_case_score_weight: float = Field(default=60.0, ge=0.0, le=100.0)
     coding_score_weight: float = Field(default=20.0, ge=0.0, le=100.0)
     ai_score_weight: float = Field(default=20.0, ge=0.0, le=100.0)
@@ -104,7 +104,7 @@ class AssessmentUpdateRequest(BaseModel):
     description: str | None = None
     instructions: str | None = None
     duration_minutes: int | None = Field(default=None, ge=15, le=360)
-    passing_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    passing_score: float | None = Field(default=None, gt=0.0, le=100.0)
     test_case_score_weight: float | None = Field(default=None, ge=0.0, le=100.0)
     coding_score_weight: float | None = Field(default=None, ge=0.0, le=100.0)
     ai_score_weight: float | None = Field(default=None, ge=0.0, le=100.0)
@@ -419,6 +419,7 @@ class SampleRunResponse(BaseModel):
     passed_count: int
     total_count: int
     results: list[ExecutionCaseResult] = Field(default_factory=list)
+    version: int = 0
 
 
 class HiddenExecutionCaseResult(BaseModel):
@@ -440,6 +441,7 @@ class HiddenCheckResponse(BaseModel):
     remaining_attempts: int | None
     cooldown_remaining_seconds: int
     results: list[HiddenExecutionCaseResult] = Field(default_factory=list)
+    version: int = 0
 
 
 class SubmissionExecutionSummary(BaseModel):

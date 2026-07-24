@@ -5,6 +5,8 @@ import logging
 from config.settings import Settings
 from constants.languages import (
     COMPILED_JUDGE0_LANGUAGE_IDS,
+    JAVA_JUDGE0_LANGUAGE_ID,
+    JAVA_RUNTIME_JUDGE0_LANGUAGE_ID,
     JUDGE0_LANGUAGE_ALIASES,
     SUPPORTED_JUDGE0_LANGUAGE_IDS,
 )
@@ -46,10 +48,10 @@ class CodeExecutionService:
         return ExecutionResponse(
             token=result.token,
             status=result.status,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            compile_output=result.compile_output,
-            message=result.message,
+            stdout=self._bounded_output(result.stdout),
+            stderr=self._bounded_output(result.stderr),
+            compile_output=self._bounded_output(result.compile_output),
+            message=self._bounded_output(result.message),
             time=result.time,
             wall_time=result.wall_time,
             memory=result.memory,
@@ -179,12 +181,14 @@ class CodeExecutionService:
         return BatchExecutionCaseResult(
             input=test_case.input,
             expected_output=test_case.expected_output,
-            actual_output=(result.stdout or "").strip(),
+            actual_output=self._bounded_output((result.stdout or "").strip()) or "",
             status=status,
             passed=passed,
-            stderr=(result.stderr or "").strip(),
-            compile_output=(result.compile_output or "").strip(),
-            message=(result.message or "").strip(),
+            stderr=self._bounded_output((result.stderr or "").strip()) or "",
+            compile_output=(
+                self._bounded_output((result.compile_output or "").strip()) or ""
+            ),
+            message=self._bounded_output((result.message or "").strip()) or "",
             execution_time=str(result.time or ""),
             memory_kb=result.memory,
             token=result.token,
@@ -225,19 +229,48 @@ class CodeExecutionService:
             raise UnsupportedLanguageError(str(language_id))
         payload: Judge0Payload = {
             "source_code": request.source_code,
-            "language_id": language_id,
+            "language_id": self._runtime_language_id(language_id),
             "stdin": request.stdin,
             "expected_output": request.expected_output,
             "command_line_arguments": request.command_line_arguments,
             "cpu_time_limit": (
                 request.cpu_time_limit or self._settings.default_cpu_time_limit_seconds
             ),
-            "memory_limit": request.memory_limit
-            or self._settings.default_memory_limit_kb,
+            "memory_limit": self._memory_limit_for_language(
+                language_id,
+                request.memory_limit,
+            ),
         }
         if language_id in COMPILED_JUDGE0_LANGUAGE_IDS:
             payload["compiler_options"] = request.compiler_options
         return {key: value for key, value in payload.items() if value is not None}
+
+    @staticmethod
+    def _runtime_language_id(language_id: int) -> int:
+        """Map public language IDs to deployment-specific Judge0 runtimes."""
+
+        if language_id == JAVA_JUDGE0_LANGUAGE_ID:
+            return JAVA_RUNTIME_JUDGE0_LANGUAGE_ID
+        return language_id
+
+    def _memory_limit_for_language(
+        self,
+        language_id: int,
+        requested_limit_kb: int | None,
+    ) -> int:
+        requested = requested_limit_kb or self._settings.default_memory_limit_kb
+        if language_id == JAVA_JUDGE0_LANGUAGE_ID:
+            return max(requested, self._settings.java_minimum_memory_limit_kb)
+        return requested
+
+    def _bounded_output(self, value: str | None) -> str | None:
+        if value is None or len(value) <= self._settings.max_output_characters:
+            return value
+        omitted = len(value) - self._settings.max_output_characters
+        return (
+            value[: self._settings.max_output_characters]
+            + f"\n...[output truncated; {omitted} characters omitted]"
+        )
 
     def _language_id_for_alias(self, language: str | None) -> int:
         if language is None:

@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { PlayCircle } from "lucide-react";
+import { PlayCircle, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -12,6 +12,7 @@ import {
 import {
   clearSubmissionResult,
   saveCandidateSessionToken,
+  saveCandidateInviteToken,
 } from "../utils/sessionStorage";
 
 function formatDateTime(value: string) {
@@ -49,6 +50,7 @@ export function CandidateInvitePage() {
     mutationFn: async () => startCandidateAssessment(token),
     onSuccess: (data) => {
       clearSubmissionResult();
+      saveCandidateInviteToken(token);
       saveCandidateSessionToken(data.session_token);
       navigate("/candidate/portal");
     },
@@ -69,6 +71,22 @@ export function CandidateInvitePage() {
       return {
         status: "loading",
         label: "Checking assessment window...",
+        secondsUntilStart: 0,
+        secondsUntilClose: 0,
+      };
+    }
+    if (invite.slot_status === "paused") {
+      return {
+        status: "paused",
+        label: "This assessment is temporarily paused by the recruiter.",
+        secondsUntilStart: 0,
+        secondsUntilClose: 0,
+      };
+    }
+    if (invite.slot_status === "closed") {
+      return {
+        status: "closed",
+        label: "This assessment window is closed.",
         secondsUntilStart: 0,
         secondsUntilClose: 0,
       };
@@ -108,8 +126,18 @@ export function CandidateInvitePage() {
   return (
     <main className="candidate-shell candidate-shell-branded">
       <Card className="candidate-card invite-card">
-        <span className="candidate-kicker">Coding Assessment Platform</span>
-        <h1>{invite ? `Welcome, ${invite.candidate_name}` : "Assessment Invite"}</h1>
+        <div className="candidate-access-heading">
+          <span className="candidate-access-icon" aria-hidden="true">
+            <ShieldCheck size={22} />
+          </span>
+          <div>
+            <span className="candidate-kicker">Coding Assessment Platform</span>
+            <h1>{invite ? `Welcome, ${invite.candidate_name}` : "Assessment Invite"}</h1>
+            <p className="candidate-muted">
+              Review the assessment details before entering your workspace.
+            </p>
+          </div>
+        </div>
 
         {inviteQuery.isLoading ? (
           <p className="candidate-muted">Validating your secure assessment link...</p>

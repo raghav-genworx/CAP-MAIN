@@ -1,3 +1,5 @@
+import { CheckCircle2 } from "lucide-react";
+
 import { Card } from "../../../components/ui/Card";
 import { readSubmissionResult } from "../utils/sessionStorage";
 
@@ -21,13 +23,20 @@ export function CandidateSubmissionPage() {
   return (
     <main className="candidate-shell candidate-shell-branded">
       <Card className="candidate-card candidate-status-card">
-        <span className="candidate-kicker">Submission Complete</span>
-        <h1>{wasAutoSubmitted ? "Time is up, your work was submitted" : "Submission received"}</h1>
-        <p>
-          {pendingEvaluation
-            ? "Your answers are safely recorded and queued for the evaluation workflow."
-            : "Your answers are safely recorded. Detailed evaluation is not queued because the initial pass mark was not met."}
-        </p>
+        <div className="candidate-access-heading candidate-submission-heading">
+          <span className="candidate-access-icon" aria-hidden="true">
+            <CheckCircle2 size={24} />
+          </span>
+          <div>
+            <span className="candidate-kicker">Submission Complete</span>
+            <h1>{wasAutoSubmitted ? "Time is up, your work was submitted" : "Submission received"}</h1>
+            <p>
+              {pendingEvaluation
+                ? "Your answers are safely recorded and queued for the evaluation workflow."
+                : "Your answers are safely recorded. Detailed evaluation is not queued because the initial pass mark was not met."}
+            </p>
+          </div>
+        </div>
 
         <div className="submission-summary">
           <div>

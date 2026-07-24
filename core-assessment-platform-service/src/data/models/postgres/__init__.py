@@ -7,6 +7,7 @@ from data.models.postgres.assessment_template import AssessmentTemplateModel
 from data.models.postgres.base import Base
 from data.models.postgres.candidate import CandidateModel
 from data.models.postgres.candidate_assessment import CandidateAssessmentModel
+from data.models.postgres.candidate_proctor_event import CandidateProctorEventModel
 from data.models.postgres.question_bank_question import QuestionBankQuestionModel
 from data.models.postgres.question_group import QuestionGroupModel
 from data.models.postgres.recruiter_notification import RecruiterNotificationModel
@@ -23,6 +24,7 @@ __all__ = [
     "AssessmentTemplateModel",
     "Base",
     "CandidateAssessmentModel",
+    "CandidateProctorEventModel",
     "CandidateModel",
     "QuestionBankQuestionModel",
     "QuestionGroupModel",

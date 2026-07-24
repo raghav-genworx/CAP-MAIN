@@ -100,10 +100,6 @@ export function RecruiterLoginPage() {
         <div className="auth-hero">
           <p className="auth-eyebrow">Recruiter Authentication</p>
           <h1>Hire faster with a secure assessment workspace.</h1>
-          <p>
-            Login to manage questions, prepare coding assessments, and keep
-            recruiter workflows protected with Firebase Authentication.
-          </p>
         </div>
 
         <div className="auth-form-card">

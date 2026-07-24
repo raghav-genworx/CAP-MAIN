@@ -222,30 +222,39 @@ def validate_output_checker_source(source: str) -> str:
         if not isinstance(node, _ALLOWED_TOP_LEVEL_NODES):
             return "Output checker may only define functions and an optional docstring."
 
-    for node in ast.walk(tree):
-        if not isinstance(node, _ALLOWED_EXPR_NODES):
+    for walked_node in ast.walk(tree):
+        if not isinstance(walked_node, _ALLOWED_EXPR_NODES):
             return (
                 "Output checker contains unsupported Python syntax: "
-                f"{type(node).__name__}."
+                f"{type(walked_node).__name__}."
             )
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("__"):
-            return "Output checker uses a forbidden function name."
-        if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
-            return f"Output checker uses a forbidden name: {node.id}."
-        if isinstance(node, ast.Attribute) and (
-            node.attr.startswith("__") or node.attr not in _ALLOWED_METHODS
+        if isinstance(walked_node, ast.FunctionDef) and walked_node.name.startswith(
+            "__"
         ):
-            return f"Output checker uses an unsupported attribute: {node.attr}."
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name):
+            return "Output checker uses a forbidden function name."
+        if isinstance(walked_node, ast.Name) and walked_node.id in _FORBIDDEN_NAMES:
+            return f"Output checker uses a forbidden name: {walked_node.id}."
+        if isinstance(walked_node, ast.Attribute) and (
+            walked_node.attr.startswith("__")
+            or walked_node.attr not in _ALLOWED_METHODS
+        ):
+            return f"Output checker uses an unsupported attribute: {walked_node.attr}."
+        if isinstance(walked_node, ast.Call):
+            if isinstance(walked_node.func, ast.Name):
                 if (
-                    node.func.id not in _ALLOWED_CALLS
-                    and node.func.id not in function_names
+                    walked_node.func.id not in _ALLOWED_CALLS
+                    and walked_node.func.id not in function_names
                 ):
-                    return f"Output checker calls unsupported function: {node.func.id}."
-            elif isinstance(node.func, ast.Attribute):
-                if node.func.attr not in _ALLOWED_METHODS:
-                    return f"Output checker calls unsupported method: {node.func.attr}."
+                    return (
+                        "Output checker calls unsupported function: "
+                        f"{walked_node.func.id}."
+                    )
+            elif isinstance(walked_node.func, ast.Attribute):
+                if walked_node.func.attr not in _ALLOWED_METHODS:
+                    return (
+                        "Output checker calls unsupported method: "
+                        f"{walked_node.func.attr}."
+                    )
             else:
                 return "Output checker has an unsafe call."
     return ""

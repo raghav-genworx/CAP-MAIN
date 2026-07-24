@@ -14,6 +14,15 @@ class ExampleNodeMixin(QuestionAgentToolsMixin):
     """Example node for the question agent."""
 
     def _example_node(self, state: QuestionGenerationState) -> QuestionGenerationState:
+        """NODE 4/12 — generates the visible SAMPLE test cases.
+
+        Reads: problem statement, formats, constraints.
+        Does: one LLM call (-> `ExampleOutput`) for sample cases, then
+        `_validate_test_cases_against_constraints` sanity-checks each generated
+        input against the declared constraints.
+        Writes: `sample_test_cases` (marked is_sample=True).
+        """
+
         system_prompt, user_prompt = build_example_prompt(state)
         model = self._structured_completion(
             schema_name="examples",

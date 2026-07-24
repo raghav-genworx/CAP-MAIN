@@ -20,9 +20,7 @@ def complete_test_cases(
         case if isinstance(case, TestCase) else TestCase.model_validate(case)
         for case in raw_cases
     ]
-    return [
-        case for case in cases if case.expected_output.strip()
-    ]
+    return [case for case in cases if case.expected_output.strip()]
 
 
 def can_execute_final_submission(

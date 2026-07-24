@@ -17,7 +17,16 @@ class ConstraintScriptNodeMixin(QuestionAgentToolsMixin):
         self,
         state: QuestionGenerationState,
     ) -> QuestionGenerationState:
-        """Validate generated testcase inputs before solution generation."""
+        """NODE 6/12 — programmatically checks that every testcase input is legal.
+
+        Reads: sample + hidden test cases, plus the constraints.
+        Does: asks the LLM to write a Python `validate_testcase(...)` function,
+        runs it against each generated input, and for any input that violates
+        the constraints it tries to generate a replacement (repair loop). This
+        is the last gate before we spend effort generating/executing a solution.
+        Writes: cleaned `sample_test_cases`/`hidden_test_cases`, the generated
+        `constraint_validation_script`, and any warnings.
+        """
 
         sample_tests = [
             case.model_copy(update={"is_sample": True})

@@ -1,11 +1,21 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Editor from "@monaco-editor/react";
 import {
   Activity,
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  Eye,
   FileText,
+  Pencil,
   Play,
   Plus,
   Redo2,
@@ -479,6 +489,13 @@ function buildAgentThinkingLines(scope: BusyScope): string[] {
   }
 
   if (scope === "problem" || scope === "problem_field") {
+    if (scope === "problem") {
+      return [
+        "Reading the title and recruiter instructions",
+        "Generating the problem statement",
+        "Reviewing the statement before applying it",
+      ];
+    }
     return [
       "Reading the title and existing context",
       "Generating the problem statement",
@@ -1068,12 +1085,12 @@ function getAiPromptCopy(scope: DraftScope, composer: QuestionCreatePayload): Ai
     case "problem":
       return {
         eyebrow: "Problem",
-        title: "Generate problem statement and formats",
+        title: "Generate problem statement",
         question: "Optional instructions",
         placeholder:
           "Example: Keep the statement short and beginner-friendly.",
-        helper: "Leave blank to use title, tags, and languages. Statement, input/output formats, and constraints are applied together.",
-        actionLabel: "Generate Step 2 Contract",
+        helper: "Leave blank to generate the statement from the question title and current context.",
+        actionLabel: "Generate Problem Statement",
       };
     case "problem_field":
       return {
@@ -1277,7 +1294,7 @@ function buildSectionPrompt(
   const taskByScope: Record<DraftScope, string> = {
     full: "Generate and validate the complete question draft.",
     basics: "Generate only the starter title and context fields.",
-    problem: "Generate the title, problem statement, input format, output format, and constraints in one response.",
+    problem: "Generate only the problem statement. Do not change any other question field.",
     problem_field: "Complete only missing or explicitly requested problem fields.",
     constraints: "Generate only I/O formats, constraints, and execution limits.",
     constraints_formats: "Generate only I/O formats, constraints, and execution limits.",
@@ -1346,22 +1363,7 @@ function mergeDraftIntoComposer(
     if (scope === "problem") {
       return {
         ...current,
-        title: draft.title || current.title,
         problem_statement: draft.problem_statement || current.problem_statement,
-        input_format: draft.input_format || current.input_format,
-        input_explanation: draft.input_explanation || current.input_explanation,
-        output_format: draft.output_format || current.output_format,
-        output_explanation: draft.output_explanation || current.output_explanation,
-        constraints: draft.constraints || current.constraints,
-        candidate_solve_time_minutes:
-          draft.candidate_solve_time_minutes || current.candidate_solve_time_minutes,
-        execution_time_limit_seconds:
-          draft.execution_time_limit_seconds || current.execution_time_limit_seconds,
-        memory_limit_mb: draft.memory_limit_mb || current.memory_limit_mb,
-        topics: draft.topics.length ? draft.topics : current.topics,
-        tags: draft.tags.length ? draft.tags : current.tags,
-        category: draft.category || current.category,
-        ...answerValidationFieldsFromDraft(current, draft),
         creation_mode: "ai_assisted",
       };
     }
@@ -1584,6 +1586,318 @@ function formatCount(value: number) {
   return value.toLocaleString();
 }
 
+interface QuestionReadOnlyViewProps {
+  question: QuestionRecord;
+  canEdit: boolean;
+  onClose: () => void;
+  onEdit: () => void;
+}
+
+type QuestionViewSectionKey = "problem" | "tests" | "solutions" | "metadata";
+
+interface QuestionViewAccordionSectionProps {
+  children: ReactNode;
+  eyebrow: string;
+  id: QuestionViewSectionKey;
+  onToggle: (id: QuestionViewSectionKey) => void;
+  open: boolean;
+  summary: string;
+  title: string;
+}
+
+function QuestionViewAccordionSection({
+  children,
+  eyebrow,
+  id,
+  onToggle,
+  open,
+  summary,
+  title,
+}: QuestionViewAccordionSectionProps) {
+  const contentId = `question-view-section-${id}`;
+
+  return (
+    <section
+      className={`question-review-section question-view-collapsible ${
+        open ? "is-open" : "is-collapsed"
+      }`}
+    >
+      <button
+        type="button"
+        className="question-review-section-toggle"
+        aria-controls={contentId}
+        aria-expanded={open}
+        onClick={() => onToggle(id)}
+      >
+        <span className="question-review-section-kicker">{eyebrow}</span>
+        <strong>{title}</strong>
+        <small>{summary}</small>
+        <em>{open ? "Collapse" : "Expand"}</em>
+      </button>
+      {open ? (
+        <div id={contentId} className="question-review-section-body">
+          {children}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function QuestionReadOnlyView({
+  question,
+  canEdit,
+  onClose,
+  onEdit,
+}: QuestionReadOnlyViewProps) {
+  const languages = normalizeLanguageList(
+    question.supported_languages.length
+      ? question.supported_languages
+      : [question.reference_language],
+    question.reference_language || "python",
+  );
+  const testCases = [
+    ...question.sample_test_cases.map((testCase, index) => ({
+      testCase,
+      index,
+      label: "Sample",
+    })),
+    ...question.hidden_test_cases.map((testCase, index) => ({
+      testCase,
+      index,
+      label: "Hidden",
+    })),
+  ];
+  const [openSections, setOpenSections] = useState<
+    Record<QuestionViewSectionKey, boolean>
+  >({
+    problem: true,
+    tests: false,
+    solutions: false,
+    metadata: false,
+  });
+
+  function toggleSection(id: QuestionViewSectionKey) {
+    setOpenSections((current) => ({ ...current, [id]: !current[id] }));
+  }
+
+  function setAllSections(open: boolean) {
+    setOpenSections({
+      problem: open,
+      tests: open,
+      solutions: open,
+      metadata: open,
+    });
+  }
+
+  return (
+    <main className="question-flow-page question-view-page">
+      <section className="question-view-shell">
+        <section className="question-final-review" aria-label="Question preview">
+          <div className="question-final-review-hero">
+            <div>
+              <span>Question preview</span>
+              <h3>{question.title || "Untitled question"}</h3>
+              <p>
+                {question.difficulty} · {question.category || "Uncategorized"}
+              </p>
+            </div>
+            <div className="question-final-review-hero-actions">
+              <div className={`pill ${questionStatusTone(question.status)}`}>
+                {question.status}
+              </div>
+              {canEdit ? (
+                <Button type="button" onClick={onEdit}>
+                  <Pencil size={16} />
+                  Edit question
+                </Button>
+              ) : null}
+              <Button type="button" variant="secondary" onClick={onClose}>
+                <X size={16} />
+                Close
+              </Button>
+            </div>
+          </div>
+
+          <div className="question-review-summary-grid">
+            <div>
+              <span>Languages</span>
+              <strong>{languages.map(languageDisplayName).join(", ")}</strong>
+            </div>
+            <div>
+              <span>Tests</span>
+              <strong>
+                {question.sample_test_cases.length} sample ·{" "}
+                {question.hidden_test_cases.length} hidden
+              </strong>
+            </div>
+            <div>
+              <span>Validation</span>
+              <strong>{question.validation_status.replaceAll("_", " ")}</strong>
+            </div>
+            <div>
+              <span>Answer checker</span>
+              <strong>
+                {answerValidationOption(question.answer_validation_mode).label}
+              </strong>
+            </div>
+            <div>
+              <span>Limits</span>
+              <strong>
+                {question.execution_time_limit_seconds}s · {question.memory_limit_mb} MB
+              </strong>
+            </div>
+            <div>
+              <span>Visibility</span>
+              <strong>{question.visibility}</strong>
+            </div>
+          </div>
+
+          <div className="question-view-section-actions" aria-label="Question section controls">
+            <Button type="button" variant="secondary" onClick={() => setAllSections(true)}>
+              Expand all
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => setAllSections(false)}>
+              Collapse all
+            </Button>
+          </div>
+
+          <QuestionViewAccordionSection
+            id="problem"
+            eyebrow="Section 1"
+            title="Problem statement"
+            summary="Statement, input/output contract, and constraints."
+            open={openSections.problem}
+            onToggle={toggleSection}
+          >
+            <div className="question-review-copy">
+              <strong>Statement</strong>
+              <p>{question.problem_statement || "No problem statement provided."}</p>
+            </div>
+            <div className="question-review-two-column">
+              <div>
+                <strong>Input format</strong>
+                <p>{question.input_format || "Not specified"}</p>
+              </div>
+              <div>
+                <strong>Output format</strong>
+                <p>{question.output_format || "Not specified"}</p>
+              </div>
+            </div>
+            <div className="question-review-copy">
+              <strong>Constraints</strong>
+              <pre>{question.constraints || "Not specified"}</pre>
+            </div>
+          </QuestionViewAccordionSection>
+
+          <QuestionViewAccordionSection
+            id="tests"
+            eyebrow="Section 2"
+            title="Test cases"
+            summary={`${question.sample_test_cases.length} sample and ${question.hidden_test_cases.length} hidden cases.`}
+            open={openSections.tests}
+            onToggle={toggleSection}
+          >
+            <div className="question-review-test-grid">
+              {testCases.length ? (
+                testCases.map(({ testCase, index, label }) => (
+                  <article key={`${label}-${index}`} className="question-review-test-card">
+                    <div>
+                      <strong>
+                        {label} {index + 1}
+                      </strong>
+                      <span>{label === "Sample" ? "Visible" : "Private"}</span>
+                    </div>
+                    <label>
+                      Input
+                      <pre>{testCase.input || "(empty)"}</pre>
+                    </label>
+                    <label>
+                      Expected output
+                      <pre>{testCase.expected_output || "(empty)"}</pre>
+                    </label>
+                    {testCase.explanation ? <p>{testCase.explanation}</p> : null}
+                  </article>
+                ))
+              ) : (
+                <p>No test cases have been added.</p>
+              )}
+            </div>
+          </QuestionViewAccordionSection>
+
+          <QuestionViewAccordionSection
+            id="solutions"
+            eyebrow="Section 3"
+            title="Reference solutions"
+            summary={`${languages.length} language solution${languages.length === 1 ? "" : "s"} and complexity details.`}
+            open={openSections.solutions}
+            onToggle={toggleSection}
+          >
+            <div className="question-review-solutions">
+              {languages.map((language) => {
+                const normalizedLanguage = languageKey(language);
+                const artifact = question.reference_solutions[normalizedLanguage];
+                const sourceCode =
+                  normalizedLanguage === languageKey(question.reference_language)
+                    ? question.reference_solution
+                    : artifact?.source_code ?? "";
+                return (
+                  <article key={normalizedLanguage}>
+                    <div>
+                      <strong>{languageDisplayName(normalizedLanguage)}</strong>
+                      <span>
+                        {artifact?.validation_status ?? question.validation_status}
+                      </span>
+                    </div>
+                    <pre>{sourceCode || "No solution generated"}</pre>
+                  </article>
+                );
+              })}
+            </div>
+            <div className="question-review-two-column">
+              <div>
+                <strong>Time complexity</strong>
+                <p>{question.time_complexity || "Not classified"}</p>
+              </div>
+              <div>
+                <strong>Space complexity</strong>
+                <p>{question.space_complexity || "Not classified"}</p>
+              </div>
+            </div>
+          </QuestionViewAccordionSection>
+
+          <QuestionViewAccordionSection
+            id="metadata"
+            eyebrow="Section 4"
+            title="Metadata"
+            summary="Difficulty, topics, tags, and category."
+            open={openSections.metadata}
+            onToggle={toggleSection}
+          >
+            <div className="question-review-summary-grid">
+              <div>
+                <span>Difficulty</span>
+                <strong>{question.difficulty}</strong>
+              </div>
+              <div>
+                <span>Topics</span>
+                <strong>{question.topics.join(", ") || "None"}</strong>
+              </div>
+              <div>
+                <span>Tags</span>
+                <strong>{question.tags.join(", ") || "None"}</strong>
+              </div>
+              <div>
+                <span>Category</span>
+                <strong>{question.category || "Uncategorized"}</strong>
+              </div>
+            </div>
+          </QuestionViewAccordionSection>
+        </section>
+      </section>
+    </main>
+  );
+}
+
 export function QuestionManagementPage() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
@@ -1687,7 +2001,13 @@ export function QuestionManagementPage() {
     };
   }, [groups.length, questions]);
 
-  function openQuestion(question: QuestionRecord) {
+  function viewQuestion(question: QuestionRecord) {
+    navigate(
+      `/recruiter/question-management/new?questionId=${encodeURIComponent(question.id)}&mode=view`,
+    );
+  }
+
+  function editQuestion(question: QuestionRecord) {
     navigate(`/recruiter/question-management/new?questionId=${encodeURIComponent(question.id)}`);
   }
 
@@ -1752,27 +2072,27 @@ export function QuestionManagementPage() {
           </button>
         </div>
       ) : null}
-      <section className="management-hero management-hero-compact">
+      <section className="management-hero management-hero-compact workspace-page-header">
         <div>
-          <p>Question management</p>
-          <h1>Question library</h1>
+          <p className="workspace-page-eyebrow">Question management</p>
+          <h1 className="workspace-page-title">Question library</h1>
         </div>
-        <div className="assessment-hero-metrics">
+        <div className="assessment-hero-metrics question-header-metrics">
           <span>
             <strong>{formatCount(metrics.questions)}</strong>
-            Total
+            <small>Total</small>
           </span>
           <span>
             <strong>{formatCount(metrics.validated)}</strong>
-            Validated
+            <small>Validated</small>
           </span>
           <span>
             <strong>{formatCount(metrics.drafts)}</strong>
-            Drafts
+            <small>Drafts</small>
           </span>
           <span>
             <strong>{formatCount(metrics.groups)}</strong>
-            Groups
+            <small>Groups</small>
           </span>
         </div>
         <div className="management-hero-actions">
@@ -1915,6 +2235,15 @@ export function QuestionManagementPage() {
                           <tr
                             key={question.id}
                             className={`data-row question-row-compact${isGenerating ? " question-row-generating" : ""}`}
+                            onClick={() => viewQuestion(question)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                viewQuestion(question);
+                              }
+                            }}
+                            tabIndex={0}
+                            title="View question"
                           >
                         <td>
                           <div className="question-title-cell">
@@ -1962,12 +2291,27 @@ export function QuestionManagementPage() {
                           <Button
                             type="button"
                             variant="secondary"
-                            onClick={() => openQuestion(question)}
-                            disabled={!isOwned}
-                            title={isOwned ? undefined : "Public questions from other recruiters are read-only"}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              viewQuestion(question);
+                            }}
                           >
-                            {isOwned ? (isGenerating ? "View live" : "Edit") : "Shared"}
+                            <Eye size={14} />
+                            View
                           </Button>
+                          {isOwned ? (
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                editQuestion(question);
+                              }}
+                            >
+                              <Pencil size={14} />
+                              {isGenerating ? "View live" : "Edit"}
+                            </Button>
+                          ) : null}
                         </td>
                           </tr>
                         );
@@ -2236,6 +2580,7 @@ export function QuestionCreationFlowPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const questionId = searchParams.get("questionId");
+  const isViewMode = searchParams.get("mode") === "view" && Boolean(questionId);
   const generationOwnerIdRef = useRef(
     `question-page-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
@@ -2255,7 +2600,7 @@ export function QuestionCreationFlowPage() {
   const validateDraft = useValidateQuestionBankDraft(currentUser);
   const refineTestCases = useRefineQuestionBankTestCases(currentUser);
   const refineSolution = useRefineQuestionBankSolution(currentUser);
-  const { data } = useQuestionBank(currentUser, {
+  const { data, isLoading: questionsLoading } = useQuestionBank(currentUser, {
     search: "",
     difficulty: "",
     status: "",
@@ -2870,11 +3215,11 @@ export function QuestionCreationFlowPage() {
   }
 
   function getStepVisualState(step: WizardStep) {
-    if (!visitedSteps.has(step)) {
-      return "untouched";
-    }
-    if (advanceAttemptedSteps.has(step) && stepIsComplete(step, composer, generationSettings)) {
+    if (stepIsComplete(step, composer, generationSettings)) {
       return "complete";
+    }
+    if (!visitedSteps.has(step) && !advanceAttemptedSteps.has(step)) {
+      return "untouched";
     }
     return "in-progress";
   }
@@ -4081,6 +4426,49 @@ export function QuestionCreationFlowPage() {
     }
   }
 
+  if (isViewMode) {
+    if (editingQuestion) {
+      return (
+        <QuestionReadOnlyView
+          question={editingQuestion}
+          canEdit={editingQuestion.recruiter_uid === currentUser?.uid}
+          onClose={() => navigate("/recruiter/question-management")}
+          onEdit={() =>
+            navigate(
+              `/recruiter/question-management/new?questionId=${encodeURIComponent(editingQuestion.id)}`,
+            )
+          }
+        />
+      );
+    }
+
+    return (
+      <main className="question-flow-page question-view-page">
+        <section className="question-view-shell">
+          <Card className="question-view-state-card">
+            <div>
+              <span>Question preview</span>
+              <h1>{questionsLoading ? "Loading question..." : "Question not found"}</h1>
+              <p>
+                {questionsLoading
+                  ? "Preparing the read-only question view."
+                  : "This question could not be found in the question library."}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => navigate("/recruiter/question-management")}
+            >
+              <X size={16} />
+              Close
+            </Button>
+          </Card>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="question-flow-page">
       {fieldToasts.length ? (
@@ -4300,16 +4688,7 @@ export function QuestionCreationFlowPage() {
                 placeholder="Write the statement the candidate should solve."
               />
             </label>
-            <div className="section-action-strip">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => void generateDraft("problem")}
-                disabled={Boolean(toolbarBusy)}
-              >
-                <FileText size={16} />
-                {toolbarBusy === "problem" ? "Generating..." : "Generate Step 2 Contract"}
-              </Button>
+            <div className="section-action-strip is-right-aligned">
               <Button
                 type="button"
                 variant="secondary"

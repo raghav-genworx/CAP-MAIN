@@ -29,6 +29,7 @@ class Judge0Client:
     ) -> None:
         """Initialize the client with runtime settings."""
 
+        self._settings = settings
         self._base_url = settings.judge0_base_url.rstrip("/")
         self._timeout = settings.judge0_request_timeout_seconds
         self._poll_interval = settings.judge0_poll_interval_seconds
@@ -44,7 +45,11 @@ class Judge0Client:
 
         async with self._client() as client:
             token = await self._create_submission(client, payload)
-            return await self._wait_for_submission(client, token)
+            return await self._wait_for_submission(
+                client,
+                token,
+                cpu_time_limit=float(payload.get("cpu_time_limit") or 0),
+            )
 
     async def execute_batch(
         self,
@@ -56,7 +61,15 @@ class Judge0Client:
             return []
         async with self._client() as client:
             tokens = await self._create_batch_submission(client, payloads)
-            return await self._wait_for_batch_submission(client, tokens)
+            max_cpu_time = max(
+                (float(payload.get("cpu_time_limit") or 0) for payload in payloads),
+                default=0,
+            )
+            return await self._wait_for_batch_submission(
+                client,
+                tokens,
+                cpu_time_limit=max_cpu_time,
+            )
 
     async def get_languages(self) -> list[LanguageResponse]:
         """Fetch supported languages from Judge0."""
@@ -132,9 +145,10 @@ class Judge0Client:
         self,
         client: httpx.AsyncClient,
         token: str,
+        cpu_time_limit: float = 0,
     ) -> Judge0SubmissionResult:
         result: Judge0SubmissionResult | None = None
-        for _ in range(self._max_poll_attempts):
+        for _ in range(self._poll_attempt_budget(cpu_time_limit)):
             result = await self._get_submission(client, token)
             if result.status is not None and result.status.id not in PENDING_STATUS_IDS:
                 return self._decode_result(result)
@@ -145,10 +159,16 @@ class Judge0Client:
         self,
         client: httpx.AsyncClient,
         tokens: list[str],
+        cpu_time_limit: float = 0,
     ) -> list[Judge0SubmissionResult]:
         token_set = set(tokens)
         latest_by_token: dict[str, Judge0SubmissionResult] = {}
-        for _ in range(self._max_poll_attempts):
+        for _ in range(
+            self._poll_attempt_budget(
+                cpu_time_limit,
+                submission_count=len(tokens),
+            )
+        ):
             results = await self._get_batch_submission(client, tokens)
             latest_by_token = {
                 result.token: result for result in results if result.token in token_set
@@ -161,11 +181,25 @@ class Judge0Client:
                 result.status is not None and result.status.id not in PENDING_STATUS_IDS
                 for result in latest_by_token.values()
             ):
-                return [
-                    self._decode_result(latest_by_token[token]) for token in tokens
-                ]
+                return [self._decode_result(latest_by_token[token]) for token in tokens]
             await asyncio.sleep(self._poll_interval)
         raise CodeExecutionTimeoutError()
+
+    def _poll_attempt_budget(
+        self,
+        cpu_time_limit: float,
+        submission_count: int = 1,
+    ) -> int:
+        """Allow queued batch submissions enough aggregate processing time."""
+
+        configured_window = self._max_poll_attempts * self._poll_interval
+        normalized_count = max(1, submission_count)
+        required_window = max(
+            configured_window,
+            (cpu_time_limit + self._settings.judge0_poll_margin_seconds)
+            * normalized_count,
+        )
+        return max(1, int(required_window / self._poll_interval) + 1)
 
     async def _get_submission(
         self,

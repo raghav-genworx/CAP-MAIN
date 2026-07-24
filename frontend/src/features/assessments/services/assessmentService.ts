@@ -225,3 +225,77 @@ export async function fetchSlotMonitoring(
   );
   return response.data;
 }
+
+export async function streamSlotMonitoring(
+  idToken: string,
+  slotId: string,
+  onMonitoring: (payload: MonitoringResponse) => void,
+  onOpen: () => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const baseUrl = String(coreApiClient.defaults.baseURL || "").replace(/\/$/, "");
+  const response = await fetch(
+    `${baseUrl}/assessments/slots/${encodeURIComponent(slotId)}/monitoring/stream`,
+    {
+      method: "GET",
+      headers: {
+        ...authHeader(idToken),
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+      },
+      cache: "no-store",
+      credentials: "include",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Monitoring stream failed with status ${response.status}.`);
+  }
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+    throw new Error("Monitoring endpoint did not return an event stream.");
+  }
+  if (!response.body) {
+    throw new Error("The browser could not read the monitoring stream.");
+  }
+
+  onOpen();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function handleFrame(frame: string) {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of frame.replace(/\r/g, "").split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (eventName !== "monitoring" || dataLines.length === 0) {
+      return;
+    }
+    onMonitoring(JSON.parse(dataLines.join("\n")) as MonitoringResponse);
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() || "";
+      frames.forEach(handleFrame);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      handleFrame(buffer);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

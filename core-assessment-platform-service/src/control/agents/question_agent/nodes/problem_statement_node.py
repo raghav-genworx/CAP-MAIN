@@ -18,6 +18,7 @@ from ..prompts.problem_statement_prompt import (
 )
 from ..states.question_state import (
     CheckerOutput,
+    ProblemStatementOnlyOutput,
     ProblemStatementOutput,
     QuestionGenerationState,
 )
@@ -31,6 +32,18 @@ class ProblemStatementNodeMixin(QuestionAgentToolsMixin):
         self,
         state: QuestionGenerationState,
     ) -> QuestionGenerationState:
+        """NODE 2/12 — turns the raw prompt into the problem spec.
+
+        Reads: `prompt`, `title_hint`, `focus_tags`.
+        Does: one LLM call (validated into `ProblemStatementOutput`) to produce
+        the title, statement, input/output formats + explanations, initial
+        constraints, tags/category, and the answer-validation mode. For
+        non-exact answer modes (multiple valid / constructive) it makes a SECOND
+        LLM call to generate a custom output-checker.
+        Writes: title, problem_statement, formats, tags, category, checker,
+        constraints, and initial sample_test_cases into the shared state.
+        """
+
         prompt = state["prompt"]
         title_hint = state.get("title_hint", "")
         system_prompt, user_prompt = build_problem_statement_prompt(
@@ -38,6 +51,25 @@ class ProblemStatementNodeMixin(QuestionAgentToolsMixin):
             prompt=prompt,
             title_hint=title_hint,
         )
+        if state.get("generation_scope") == "problem":
+            statement_model = self._structured_completion(
+                schema_name="problem_statement_only",
+                schema_model=ProblemStatementOnlyOutput,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            return {
+                "problem_statement": statement_model.problem_statement.strip(),
+                "notes": self._append_notes(
+                    state.get("notes", []),
+                    *statement_model.notes,
+                ),
+                "execution_history": self._append_notes(
+                    state.get("execution_history", []),
+                    "Problem Statement Agent: generated only the problem statement",
+                ),
+            }
+
         model = self._structured_completion(
             schema_name="problem_statement",
             schema_model=ProblemStatementOutput,

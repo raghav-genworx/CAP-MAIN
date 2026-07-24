@@ -15,9 +15,33 @@ from ..tools.question_tools import QuestionAgentToolsMixin
 class ValidationNodeMixin(QuestionAgentToolsMixin):
     """Validation node for the question agent."""
 
+    def _normalize_expected_outputs_with_oracle(
+        self,
+        state: QuestionGenerationState,
+    ) -> QuestionGenerationState:
+        """Return oracle-normalized tests in the concrete graph implementation."""
+
+        raise NotImplementedError
+
     def _validation_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
+        """NODE 8/12 — the correctness gate. This is where code is EXECUTED.
+
+        Three phases:
+          1. Oracle normalization (`_normalize_expected_outputs_with_oracle`):
+             build an independent brute-force solution and use its output to fix
+             any wrong expected outputs in the tests.
+          2. Adversarial loop (`_run_adversarial_solution_loop`): actually run
+             the reference solution against all tests via the execution adapter,
+             generate adversarial tests, and repair the solution across rounds.
+          3. LLM consistency review (-> `ValidationOutput`) that turns the
+             execution results into human-readable checks/warnings.
+        Writes: possibly-repaired `reference_solution`/tests, plus
+        `validation_status`, `solution_validation` (per-test report), checks and
+        warnings. This node's per-test progress is what the SSE stream shows.
+        """
+
         oracle_patch = self._normalize_expected_outputs_with_oracle(state)
         validation_state: QuestionGenerationState = {
             **state,

@@ -25,16 +25,21 @@ import { useNavigate } from "react-router-dom";
 
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
+import { ApiError } from "../../../lib/axios";
 import {
   fetchCandidateAssessment,
+  recordCandidateProctorEvent,
   runCandidateHiddenCheck,
   runCandidateSample,
   saveCandidateCheckpoint,
+  startCandidateAssessment,
   submitCandidateAssessment,
 } from "../services/candidatePortalService";
 import {
   clearCandidateSessionToken,
+  readCandidateInviteToken,
   readCandidateSessionToken,
+  saveCandidateSessionToken,
   saveSubmissionResult,
 } from "../utils/sessionStorage";
 import type {
@@ -193,7 +198,8 @@ function monacoLanguage(language: string) {
 
 export function CandidateAssessmentPage() {
   const navigate = useNavigate();
-  const sessionToken = readCandidateSessionToken();
+  const [sessionToken, setSessionToken] = useState(readCandidateSessionToken);
+  const [sessionWarning, setSessionWarning] = useState("");
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>("");
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const [runResult, setRunResult] = useState<RunResultState>(null);
@@ -206,6 +212,9 @@ export function CandidateAssessmentPage() {
   const [submittedQuestionIds, setSubmittedQuestionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [questionOutcomes, setQuestionOutcomes] = useState<
+    Record<string, "passed" | "failed">
+  >({});
   const [showSubmitAssessmentDialog, setShowSubmitAssessmentDialog] =
     useState(false);
   const [finalSubmitConfirmation, setFinalSubmitConfirmation] = useState("");
@@ -223,20 +232,76 @@ export function CandidateAssessmentPage() {
   const evidenceAssignmentRef = useRef("");
   const hasReceivedPositiveTimerRef = useRef(false);
   const latestDraftsRef = useRef<Record<string, DraftState>>({});
+  const draftVersionsRef = useRef<Record<string, number>>({});
+  const selectedQuestionIdRef = useRef("");
+  const assessmentQuestionsRef = useRef<CandidateAssessmentPortal["questions"]>([]);
+  const autosaveInFlightRef = useRef(false);
+  const restoredResultQuestionRef = useRef("");
   const timerSyncRef = useRef({
     serverRemainingSeconds: 0,
     syncedAtMs: Date.now(),
+    paused: false,
   });
 
   const assessmentQuery = useQuery({
     queryKey: ["candidate-assessment", sessionToken],
-    queryFn: async () => fetchCandidateAssessment(sessionToken || ""),
+    queryFn: async () => {
+      try {
+        return await fetchCandidateAssessment(sessionToken || "");
+      } catch (error) {
+        const inviteToken = readCandidateInviteToken();
+        if (!(error instanceof ApiError) || error.status !== 401 || !inviteToken) {
+          throw error;
+        }
+        setSessionWarning("Your session expired. Reconnecting to your saved assessment...");
+        const refreshed = await startCandidateAssessment(inviteToken);
+        saveCandidateSessionToken(refreshed.session_token);
+        setSessionToken(refreshed.session_token);
+        const assessment = await fetchCandidateAssessment(refreshed.session_token);
+        setSessionWarning("Session restored. Your saved work is available.");
+        return assessment;
+      }
+    },
     enabled: Boolean(sessionToken),
     refetchInterval: 15000,
   });
 
   latestDraftsRef.current = drafts;
+  selectedQuestionIdRef.current = selectedQuestionId;
+  assessmentQuestionsRef.current = assessmentQuery.data?.questions || [];
   questionTimeSpentRef.current = questionTimeSpentSeconds;
+
+  const persistProctorEvent = useCallback(
+    async (
+      eventType: "tab_hidden" | "window_blur" | "clipboard" | "fullscreen_exit",
+    ) => {
+      if (!sessionToken) {
+        return null;
+      }
+      const eventId =
+        typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try {
+        const totals = await recordCandidateProctorEvent(sessionToken, {
+          client_event_id: eventId,
+          event_type: eventType,
+          occurred_at: new Date().toISOString(),
+        });
+        tabSwitchCountRef.current = totals.tab_switch_count;
+        clipboardCountRef.current = totals.copy_paste_count;
+        fullscreenExitCountRef.current = totals.fullscreen_exit_count;
+        setTabSwitchWarnings(Math.min(totals.tab_switch_count, TAB_SWITCH_LIMIT));
+        return totals;
+      } catch {
+        setProctorMessage(
+          "A proctoring event could not be synchronized. Check your connection.",
+        );
+        return null;
+      }
+    },
+    [sessionToken],
+  );
 
   useEffect(() => {
     if (!sessionToken) {
@@ -280,6 +345,18 @@ export function CandidateAssessmentPage() {
               "python",
             source_code: savedDraft?.draft_code || "",
           };
+          draftVersionsRef.current[question.id] = savedDraft?.version || 0;
+        } else if (
+          savedDraft &&
+          savedDraft.version > (draftVersionsRef.current[question.id] || 0)
+        ) {
+          if (next[question.id].source_code === savedDraft.draft_code) {
+            draftVersionsRef.current[question.id] = savedDraft.version;
+          } else {
+            setSessionWarning(
+              `Question ${question.question_order} changed in another tab. Reload before saving it.`,
+            );
+          }
         }
       });
       return next;
@@ -300,7 +377,7 @@ export function CandidateAssessmentPage() {
     const storageKey = `candidate-question-time-${assessmentId}`;
     let storedTimes: Record<string, number> = {};
     try {
-      const stored = window.sessionStorage.getItem(storageKey);
+      const stored = window.localStorage.getItem(storageKey);
       if (stored) {
         storedTimes = JSON.parse(stored) as Record<string, number>;
       }
@@ -314,6 +391,41 @@ export function CandidateAssessmentPage() {
     questionTimeSpentRef.current = mergedTimes;
     setQuestionTimeSpentSeconds(mergedTimes);
   }, [assessmentQuery.data]);
+
+  useEffect(() => {
+    if (!selectedQuestionId || restoredResultQuestionRef.current === selectedQuestionId) {
+      return;
+    }
+    restoredResultQuestionRef.current = selectedQuestionId;
+    const saved = assessmentQuery.data?.drafts.find(
+      (draft) => draft.question_id === selectedQuestionId,
+    )?.sample_run_result;
+    if (!saved?.results?.length) {
+      setRunResult(null);
+      return;
+    }
+    const results = saved.results as CandidateExecutionCaseResult[];
+    setRunResult({
+      kind: "sample",
+      summary: `${saved.passed_count || 0}/${saved.total_count || results.length} sample cases passed`,
+      cases: results.map((item) => ({
+        index: item.index,
+        passed: item.passed,
+        status: item.status,
+        executionTime: item.execution_time,
+        detail:
+          item.actual_output ||
+          item.stderr ||
+          item.compile_output ||
+          item.checker_message ||
+          item.message,
+        expectedOutput: item.expected_output,
+        actualOutput: item.actual_output,
+        errorType: item.passed ? "" : item.status || "Execution failed",
+      })),
+    });
+    setResultsExpanded(true);
+  }, [assessmentQuery.data?.drafts, selectedQuestionId]);
 
   const selectedQuestion = useMemo(
     () =>
@@ -461,8 +573,10 @@ export function CandidateAssessmentPage() {
         copy_paste_count: clipboardCountRef.current,
         fullscreen_exit_count: fullscreenExitCountRef.current,
         question_time_seconds: questionTimeSpentRef.current,
+        base_version: draftVersionsRef.current[questionId] || 0,
       }),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
+      draftVersionsRef.current[variables.questionId] = data.version;
       setLastSavedAt(data.saved_at);
     },
   });
@@ -487,9 +601,11 @@ export function CandidateAssessmentPage() {
         question_id: questionId,
         source_code: sourceCode,
         language,
+        base_version: draftVersionsRef.current[questionId] || 0,
       });
     },
-    onSuccess: (data: CandidateSampleRunResponse) => {
+    onSuccess: (data: CandidateSampleRunResponse, variables) => {
+      draftVersionsRef.current[variables.questionId] = data.version;
       const cases = data.results.map((item: CandidateExecutionCaseResult) => ({
           index: item.index,
           passed: item.passed,
@@ -533,9 +649,11 @@ export function CandidateAssessmentPage() {
         question_id: questionId,
         source_code: sourceCode,
         language,
+        base_version: draftVersionsRef.current[questionId] || 0,
       });
     },
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
+      draftVersionsRef.current[variables.questionId] = data.version;
       setHiddenCheckCooldownSeconds(
         data.cooldown_remaining_seconds || HIDDEN_CHECK_COOLDOWN_SECONDS,
       );
@@ -552,6 +670,13 @@ export function CandidateAssessmentPage() {
         `${data.passed_count}/${data.total_count} hidden test cases passed`,
         cases,
       );
+      setQuestionOutcomes((current) => ({
+        ...current,
+        [variables.questionId]:
+          data.total_count > 0 && data.passed_count === data.total_count
+            ? "passed"
+            : "failed",
+      }));
     },
   });
 
@@ -673,6 +798,9 @@ export function CandidateAssessmentPage() {
   }
 
   const syncedRemainingSeconds = useCallback(() => {
+    if (timerSyncRef.current.paused) {
+      return timerSyncRef.current.serverRemainingSeconds;
+    }
     const elapsedSeconds = Math.floor(
       (Date.now() - timerSyncRef.current.syncedAtMs) / 1000,
     );
@@ -682,15 +810,46 @@ export function CandidateAssessmentPage() {
     );
   }, []);
 
+  const autosaveAssessmentId = assessmentQuery.data?.candidate_assessment_id;
+  const autosaveSlotStatus = assessmentQuery.data?.slot_status;
   useEffect(() => {
-    if (!assessmentQuery.data || !selectedQuestion || !selectedDraft) {
+    if (!autosaveAssessmentId || autosaveSlotStatus === "paused") {
       return;
     }
     const interval = window.setInterval(() => {
-      saveSelectedQuestion();
+      const questionId = selectedQuestionIdRef.current;
+      const draft = latestDraftsRef.current[questionId];
+      const question = assessmentQuestionsRef.current.find((item) => item.id === questionId);
+      if (!sessionToken || !draft || !question || autosaveInFlightRef.current) {
+        return;
+      }
+      autosaveInFlightRef.current = true;
+      void saveCandidateCheckpoint(sessionToken, {
+        question_id: questionId,
+        source_code: draft.source_code,
+        language: draft.language,
+        current_question_order: question.question_order,
+        base_version: draftVersionsRef.current[questionId] || 0,
+        tab_switch_count: tabSwitchCountRef.current,
+        copy_paste_count: clipboardCountRef.current,
+        fullscreen_exit_count: fullscreenExitCountRef.current,
+        question_time_seconds: questionTimeSpentRef.current,
+      })
+        .then((result) => {
+          draftVersionsRef.current[questionId] = result.version;
+          setLastSavedAt(result.saved_at);
+        })
+        .catch((error: unknown) => {
+          setSessionWarning(
+            error instanceof Error ? error.message : "Autosave failed. Please retry.",
+          );
+        })
+        .finally(() => {
+          autosaveInFlightRef.current = false;
+        });
     }, 15000);
     return () => window.clearInterval(interval);
-  }, [assessmentQuery.data, saveSelectedQuestion, selectedDraft, selectedQuestion]);
+  }, [autosaveAssessmentId, autosaveSlotStatus, sessionToken]);
 
   useEffect(() => {
     if (!assessmentQuery.data || !selectedQuestionId || submitMutation.isPending) {
@@ -713,7 +872,7 @@ export function CandidateAssessmentPage() {
     if (!assessmentId) {
       return;
     }
-    window.sessionStorage.setItem(
+    window.localStorage.setItem(
       `candidate-question-time-${assessmentId}`,
       JSON.stringify(questionTimeSpentSeconds),
     );
@@ -725,7 +884,12 @@ export function CandidateAssessmentPage() {
       return;
     }
     const serverSubmittedIds = assessment.drafts
-      .filter((draft) => draft.submitted_at || draft.status === "submitted")
+      .filter(
+        (draft) =>
+          draft.submitted_at ||
+          draft.status === "submitted" ||
+          Number(draft.hidden_check_result.total_count || 0) > 0,
+      )
       .map((draft) => draft.question_id);
     if (!serverSubmittedIds.length) {
       return;
@@ -733,6 +897,19 @@ export function CandidateAssessmentPage() {
     setSubmittedQuestionIds((current) => {
       const next = new Set(current);
       serverSubmittedIds.forEach((questionId) => next.add(questionId));
+      return next;
+    });
+    setQuestionOutcomes((current) => {
+      const next = { ...current };
+      assessment.drafts.forEach((draft) => {
+        const check = draft.hidden_check_result;
+        const finalResult = draft.submission_result;
+        const total = Number(finalResult.total_count || check.total_count || 0);
+        const passed = Number(finalResult.passed_count || check.passed_count || 0);
+        if (total > 0) {
+          next[draft.question_id] = passed === total ? "passed" : "failed";
+        }
+      });
       return next;
     });
   }, [assessmentQuery.data]);
@@ -752,13 +929,7 @@ export function CandidateAssessmentPage() {
       setFullscreenPromptVisible(false);
       return;
     }
-    void document.documentElement
-      .requestFullscreen()
-      .then(() => {
-        hasEnteredFullscreenRef.current = true;
-        setFullscreenPromptVisible(false);
-      })
-      .catch(() => setFullscreenPromptVisible(true));
+    setFullscreenPromptVisible(true);
   }, [assessmentQuery.data]);
 
   useEffect(() => {
@@ -766,24 +937,25 @@ export function CandidateAssessmentPage() {
       return;
     }
 
-    function handleFullscreenChange() {
+    async function handleFullscreenChange() {
       if (document.fullscreenElement) {
         hasEnteredFullscreenRef.current = true;
         setFullscreenPromptVisible(false);
         return;
       }
       if (hasEnteredFullscreenRef.current) {
-        fullscreenExitCountRef.current += 1;
+        await persistProctorEvent("fullscreen_exit");
         submitAutomatically(FULLSCREEN_EXIT_TAG, FULLSCREEN_EXIT_MESSAGE);
       } else {
         setFullscreenPromptVisible(true);
       }
     }
 
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    const onFullscreenChange = () => void handleFullscreenChange();
+    document.addEventListener("fullscreenchange", onFullscreenChange);
     return () =>
-      document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  }, [assessmentQuery.data?.proctoring_mode, submitAutomatically]);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, [assessmentQuery.data?.proctoring_mode, persistProctorEvent, submitAutomatically]);
 
   useEffect(() => {
     if (!proctorMessage || submitMutation.isPending) {
@@ -801,6 +973,7 @@ export function CandidateAssessmentPage() {
     timerSyncRef.current = {
       serverRemainingSeconds,
       syncedAtMs: Date.now(),
+      paused: assessmentQuery.data?.slot_status === "paused",
     };
     setDisplayRemainingSeconds(Math.max(0, serverRemainingSeconds));
   }, [assessmentQuery.data]);
@@ -840,16 +1013,16 @@ export function CandidateAssessmentPage() {
 
     let countedHiddenState = document.visibilityState === "hidden";
 
-    function recordTabSwitchWarning() {
+    async function recordTabSwitchWarning(eventType: "tab_hidden" | "window_blur") {
       if (submitOnceRef.current) {
         return;
       }
-      tabSwitchCountRef.current = Math.min(
-        tabSwitchCountRef.current + 1,
-        TAB_SWITCH_LIMIT,
-      );
+      const totals = await persistProctorEvent(eventType);
+      if (!totals) {
+        return;
+      }
       setTabSwitchWarnings(() => {
-        const next = tabSwitchCountRef.current;
+        const next = Math.min(totals.tab_switch_count, TAB_SWITCH_LIMIT);
         if (next >= TAB_SWITCH_LIMIT) {
           submitAutomatically(TAB_SWITCH_TAG, TAB_SWITCH_MESSAGE);
           return next;
@@ -865,7 +1038,7 @@ export function CandidateAssessmentPage() {
       if (document.visibilityState === "hidden") {
         if (!countedHiddenState) {
           countedHiddenState = true;
-          recordTabSwitchWarning();
+          void recordTabSwitchWarning("tab_hidden");
         }
         return;
       }
@@ -875,7 +1048,40 @@ export function CandidateAssessmentPage() {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () =>
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [assessmentQuery.data, submitAutomatically]);
+  }, [assessmentQuery.data, persistProctorEvent, submitAutomatically]);
+
+  useEffect(() => {
+    if (!assessmentQuery.data || assessmentQuery.data.proctoring_mode === "none") {
+      return;
+    }
+    let lostFocus = false;
+    const handleBlur = () => {
+      if (document.visibilityState === "visible" && !lostFocus) {
+        lostFocus = true;
+        void persistProctorEvent("window_blur").then((totals) => {
+          if (!totals) return;
+          const next = Math.min(totals.tab_switch_count, TAB_SWITCH_LIMIT);
+          setTabSwitchWarnings(next);
+          if (next >= TAB_SWITCH_LIMIT) {
+            submitAutomatically(TAB_SWITCH_TAG, TAB_SWITCH_MESSAGE);
+          } else {
+            setProctorMessage(
+              `Window focus lost. Warning ${next}/${TAB_SWITCH_LIMIT}.`,
+            );
+          }
+        });
+      }
+    };
+    const handleFocus = () => {
+      lostFocus = false;
+    };
+    window.addEventListener("blur", handleBlur);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [assessmentQuery.data, persistProctorEvent, submitAutomatically]);
 
   useEffect(() => {
     const mode = assessmentQuery.data?.proctoring_mode;
@@ -884,7 +1090,7 @@ export function CandidateAssessmentPage() {
     }
 
     function handleClipboard(event: ClipboardEvent) {
-      clipboardCountRef.current += 1;
+      void persistProctorEvent("clipboard");
       if (mode === "strict") {
         event.preventDefault();
       }
@@ -903,7 +1109,7 @@ export function CandidateAssessmentPage() {
       document.removeEventListener("cut", handleClipboard, true);
       document.removeEventListener("paste", handleClipboard, true);
     };
-  }, [assessmentQuery.data?.proctoring_mode]);
+  }, [assessmentQuery.data?.proctoring_mode, persistProctorEvent]);
 
   if (!assessmentQuery.data || !selectedQuestion || !selectedDraft) {
     return (
@@ -918,7 +1124,9 @@ export function CandidateAssessmentPage() {
   }
 
   const assessment = assessmentQuery.data;
+  const isPaused = assessment.slot_status === "paused";
   const isActionBusy =
+    isPaused ||
     checkpointMutation.isPending ||
     sampleMutation.isPending ||
     hiddenCheckMutation.isPending ||
@@ -979,14 +1187,20 @@ export function CandidateAssessmentPage() {
                 type="button"
                 className={`candidate-question-button ${
                   selectedQuestion.id === question.id ? "is-selected" : ""
-                } ${submittedQuestionIds.has(question.id) ? "is-submitted" : ""}`}
+                } ${
+                  submittedQuestionIds.has(question.id)
+                    ? `is-submitted is-${questionOutcomes[question.id] || "failed"}`
+                    : ""
+                }`}
                 onClick={() => moveToQuestion(question.id)}
               >
                 <span>Question {question.question_order}</span>
                 <strong>{question.title}</strong>
                 <em>
                   {submittedQuestionIds.has(question.id)
-                    ? "Question submitted"
+                    ? questionOutcomes[question.id] === "passed"
+                      ? "Submitted - passed"
+                      : "Submitted - needs work"
                     : isAttempted
                       ? "Draft saved locally"
                       : "Not attempted"}
@@ -998,10 +1212,27 @@ export function CandidateAssessmentPage() {
       </aside>
 
       <section className="candidate-workspace">
+        {sessionWarning ? (
+          <span className="candidate-proctor-live-message" role="status">
+            {sessionWarning}
+          </span>
+        ) : null}
         {proctorMessage ? (
           <span className="candidate-proctor-live-message" role="status">
             {proctorMessage}
           </span>
+        ) : null}
+
+        {isPaused ? (
+          <div className="candidate-security-gate" role="status">
+            <div className="candidate-fullscreen-prompt">
+              <Clock3 size={18} aria-hidden="true" />
+              <div>
+                <strong>Assessment paused</strong>
+                <p>Your timer is frozen. Work can resume when the recruiter continues the slot.</p>
+              </div>
+            </div>
+          </div>
         ) : null}
 
         {fullscreenPromptVisible ? (

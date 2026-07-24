@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { ArrowRight, KeyRound } from "lucide-react";
+import { ArrowRight, KeyRound, ShieldCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "../../../components/ui/Button";
@@ -25,11 +25,18 @@ export function CandidateCodeEntryPage() {
   return (
     <main className="candidate-shell candidate-shell-branded">
       <Card className="candidate-card candidate-code-card">
-        <span className="candidate-kicker">Candidate Access</span>
-        <h1>Enter assessment code</h1>
-        <p className="candidate-muted">
-          Use the code shared by your recruiter to open the assessment lobby.
-        </p>
+        <div className="candidate-access-heading">
+          <span className="candidate-access-icon" aria-hidden="true">
+            <ShieldCheck size={22} />
+          </span>
+          <div>
+            <span className="candidate-kicker">Candidate Access</span>
+            <h1>Enter assessment code</h1>
+            <p className="candidate-muted">
+              Use the code shared by your recruiter to open the assessment lobby.
+            </p>
+          </div>
+        </div>
 
         <form className="candidate-code-form" onSubmit={handleSubmit}>
           <label>
@@ -56,6 +63,11 @@ export function CandidateCodeEntryPage() {
             <ArrowRight size={17} aria-hidden="true" />
           </Button>
         </form>
+
+        <p className="candidate-access-note">
+          <ShieldCheck size={15} aria-hidden="true" />
+          Only use an assessment code issued directly to you.
+        </p>
       </Card>
     </main>
   );

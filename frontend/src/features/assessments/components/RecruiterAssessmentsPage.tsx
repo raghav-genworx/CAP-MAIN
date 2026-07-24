@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Archive,
@@ -11,13 +11,11 @@ import {
   Clock3,
   Code2,
   Download,
-  FileText,
   Gauge,
   Info,
   ListChecks,
   Settings,
   ShieldCheck,
-  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -27,6 +25,10 @@ import { Card } from "../../../components/ui/Card";
 import { useAuth } from "../../auth";
 import { AssessmentEvaluationPanel } from "./AssessmentEvaluationPanel";
 import { AssessmentList } from "./AssessmentList";
+import {
+  DurationMinutesField,
+  FutureDateTimeField,
+} from "./FutureDateTimeField";
 import {
   EmptyState,
   HealthDot,
@@ -257,6 +259,12 @@ export function RecruiterAssessmentsPage() {
     if (!selectedAssessmentId || assessmentsQuery.isLoading) {
       return;
     }
+    if (routeAssessmentId && selectedAssessmentId !== routeAssessmentId) {
+      return;
+    }
+    if (targetTestId && selectedSlotId !== targetTestId) {
+      return;
+    }
     if (!selectedAssessment) {
       navigate("/recruiter/assessments", { replace: true });
       return;
@@ -272,10 +280,12 @@ export function RecruiterAssessmentsPage() {
   }, [
     assessmentsQuery.isLoading,
     navigate,
+    routeAssessmentId,
     targetTestId,
     selectedAssessment,
     selectedAssessmentId,
     selectedSlot,
+    selectedSlotId,
     slotsQuery.isSuccess,
     slotsQuery.isFetching,
   ]);
@@ -562,6 +572,7 @@ export function RecruiterAssessmentsPage() {
           candidates={candidates}
           monitoringItems={monitoringItems}
           monitoringLoading={monitoringQuery.isLoading}
+          monitoringConnected={monitoringQuery.isStreaming}
           submittedCount={submittedCount}
           inProgressCount={inProgressCount}
           candidateCsv={candidateCsv}
@@ -657,6 +668,7 @@ function CreateAssessmentView({
   onChangeQuestions: (questionIds: string[]) => void;
   onCreateGroup: (payload: QuestionGroupCreatePayload) => Promise<QuestionGroupRecord>;
 }) {
+  const builderShellRef = useRef<HTMLDivElement>(null);
   const scoringTotal =
     assessmentForm.test_case_score_weight +
     assessmentForm.coding_score_weight +
@@ -683,12 +695,6 @@ function CreateAssessmentView({
   const [activeQuestionSetupStep, setActiveQuestionSetupStep] =
     useState<QuestionSetupStep>(1);
   const [deliveryConfigured, setDeliveryConfigured] = useState(false);
-  const enabledPolicyCount = [
-    assessmentForm.allow_resume,
-    assessmentForm.shuffle_questions,
-    assessmentForm.show_score_to_candidate,
-    assessmentForm.hidden_feedback_mode === "summary",
-  ].filter(Boolean).length;
   const scoringIsValid = scoringTotal === 100;
   const basicsReady =
     assessmentForm.title.trim().length >= 3 &&
@@ -756,25 +762,19 @@ function CreateAssessmentView({
     {
       id: "basics" as const,
       label: "Basics",
-      title: "Template details",
-      description: "Name the assessment, set the time box, and add candidate-facing instructions.",
-      meta: "Name, duration, pass mark",
+      title: "Assessment details",
       ready: basicsReady,
     },
     {
       id: "questions" as const,
       label: "Question set",
-      title: "Choose the question set",
-      description: "Build the pool, set the per-candidate count, and align it with the blueprint.",
-      meta: `${selectedQuestionIds.length} in pool, ${desiredQuestionCount} per candidate`,
+      title: "Questions",
       ready: questionSetReady,
     },
     {
       id: "rules" as const,
       label: "Rules",
-      title: "Finalize scoring and policy",
-      description: "Balance the evaluation weights, languages, and candidate experience rules.",
-      meta: "Scoring, languages, policy",
+      title: "Scoring and rules",
       ready: rulesReady,
     },
   ];
@@ -806,22 +806,29 @@ function CreateAssessmentView({
     return done ? "is-complete" : "is-needed";
   }
 
-  function moveToSection(section: AssessmentCreateSection) {
+  function activateSection(section: AssessmentCreateSection) {
     setActiveSection(section);
+    window.requestAnimationFrame(() => {
+      builderShellRef.current?.scrollIntoView({ block: "start" });
+    });
+  }
+
+  function moveToSection(section: AssessmentCreateSection) {
+    activateSection(section);
   }
 
   function goToPreviousSection() {
     if (activeSectionIndex <= 0) {
       return;
     }
-    setActiveSection(sectionDefinitions[activeSectionIndex - 1].id);
+    activateSection(sectionDefinitions[activeSectionIndex - 1].id);
   }
 
   function goToNextSection() {
     if (!sectionReady(activeSection) || activeSectionIndex >= sectionDefinitions.length - 1) {
       return;
     }
-    setActiveSection(sectionDefinitions[activeSectionIndex + 1].id);
+    activateSection(sectionDefinitions[activeSectionIndex + 1].id);
   }
 
   function toggleLanguage(language: string, checked: boolean) {
@@ -1055,45 +1062,16 @@ function CreateAssessmentView({
           </div>
         </div>
       ) : null}
-      <button type="button" className="assessment-back-link" onClick={onBack}>
-        <ArrowLeft size={16} />
-        Back to assessments
-      </button>
-
       <Card className="assessment-panel assessment-panel-wide assessment-create-panel">
-        <div className="assessment-builder-wizard">
-          <div className="assessment-builder-banner">
+        <div className="assessment-builder-wizard assessment-builder-wizard-compact assessment-builder-wizard-friendly">
+          <div className="assessment-builder-banner assessment-builder-banner-compact">
             <div className="assessment-builder-banner-copy">
-              <span className="panel-eyebrow">New Assessment</span>
-              <h2>Create assessment</h2>
-              <p>Set the basics, choose the question set, and finish the scoring rules in three guided pages.</p>
+              <h2>New assessment</h2>
             </div>
-            <div className="assessment-builder-metrics" aria-label="Assessment setup summary">
-              <span>
-                <strong>{assessmentForm.question_count_per_candidate}</strong>
-                Questions
-              </span>
-              <span>
-                <strong>{assessmentForm.passing_score}%</strong>
-                Passing
-              </span>
-              <span>
-                <strong>{selectedQuestionIds.length}</strong>
-                In pool
-              </span>
-              <span>
-                <strong>{assessmentForm.supported_languages.length}</strong>
-                Languages
-              </span>
-              <span>
-                <strong>{enabledPolicyCount}</strong>
-                Policies
-              </span>
-              <span>
-                <strong>{assessmentForm.title.trim() ? "Drafting" : "Start"}</strong>
-                Status
-              </span>
-            </div>
+            <button type="button" className="assessment-back-link" onClick={onBack}>
+              <ArrowLeft size={16} />
+              Assessments
+            </button>
           </div>
 
           <div className="assessment-step-rail assessment-builder-rail" aria-label="Assessment creation steps">
@@ -1104,70 +1082,24 @@ function CreateAssessmentView({
                 className={sectionState(step.id)}
                 onClick={() => moveToSection(step.id)}
                 aria-current={activeSection === step.id ? "step" : undefined}
+                aria-label={`${index + 1}. ${step.label}${step.ready ? ", complete" : ""}`}
               >
-                <span>{index + 1}</span>
+                <span>{step.ready ? <Check size={15} aria-hidden="true" /> : index + 1}</span>
                 <strong>{step.label}</strong>
-                <em>{step.ready ? "Ready" : step.meta}</em>
               </button>
             ))}
           </div>
 
-          <div className="assessment-builder-shell">
+          <div ref={builderShellRef} className="assessment-builder-shell">
             <div className="assessment-builder-header">
-              <div>
-                <p>
-                  Page {activeSectionIndex + 1} of {sectionDefinitions.length}
-                </p>
-                <h3>{activeSectionDefinition.title}</h3>
-                <span>{activeSectionDefinition.description}</span>
-              </div>
-              <strong
-                className={
-                  sectionReady(activeSection)
-                    ? "assessment-builder-status is-ready"
-                    : "assessment-builder-status is-needed"
-                }
-              >
-                {sectionReady(activeSection) ? "Ready to continue" : "Required fields pending"}
-              </strong>
+              <h3>{activeSectionDefinition.title}</h3>
+              <span>Step {activeSectionIndex + 1} of {sectionDefinitions.length}</span>
             </div>
-
-            <p className="assessment-builder-required-note">
-              Fields marked with {requiredMark} are required before you continue.
-            </p>
 
             {activeSection === "basics" ? (
               <div className="assessment-form-stack assessment-form-pro assessment-create-form">
-                <div className="question-status-strip" aria-label="Assessment basics readiness">
-                  <span className={assessmentForm.title.trim().length >= 3 ? "is-ready" : "is-needed"}>
-                    Title {assessmentForm.title.trim().length >= 3 ? "ready" : "needed"}
-                  </span>
-                  <span
-                    className={
-                      assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
-                        ? "is-ready"
-                        : "is-needed"
-                    }
-                  >
-                    Passing score{" "}
-                    {assessmentForm.passing_score >= 0 && assessmentForm.passing_score <= 100
-                      ? "ready"
-                      : "out of range"}
-                  </span>
-                </div>
-
-                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
-                  <div className="assessment-section-heading">
-                    <span className="assessment-section-icon">
-                      <FileText size={18} />
-                    </span>
-                    <div>
-                      <span className="panel-eyebrow">Basics</span>
-                      <h3>Template details</h3>
-                    </div>
-                  </div>
-
-                  <label className="field field-pro field-full">
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card assessment-basics-compact">
+                  <label className="field field-pro assessment-basics-title">
                     <span>
                       Assessment title {requiredMark}
                     </span>
@@ -1180,101 +1112,61 @@ function CreateAssessmentView({
                     />
                   </label>
 
-                  <div className="assessment-inline-fields">
-                    <label className="field field-pro metric-field">
-                      <span>
-                        Passing score {requiredMark}
-                      </span>
-                      <div className="field-control-with-icon">
-                        <Gauge size={16} />
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={assessmentForm.passing_score}
-                          onChange={(event) =>
-                            onChange({
-                              ...assessmentForm,
-                              passing_score: Number(event.target.value),
-                            })
-                          }
-                        />
-                        <em>%</em>
-                      </div>
-                    </label>
-                  </div>
+                  <label className="field field-pro metric-field assessment-basics-score">
+                    <span>
+                      Passing score {requiredMark}
+                    </span>
+                    <div className="field-control-with-icon">
+                      <Gauge size={16} />
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={assessmentForm.passing_score}
+                        onChange={(event) =>
+                          onChange({
+                            ...assessmentForm,
+                            passing_score: Number(event.target.value),
+                          })
+                        }
+                      />
+                      <em>%</em>
+                    </div>
+                  </label>
 
-                  <div className="assessment-inline-fields">
-                    <label className="field field-pro field-full">
-                      <span>Description</span>
-                      <textarea
-                        placeholder="Role, level, skills, and what this assessment measures"
-                        value={assessmentForm.description}
-                        onChange={(event) =>
-                          onChange({ ...assessmentForm, description: event.target.value })
-                        }
-                      />
-                    </label>
-                    <label className="field field-pro field-full">
-                      <span>Candidate instructions</span>
-                      <textarea
-                        placeholder="Rules, allowed languages, timing expectations, and integrity notes"
-                        value={assessmentForm.instructions}
-                        onChange={(event) =>
-                          onChange({ ...assessmentForm, instructions: event.target.value })
-                        }
-                      />
-                    </label>
-                  </div>
+                  <label className="field field-pro">
+                    <span>Description</span>
+                    <textarea
+                      placeholder="Role, level, skills, and what this assessment measures"
+                      value={assessmentForm.description}
+                      onChange={(event) =>
+                        onChange({ ...assessmentForm, description: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="field field-pro">
+                    <span>Candidate instructions</span>
+                    <textarea
+                      placeholder="Rules, allowed languages, timing expectations, and integrity notes"
+                      value={assessmentForm.instructions}
+                      onChange={(event) =>
+                        onChange({ ...assessmentForm, instructions: event.target.value })
+                      }
+                    />
+                  </label>
                 </div>
               </div>
             ) : null}
 
             {activeSection === "questions" ? (
               <div className="assessment-form-stack assessment-form-pro assessment-create-form">
-                <div className="question-status-strip" aria-label="Assessment question set readiness">
-                  <span
-                    className={
-                      selectedQuestionIds.length >= desiredQuestionCount && selectedQuestionIds.length > 0
-                        ? "is-ready"
-                        : "is-needed"
-                    }
-                  >
-                    Pool {selectedQuestionIds.length} / {desiredQuestionCount}
-                  </span>
-                  <span className={desiredQuestionCount > 0 ? "is-ready" : "is-needed"}>
-                    Per candidate {desiredQuestionCount}
-                  </span>
-                  <span className={questionSetReady ? "is-ready" : "is-needed"}>
-                    Delivery {deliveryConfigured
-                      ? assessmentForm.shuffle_questions ? "randomized" : "fixed set"
-                      : "not chosen"}
-                  </span>
-                </div>
-
-                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
-                  <div className="assessment-section-heading">
-                    <span className="assessment-section-icon is-green">
-                      <BadgeCheck size={18} />
-                    </span>
-                    <div>
-                      <span className="panel-eyebrow">Question Set</span>
-                      <h3>Choose the questions used by every test slot</h3>
-                    </div>
-                  </div>
-
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card assessment-questions-compact">
                   <div className="question-setup-tabs" role="tablist" aria-label="Question selection setup">
                     {[
-                      { step: 1 as const, label: "Question count", meta: `${desiredQuestionCount} required` },
-                      { step: 2 as const, label: "Difficulties", meta: `${difficultyBlueprint.length} slots` },
-                      {
-                        step: 3 as const,
-                        label: "Delivery",
-                        meta: deliveryConfigured
-                          ? assessmentForm.shuffle_questions ? "Randomized" : "Fixed set"
-                          : "Choose mode",
-                      },
-                      { step: 4 as const, label: "Select questions", meta: `${selectedQuestionIds.length} selected` },
+                      { step: 1 as const, label: "Question count" },
+                      { step: 2 as const, label: "Difficulties" },
+                      { step: 3 as const, label: "Delivery" },
+                      { step: 4 as const, label: "Select questions" },
                     ].map((item) => {
                       const complete = item.step < questionSetupStep || (item.step === 4 && questionSetReady);
                       const available = item.step <= questionSetupStep;
@@ -1290,7 +1182,6 @@ function CreateAssessmentView({
                         >
                           <span>{complete ? "✓" : item.step}</span>
                           <strong>{item.label}</strong>
-                          <small>{complete ? "Completed" : item.meta}</small>
                         </button>
                       );
                     })}
@@ -1301,8 +1192,7 @@ function CreateAssessmentView({
                       <div className="question-setup-card-heading">
                         <span>1</span>
                         <div>
-                          <strong>How many questions should each candidate receive?</strong>
-                          <p>This controls the number of difficulty slots and the final selection requirement.</p>
+                          <strong>Question count</strong>
                         </div>
                       </div>
                       <div className="question-count-control">
@@ -1317,7 +1207,7 @@ function CreateAssessmentView({
                           />
                         </label>
                         <Button type="button" onClick={confirmQuestionCount}>
-                          Confirm count and continue
+                          Continue
                         </Button>
                       </div>
                     </section>
@@ -1327,8 +1217,7 @@ function CreateAssessmentView({
                         <div className="question-setup-card-heading">
                           <span>2</span>
                           <div>
-                            <strong>Choose the difficulty for every question slot</strong>
-                            <p>The order matters for a fixed set. A randomized pool must satisfy the same totals.</p>
+                            <strong>Difficulty mix</strong>
                           </div>
                         </div>
                         <div className="difficulty-slot-grid question-setup-difficulty-grid">
@@ -1350,7 +1239,7 @@ function CreateAssessmentView({
                         </div>
                         <div className="question-setup-card-actions">
                           <Button type="button" onClick={confirmDifficultyBlueprint}>
-                            Confirm difficulties and continue
+                            Continue
                           </Button>
                         </div>
                       </section>
@@ -1361,8 +1250,7 @@ function CreateAssessmentView({
                         <div className="question-setup-card-heading">
                           <span>3</span>
                           <div>
-                            <strong>How should questions be delivered?</strong>
-                            <p>Choose one mode before the eligible question bank is revealed.</p>
+                            <strong>Delivery</strong>
                           </div>
                         </div>
                         <div className="question-delivery-toggle" role="group" aria-label="Question delivery mode">
@@ -1372,7 +1260,7 @@ function CreateAssessmentView({
                             onClick={() => configureDelivery(false)}
                           >
                             <strong>Fixed set</strong>
-                            <span>Every candidate receives the same {desiredQuestionCount} questions in blueprint order.</span>
+                            <span>Same questions for everyone</span>
                           </button>
                           <button
                             type="button"
@@ -1380,7 +1268,7 @@ function CreateAssessmentView({
                             onClick={() => configureDelivery(true)}
                           >
                             <strong>Randomized pool</strong>
-                            <span>Each candidate receives {desiredQuestionCount} matching questions from a larger pool.</span>
+                            <span>Different matching set per candidate</span>
                           </button>
                         </div>
                       </section>
@@ -1391,16 +1279,15 @@ function CreateAssessmentView({
                         <div className="question-setup-card-heading">
                           <span>4</span>
                           <div>
-                            <strong>Select only questions that match the configured template</strong>
-                            <p>Unavailable questions remain visible but disabled, so the selection rule is always clear.</p>
+                            <strong>Select questions</strong>
                           </div>
                         </div>
 
                         <div className="question-set-mode-grid" role="tablist" aria-label="Question set source">
                           {[
-                            { mode: "select-questions" as const, title: "Individual questions", copy: "Choose from validated questions." },
-                            { mode: "select-groups" as const, title: "Question groups", copy: "Apply a matching existing group." },
-                            { mode: "custom" as const, title: "Custom group", copy: "Select and save a reusable group." },
+                            { mode: "select-questions" as const, title: "Questions" },
+                            { mode: "select-groups" as const, title: "Groups" },
+                            { mode: "custom" as const, title: "Create group" },
                           ].map((option) => (
                             <button
                               key={option.mode}
@@ -1417,7 +1304,6 @@ function CreateAssessmentView({
                               }}
                             >
                               <strong>{option.title}</strong>
-                              <span>{option.copy}</span>
                             </button>
                           ))}
                         </div>
@@ -1425,8 +1311,7 @@ function CreateAssessmentView({
                   {questionSetMode === "custom" ? (
                     <div className="custom-group-composer-card">
                       <div className="question-set-subhead">
-                        <strong>Custom group composer</strong>
-                        <span>Save the selected questions as a reusable active group.</span>
+                        <strong>New group</strong>
                       </div>
                       <div className="assessment-inline-fields">
                         <label className="field field-pro">
@@ -1523,9 +1408,6 @@ function CreateAssessmentView({
                       <div className="question-bank-picker">
                         <div className="question-set-subhead">
                           <strong>Question bank</strong>
-                          <span>
-                            Only template-matching questions can be added
-                          </span>
                         </div>
                         <div className="template-quota-grid" aria-label="Question template progress">
                           {QUESTION_DIFFICULTIES.filter(
@@ -1663,12 +1545,11 @@ function CreateAssessmentView({
                             </p>
                           ) : null}
                           <div className={`question-template-readiness ${questionSetReady ? "is-complete" : "is-needed"}`}>
-                            <strong>{questionSetReady ? "Question set ready" : "Complete the template requirements"}</strong>
-                            <span>
+                            <strong>
                               {questionSetReady
-                                ? "Every candidate receives the template-defined questions for exactly 100 marks."
-                                : "Assessment creation stays locked until every required difficulty is selected."}
-                            </span>
+                                ? "Question set ready"
+                                : `${selectedQuestionIds.length} of ${desiredQuestionCount} selected`}
+                            </strong>
                           </div>
                         </div>
                       ) : null}
@@ -1683,41 +1564,14 @@ function CreateAssessmentView({
 
             {activeSection === "rules" ? (
               <div className="assessment-form-stack assessment-form-pro assessment-create-form">
-                <div className="question-status-strip" aria-label="Assessment rules readiness">
-                  <span className={scoringIsValid ? "is-ready" : "is-needed"}>
-                    Scoring {scoringTotal} / 100
-                  </span>
-                  <span
-                    className={
-                      assessmentForm.supported_languages.length > 0 ? "is-ready" : "is-needed"
-                    }
-                  >
-                    Languages {assessmentForm.supported_languages.length}
-                  </span>
-                  <span className={rulesReady ? "is-ready" : "is-needed"}>
-                    Policy {enabledPolicyCount} active
-                  </span>
-                </div>
-
-                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card">
-                  <div className="assessment-section-heading">
-                    <span className="assessment-section-icon is-warm">
-                      <SlidersHorizontal size={18} />
-                    </span>
-                    <div>
-                      <span className="panel-eyebrow">Rules</span>
-                      <h3>Scoring and candidate policy</h3>
-                    </div>
-                  </div>
-
-                  <div className="assessment-form-section assessment-section-pro">
+                <div className="assessment-form-section assessment-section-pro assessment-builder-page-card assessment-rules-compact">
+                  <div className="assessment-form-section assessment-section-pro assessment-rules-card">
                     <div className="assessment-section-heading">
                       <span className="assessment-section-icon is-green">
                         <Gauge size={18} />
                       </span>
                       <div>
-                        <span className="panel-eyebrow">Scoring Configuration</span>
-                        <h3>Evaluation weightage</h3>
+                        <h3>Scoring</h3>
                       </div>
                     </div>
                     <div className="scoring-preset-row" aria-label="Scoring presets">
@@ -1828,43 +1682,43 @@ function CreateAssessmentView({
                     </div>
                   </div>
 
-                  <div className="assessment-form-section assessment-section-pro">
+                  <div className="assessment-form-section assessment-section-pro assessment-rules-card">
                     <div className="assessment-section-heading">
                       <span className="assessment-section-icon is-blue">
                         <ShieldCheck size={18} />
                       </span>
                       <div>
-                        <span className="panel-eyebrow">Access & Test Policy</span>
-                        <h3>Candidate experience</h3>
+                        <h3>Candidate policy</h3>
                       </div>
                     </div>
                     <div className="proctoring-option-grid">
                       {[
                         {
+                          value: "none",
+                          title: "No proctoring",
+                          rules: [
+                            "No activity tracking",
+                            "Copy and paste allowed",
+                            "No fullscreen requirement",
+                          ],
+                        },
+                        {
                           value: "basic",
-                          title: "Basic monitoring",
-                          features: [
-                            "Tab switch warning alerts",
-                            "Window blur detection",
-                            "Copy/paste monitoring",
+                          title: "Basic proctoring",
+                          rules: [
+                            "Tab and window changes recorded",
+                            "Clipboard activity recorded",
+                            "Auto-submit after 3 focus warnings",
                           ],
                         },
                         {
                           value: "strict",
-                          title: "Strict monitoring",
-                          features: [
-                            "Full-screen lockout enforcement",
-                            "Close the test if the candidate exits",
-                            "Copy/paste restrictions",
-                          ],
-                        },
-                        {
-                          value: "none",
-                          title: "No proctoring",
-                          features: [
-                            "Relaxed candidate experience",
-                            "Standard submission logging",
-                            "No alert policies",
+                          title: "Advanced proctoring",
+                          rules: [
+                            "Fullscreen required",
+                            "Copy, cut and paste blocked",
+                            "Tab and window changes recorded",
+                            "Fullscreen exit or 3 warnings auto-submits",
                           ],
                         },
                       ].map((option) => (
@@ -1885,8 +1739,8 @@ function CreateAssessmentView({
                         >
                           <strong>{option.title}</strong>
                           <ul>
-                            {option.features.map((feature) => (
-                              <li key={feature}>{feature}</li>
+                            {option.rules.map((rule) => (
+                              <li key={rule}>{rule}</li>
                             ))}
                           </ul>
                         </button>
@@ -1973,7 +1827,15 @@ function CreateAssessmentView({
               <div className="assessment-builder-footer-copy">
                 {createError ? <p className="form-error">{createError}</p> : null}
               </div>
-              <div className="assessment-actions-row">
+              <Button
+                type="button"
+                variant="secondary"
+                className="assessment-builder-cancel"
+                onClick={onBack}
+              >
+                Cancel
+              </Button>
+              <div className="assessment-actions-row assessment-builder-primary-actions">
                 <Button
                   type="button"
                   variant="secondary"
@@ -1988,7 +1850,7 @@ function CreateAssessmentView({
                     onClick={goToNextSection}
                     disabled={!sectionReady(activeSection)}
                   >
-                    Save & Continue
+                    Continue
                   </Button>
                 ) : (
                   <Button type="button" onClick={onCreate} disabled={!canCreateAssessment}>
@@ -1996,9 +1858,6 @@ function CreateAssessmentView({
                     {createPending ? "Creating..." : "Create Assessment"}
                   </Button>
                 )}
-                <Button type="button" variant="secondary" onClick={onBack}>
-                  Cancel
-                </Button>
               </div>
             </div>
           </div>
@@ -2099,6 +1958,7 @@ function AssessmentDetailView({
   const totalCandidates = slots.reduce((sum, slot) => sum + slot.candidate_count, 0);
   const totalSubmitted = slots.reduce((sum, slot) => sum + slot.submitted_count, 0);
   const [showCreateTest, setShowCreateTest] = useState(false);
+  const [slotPickerNowMs, setSlotPickerNowMs] = useState(() => Date.now());
   const [detailMode, setDetailMode] = useState<AssessmentDetailMode>("tests");
   const [pdfTrigger, setPdfTrigger] = useState(0);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -2108,11 +1968,16 @@ function AssessmentDetailView({
   const minimumSlotStart = nextAvailableTimeInput(
     slotForm.timezone_name,
     slotForm.timezone_offset_minutes,
+    slotPickerNowMs,
   );
-  const minimumSlotEnd = addMinutesToLocalInput(
+  const minimumSlotEndFromStart = addMinutesToLocalInput(
     slotForm.start_at,
     slotForm.duration_minutes,
   );
+  const minimumSlotEnd =
+    minimumSlotEndFromStart > minimumSlotStart
+      ? minimumSlotEndFromStart
+      : minimumSlotStart;
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [detailSuccessMessage, setDetailSuccessMessage] = useState("");
   const [assessmentEditForm, setAssessmentEditForm] = useState<AssessmentCreatePayload>(
@@ -2137,6 +2002,15 @@ function AssessmentDetailView({
   useEffect(() => {
     setDetailSuccessMessage(successMessage);
   }, [successMessage]);
+
+  useEffect(() => {
+    if (!showCreateTest) {
+      return;
+    }
+    setSlotPickerNowMs(Date.now());
+    const interval = window.setInterval(() => setSlotPickerNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, [showCreateTest]);
   const editScoringTotal =
     assessmentEditForm.test_case_score_weight +
     assessmentEditForm.coding_score_weight +
@@ -2231,7 +2105,7 @@ function AssessmentDetailView({
   );
 
   return (
-    <section className="assessment-drilldown">
+    <section className="assessment-drilldown assessment-detail-view">
       <div className="assessment-breadcrumb">
         <button type="button" onClick={onBack}>
           Back to assessments
@@ -2240,13 +2114,14 @@ function AssessmentDetailView({
         <strong>{assessment.title}</strong>
       </div>
 
-      <Card className="assessment-panel assessment-command-center assessment-command-center-compact">
+      <Card className="assessment-panel assessment-command-center assessment-command-center-compact workspace-page-header dashboard-style-detail-header">
         <div className="assessment-command-title">
-          <h2>{assessment.title}</h2>
+          <span className="panel-eyebrow workspace-page-eyebrow">Assessment</span>
+          <h2 className="workspace-page-title">{assessment.title}</h2>
           <p>{assessment.description || "No description added yet."}</p>
         </div>
 
-        <div className="assessment-command-metrics">
+        <div className="assessment-command-metrics dashboard-header-metrics">
           <div className="metric-item">
             <strong>{slots.length}</strong>
             <span>Tests</span>
@@ -2864,91 +2739,78 @@ function AssessmentDetailView({
                         }
                       />
                     </label>
-                    <div className="assessment-inline-fields">
-                      <label className="field">
-                        <span>Time region</span>
-                        <select
-                          value={slotForm.timezone_name}
-                          onChange={(event) => {
-                            const timezone = TIME_ZONE_OPTIONS.find(
-                              (option) => option.name === event.target.value,
-                            );
-                            if (!timezone) {
-                              return;
-                            }
-                            onChangeSlot({
-                              ...slotForm,
-                              timezone_name: timezone.name,
-                              timezone_offset_minutes:
-                                timezoneOffsetMinutesForLocalDateTime(
-                                  slotForm.start_at || slotForm.end_at,
-                                  timezone.name,
-                                  timezone.fallbackOffset,
-                                ),
-                            });
-                          }}
-                        >
-                          {TIME_ZONE_OPTIONS.map((timezone) => (
-                            <option
-                              key={timezone.name}
-                              value={timezone.name}
-                            >
-                              {timezone.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="field">
-                        <span>Start time</span>
-                        <input
-                          type="datetime-local"
-                          min={minimumSlotStart}
+                    <section className="slot-schedule-panel" aria-labelledby="create-slot-schedule-title">
+                      <div className="slot-schedule-heading">
+                        <div>
+                          <strong id="create-slot-schedule-title">Schedule</strong>
+                          <span>Choose the local start time and test length.</span>
+                        </div>
+                        <label className="field slot-timezone-field">
+                          <span>Time region</span>
+                          <select
+                            value={slotForm.timezone_name}
+                            onChange={(event) => {
+                              const timezone = TIME_ZONE_OPTIONS.find(
+                                (option) => option.name === event.target.value,
+                              );
+                              if (!timezone) {
+                                return;
+                              }
+                              onChangeSlot({
+                                ...slotForm,
+                                timezone_name: timezone.name,
+                                timezone_offset_minutes:
+                                  timezoneOffsetMinutesForLocalDateTime(
+                                    slotForm.start_at || slotForm.end_at,
+                                    timezone.name,
+                                    timezone.fallbackOffset,
+                                  ),
+                              });
+                            }}
+                          >
+                            {TIME_ZONE_OPTIONS.map((timezone) => (
+                              <option key={timezone.name} value={timezone.name}>
+                                {timezone.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="slot-schedule-grid">
+                        <FutureDateTimeField
+                          label="Start time"
+                          minimum={minimumSlotStart}
                           value={slotForm.start_at}
-                          onChange={(event) => {
-                            const startAt = event.target.value;
+                          onChange={(startAt) =>
                             onChangeSlot({
                               ...slotForm,
                               start_at: startAt,
                               end_at: addMinutesToLocalInput(startAt, slotForm.duration_minutes),
-                            });
-                          }}
+                            })
+                          }
                         />
-                      </label>
-                    </div>
-                    <p className="assessment-context-banner">
-                      Times are interpreted in {slotForm.timezone_name}. For India, choose
-                      GMT+05:30 and enter the local IST start/end time.
-                    </p>
-                    <div className="assessment-inline-fields">
-                      <label className="field">
-                        <span>Test duration (minutes)</span>
-                        <input
-                          type="number"
-                          min={15}
-                          max={360}
+                        <DurationMinutesField
                           value={slotForm.duration_minutes}
-                          onChange={(event) => {
-                            const duration = Math.max(15, Number(event.target.value) || 15);
+                          onChange={(duration) =>
                             onChangeSlot({
                               ...slotForm,
                               duration_minutes: duration,
                               end_at: addMinutesToLocalInput(slotForm.start_at, duration),
-                            });
-                          }}
-                        />
-                      </label>
-                      <label className="field">
-                        <span>End time</span>
-                        <input
-                          type="datetime-local"
-                          min={minimumSlotEnd}
-                          value={slotForm.end_at}
-                          onChange={(event) =>
-                            onChangeSlot({ ...slotForm, end_at: event.target.value })
+                            })
                           }
                         />
-                      </label>
-                    </div>
+                        <FutureDateTimeField
+                          label="End time"
+                          minimum={minimumSlotEnd}
+                          value={slotForm.end_at}
+                          onChange={(endAt) => onChangeSlot({ ...slotForm, end_at: endAt })}
+                        />
+                      </div>
+                      <p className="slot-schedule-note">
+                        Times use {slotForm.timezone_name}. End time updates automatically when
+                        start or duration changes.
+                      </p>
+                    </section>
                     <label className="field">
                       <span>Batch instructions override</span>
                       <textarea

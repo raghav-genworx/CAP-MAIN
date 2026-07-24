@@ -1,10 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  ClipboardList,
-  FilePlus2,
-} from "lucide-react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { AlertTriangle } from "lucide-react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 
 import { DataTable } from "../../../components/common/DataTable";
@@ -18,10 +14,6 @@ import {
   fetchAssessmentSlots,
   fetchSlotMonitoring,
 } from "../../assessments";
-import {
-  DashboardCompletionByTest,
-  RecruiterDashboardAnalytics,
-} from "./RecruiterDashboardAnalytics";
 import type {
   Assessment,
   AssessmentStatus,
@@ -31,7 +23,6 @@ import type {
   SlotStatus,
 } from "../../assessments";
 
-type SessionFilter = "all" | "active" | "upcoming" | "attention" | "closed";
 type CandidateStatusCounts = Record<CandidateAssessmentStatus, number>;
 
 interface AssessmentActivityBundle {
@@ -236,28 +227,8 @@ function completionPercentage(session: SessionRow) {
     : 0;
 }
 
-function matchesSearch(session: SessionRow, search: string) {
-  if (!search) {
-    return true;
-  }
-
-  const haystack = [
-    session.assessmentTitle,
-    session.slotTitle,
-    session.assessmentStatus,
-    session.slotStatus,
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  return haystack.includes(search);
-}
-
 export function RecruitersPage() {
   const { currentUser } = useAuth();
-  const [search, setSearch] = useState("");
-  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
-  const deferredSearch = useDeferredValue(search);
 
   const assessmentsQuery = useAssessments(currentUser);
   const assessments = useMemo(
@@ -339,35 +310,7 @@ export function RecruitersPage() {
       });
   }, [activityQuery.data, assessments]);
 
-  const normalizedSearch = deferredSearch.trim().toLowerCase();
-
-  const visibleSessions = useMemo(
-    () =>
-      sessionRows.filter((session) => {
-        if (sessionFilter === "active" && !session.isLive) {
-          return false;
-        }
-
-        if (
-          sessionFilter === "upcoming" &&
-          session.effectiveStatus !== "scheduled"
-        ) {
-          return false;
-        }
-
-        if (sessionFilter === "attention" && !session.needsAttention) {
-          return false;
-        }
-
-        if (sessionFilter === "closed" && session.effectiveStatus !== "closed") {
-          return false;
-        }
-
-        return matchesSearch(session, normalizedSearch);
-      }),
-    [normalizedSearch, sessionFilter, sessionRows],
-  );
-  const recentAssessments = assessments.slice(0, 6);
+  const recentSessions = sessionRows.slice(0, 5);
   const liveSessionCount = sessionRows.filter((session) => session.isLive).length;
   const upcomingSessionCount = sessionRows.filter(
     (session) => session.effectiveStatus === "scheduled",
@@ -377,31 +320,19 @@ export function RecruitersPage() {
   ).length;
 
   return (
-    <main className="recruiter-dashboard">
+    <main className="recruiter-dashboard dashboard-classic">
       <div className="dashboard-shell">
-        <section className="recruiter-welcome-banner" aria-label="Recruiter dashboard header">
+        <section
+          className="recruiter-welcome-banner workspace-page-header"
+          aria-label="Recruiter dashboard header"
+        >
           <div className="dashboard-welcome-copy">
-            <p className="dashboard-eyebrow">Recruiter Dashboard</p>
-            <h1>Welcome back, {currentUser?.displayName || currentUser?.email?.split("@")[0] || "Recruiter"}!</h1>
-            <p>Track live tests, candidate progress, and assessment readiness from one clean workspace.</p>
+            <p className="dashboard-eyebrow workspace-page-eyebrow">Recruiter Dashboard</p>
+            <h1 className="workspace-page-title">
+              Welcome back, {currentUser?.displayName || currentUser?.email?.split("@")[0] || "Recruiter"}!
+            </h1>
           </div>
           <div className="dashboard-welcome-side">
-            <section className="dashboard-action-bar" aria-label="Main workspaces">
-              <Link
-                className="dashboard-action-link is-primary"
-                to="/recruiter/assessments"
-              >
-                <ClipboardList size={18} aria-hidden="true" />
-                All assessments
-              </Link>
-              <Link
-                className="dashboard-action-link"
-                to="/recruiter/question-management"
-              >
-                <FilePlus2 size={18} aria-hidden="true" />
-                Manage questions
-              </Link>
-            </section>
             <div className="dashboard-welcome-stats" aria-label="Test slot summary">
               <span className="is-live"><strong>{liveSessionCount}</strong> Live</span>
               <span className="is-upcoming"><strong>{upcomingSessionCount}</strong> Upcoming</span>
@@ -410,52 +341,27 @@ export function RecruitersPage() {
           </div>
         </section>
 
-
-        <RecruiterDashboardAnalytics
-          assessmentCount={assessments.length}
-          sessions={sessionRows}
-        />
-
-        <section className="dashboard-table-grid">
+        <section className="dashboard-classic-layout">
           <section className="dashboard-panel dashboard-test-slots-panel">
-            <div className="dashboard-section-heading">
+            <div className="dashboard-section-heading dashboard-classic-heading">
               <div>
-                <h2>Test slots</h2>
-                <p>{visibleSessions.length} tests in the current view</p>
+                <p className="dashboard-eyebrow">Recent</p>
+                <h2>Recent test slots</h2>
               </div>
-              <div className="dashboard-section-meta">
-                <span>{sessionRows.length} total</span>
-                <span>{liveSessionCount} live</span>
-                <span>{attentionSessionCount} need review</span>
+              <div className="dashboard-classic-metrics" aria-label="Recent test slot totals">
+                <span>
+                  <strong>{sessionRows.length}</strong>
+                  Total test slots
+                </span>
+                <span className="is-live">
+                  <strong>{liveSessionCount}</strong>
+                  Live now
+                </span>
+                <span className="is-attention">
+                  <strong>{attentionSessionCount}</strong>
+                  Need review
+                </span>
               </div>
-            </div>
-
-            <div className="dashboard-filter-bar dashboard-filter-bar-compact">
-              <label className="dashboard-filter-control">
-                <span>Search</span>
-                <input
-                  type="search"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Assessment or test name"
-                />
-              </label>
-
-              <label className="dashboard-filter-control">
-                <span>Show</span>
-                <select
-                  value={sessionFilter}
-                  onChange={(event) =>
-                    setSessionFilter(event.target.value as SessionFilter)
-                  }
-                >
-                  <option value="all">All test slots</option>
-                  <option value="active">Active only</option>
-                  <option value="upcoming">Upcoming only</option>
-                  <option value="attention">Needs attention</option>
-                  <option value="closed">Closed only</option>
-                </select>
-              </label>
             </div>
 
             {activityQuery.isError ? (
@@ -463,13 +369,13 @@ export function RecruitersPage() {
             ) : null}
 
             <DataTable
-              rows={visibleSessions}
+              rows={recentSessions}
               isLoading={activityQuery.isPending}
               getRowKey={(session) => session.slotId}
               emptyState={
                 <EmptyState
-                  title="No tests in view"
-                  description="No test slots match the selected scope and filters."
+                  title="No recent test slots"
+                  description="Create an assessment and schedule a test slot to see recent activity here."
                 />
               }
               columns={[
@@ -556,59 +462,7 @@ export function RecruitersPage() {
               ]}
             />
           </section>
-
-          <section className="dashboard-panel dashboard-recent-assessments">
-            <div className="dashboard-section-heading">
-              <div>
-                <p className="dashboard-eyebrow">Recent</p>
-                <h2>Assessments</h2>
-              </div>
-              <div className="dashboard-section-meta">
-                <span>{assessments.length} total</span>
-              </div>
-            </div>
-            <DataTable
-              rows={recentAssessments}
-              isLoading={assessmentsQuery.isPending}
-              getRowKey={(assessment) => assessment.id}
-              emptyState={
-                <EmptyState
-                  title="No assessments yet"
-                  description="Create an assessment to start scheduling candidate tests."
-                />
-              }
-              columns={[
-                {
-                  header: "Name",
-                  key: "name",
-                  render: (assessment) => (
-                    <Link
-                      className="entity-link"
-                      to={assessmentPath(assessment.id, assessment.title)}
-                    >
-                      {assessment.title}
-                    </Link>
-                  ),
-                },
-                {
-                  header: "Questions",
-                  key: "questions",
-                  render: (assessment) => assessment.question_count,
-                },
-                {
-                  header: "Status",
-                  key: "status",
-                  render: (assessment) => <StatusBadge value={assessment.status} />,
-                },
-              ]}
-            />
-          </section>
         </section>
-
-        <DashboardCompletionByTest
-          isLoading={activityQuery.isPending}
-          sessions={sessionRows}
-        />
       </div>
     </main>
   );

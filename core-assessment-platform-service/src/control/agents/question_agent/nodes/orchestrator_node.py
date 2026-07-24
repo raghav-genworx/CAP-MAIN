@@ -12,6 +12,14 @@ class OrchestratorNodeMixin(QuestionAgentToolsMixin):
     def _orchestrator_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
+        """NODE 1/12 — the entry node. Lightweight: it makes no LLM call.
+
+        It just records planning notes (which agents will run for this scope)
+        onto the state's `notes` / `execution_history` logs. All real work
+        happens in the downstream nodes. Returns only the two updated log lists;
+        LangGraph merges them into the shared state.
+        """
+
         orchestration_note = (
             "Orchestrator is sequencing problem, constraint, example, "
             "test, and review agents for "

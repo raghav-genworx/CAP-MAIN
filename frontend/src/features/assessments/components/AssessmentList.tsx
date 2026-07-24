@@ -71,12 +71,12 @@ export function AssessmentList({
 
   return (
     <section className="assessment-list-view">
-      <Card className="assessment-library-hero">
+      <Card className="assessment-library-hero workspace-page-header">
         <div>
-          <span className="panel-eyebrow">Recruiter Workspace</span>
-          <h2>Assessments</h2>
+          <span className="panel-eyebrow workspace-page-eyebrow">Recruiter Workspace</span>
+          <h2 className="workspace-page-title">Assessments</h2>
         </div>
-        <div className="assessment-hero-metrics">
+        <div className="assessment-hero-metrics dashboard-header-metrics">
           <span>
             <strong>{assessments.length}</strong>
             Total

@@ -38,3 +38,8 @@ class BaseRepository:
         """Refresh a model instance from the database."""
 
         self._session.refresh(instance)
+
+    def expire_all(self) -> None:
+        """Expire cached ORM state so subsequent reads observe external commits."""
+
+        self._session.expire_all()

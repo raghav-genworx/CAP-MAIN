@@ -17,6 +17,15 @@ class DuplicateDetectionNodeMixin(QuestionAgentToolsMixin):
         self,
         state: QuestionGenerationState,
     ) -> QuestionGenerationState:
+        """NODE 11/12 — checks the new question against the existing library.
+
+        Reads: the finished draft + `existing_question_titles`/tags that were
+        seeded into the state from the recruiter's current question bank.
+        Does: one LLM call (-> `DuplicateOutput`) producing a similarity score
+        and any duplicate warnings.
+        Writes: `duplicate_warnings` (surfaced in the final quality summary).
+        """
+
         system_prompt, user_prompt = build_duplicate_detection_prompt(state)
         model = self._structured_completion(
             schema_name="duplicate_detection",

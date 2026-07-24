@@ -1260,10 +1260,7 @@ class QuestionBankService:
     def _has_complete_test_case(test_cases: list[TestCase]) -> bool:
         """Return true when at least one test has an expected output."""
 
-        return any(
-            test_case.expected_output.strip()
-            for test_case in test_cases
-        )
+        return any(test_case.expected_output.strip() for test_case in test_cases)
 
     @staticmethod
     def _normalize_solution_language(language: str) -> str:

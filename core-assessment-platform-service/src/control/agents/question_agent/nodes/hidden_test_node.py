@@ -16,6 +16,15 @@ class HiddenTestNodeMixin(QuestionAgentToolsMixin):
     def _hidden_test_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:
+        """NODE 5/12 — generates the HIDDEN / edge / stress test cases.
+
+        Reads: the problem context plus the already-generated sample cases
+        (passed in so the model doesn't just duplicate them).
+        Does: one LLM call (-> `HiddenTestOutput`) then the same
+        constraint sanity-check as the example node.
+        Writes: `hidden_test_cases` (marked is_sample=False).
+        """
+
         system_prompt, user_prompt = build_hidden_test_prompt(
             state,
             sample_cases=self._prompt_cases(state.get("sample_test_cases", [])),

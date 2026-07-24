@@ -56,9 +56,29 @@ class Settings(BaseSettings):
         default=2.0,
         description="Default CPU time limit sent to Judge0 submissions.",
     )
+    max_output_characters: int = Field(
+        default=50_000,
+        ge=1_000,
+        le=1_000_000,
+        description="Maximum characters retained for each execution output field.",
+    )
+    judge0_poll_margin_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        description="Extra polling time beyond the submitted CPU limit.",
+    )
     default_memory_limit_kb: int = Field(
         default=128000,
         description="Default memory limit sent to Judge0 submissions.",
+    )
+    java_minimum_memory_limit_kb: int = Field(
+        default=512000,
+        ge=256000,
+        le=512000,
+        description=(
+            "Minimum Java sandbox memory, including JVM heap and runtime overhead."
+        ),
     )
 
     @model_validator(mode="after")

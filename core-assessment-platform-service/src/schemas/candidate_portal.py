@@ -1,6 +1,7 @@
 """Candidate invite, session, and portal schemas."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -9,6 +10,7 @@ from schemas.assessments import (
     HiddenCheckResponse,
     HiddenFeedbackMode,
     SampleRunResponse,
+    SlotStatus,
     SubmissionStatus,
 )
 from schemas.question_bank import AnswerValidationMode, DifficultyLevel, TestCase
@@ -45,6 +47,7 @@ class CandidateInviteVerificationResponse(BaseModel):
     end_at: datetime
     allow_resume: bool
     status: CandidateAssessmentStatus
+    slot_status: SlotStatus
     can_start: bool
 
 
@@ -90,6 +93,10 @@ class CandidateQuestionDraftRecord(BaseModel):
     draft_code: str
     final_code: str
     status: SubmissionStatus
+    version: int = 0
+    sample_run_result: dict[str, object] = Field(default_factory=dict)
+    hidden_check_result: dict[str, object] = Field(default_factory=dict)
+    submission_result: dict[str, object] = Field(default_factory=dict)
     last_saved_at: datetime | None = None
     submitted_at: datetime | None = None
 
@@ -117,6 +124,7 @@ class CandidateAssessmentPortalResponse(BaseModel):
     deadline_at: datetime | None = None
     submitted_at: datetime | None = None
     status: CandidateAssessmentStatus
+    slot_status: SlotStatus
     current_question_order: int = 1
     time_remaining_seconds: int = 0
     tab_switch_count: int = 0
@@ -158,6 +166,7 @@ class CandidateCheckpointRequest(CandidateActivityEvidence):
     source_code: str = Field(default="", max_length=200_000)
     language: str = Field(min_length=1, max_length=40)
     current_question_order: int = Field(ge=1)
+    base_version: int | None = Field(default=None, ge=0)
 
 
 class CandidateCheckpointResponse(BaseModel):
@@ -166,6 +175,7 @@ class CandidateCheckpointResponse(BaseModel):
     question_id: str
     saved_at: datetime
     status: SubmissionStatus
+    version: int
 
 
 class CandidateCodeRunRequest(BaseModel):
@@ -174,6 +184,36 @@ class CandidateCodeRunRequest(BaseModel):
     question_id: str = Field(min_length=1)
     source_code: str = Field(min_length=1, max_length=200_000)
     language: str = Field(min_length=1, max_length=40)
+    base_version: int | None = Field(default=None, ge=0)
+
+
+class CandidateProctorEventRequest(BaseModel):
+    """One idempotent violation observed by the candidate browser."""
+
+    client_event_id: str = Field(min_length=8, max_length=80)
+    event_type: Literal[
+        "tab_hidden",
+        "window_blur",
+        "clipboard",
+        "fullscreen_exit",
+    ]
+    occurred_at: datetime
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_aware_occurred_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("occurred_at must include a UTC offset")
+        return value
+
+
+class CandidateProctorEventResponse(BaseModel):
+    """Authoritative cumulative violation counters after accepting an event."""
+
+    accepted: bool
+    tab_switch_count: int
+    copy_paste_count: int
+    fullscreen_exit_count: int
 
 
 class CandidateQuestionSubmitPayload(BaseModel):
@@ -215,6 +255,8 @@ __all__ = [
     "CandidateQuestionRecord",
     "CandidateQuestionSubmitPayload",
     "CandidateSessionClaims",
+    "CandidateProctorEventRequest",
+    "CandidateProctorEventResponse",
     "CandidateStartRequest",
     "CandidateStartResponse",
     "CandidateSubmitRequest",

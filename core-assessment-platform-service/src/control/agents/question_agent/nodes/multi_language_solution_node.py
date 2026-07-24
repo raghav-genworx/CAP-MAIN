@@ -31,7 +31,17 @@ class MultiLanguageSolutionNodeMixin(QuestionAgentToolsMixin):
         self,
         state: QuestionGenerationState,
     ) -> QuestionGenerationState:
-        """Generate and validate equivalent solutions after the primary passes."""
+        """NODE 9/12 — port the solution to the other supported languages.
+
+        GUARD: this node no-ops unless the primary solution already PASSED
+        validation (no point translating a broken solution).
+        Does: for each requested non-primary language, generate a solution with
+        an isolated LLM call, enforce the runnable-code contract, then validate
+        and repair it against the same tests (`_validate_and_repair_language_solution`).
+        Writes: additional entries in the `reference_solutions` map, each with
+        its own per-language validation status. Like validation, it streams
+        per-test progress over SSE.
+        """
 
         solution_validation = state.get("solution_validation")
         validation_status = state.get("validation_status")

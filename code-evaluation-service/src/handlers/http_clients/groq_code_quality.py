@@ -131,10 +131,18 @@ class GroqCodeQualityEvaluator:
         schema = json.dumps(AICodeQualitySignal.model_json_schema())
         return (
             "You are a strict, language-aware senior code reviewer. Assess only "
-            "observable code quality: approach clarity, algorithmic complexity, "
-            "readability, idiomatic structure, maintainability, and avoidable "
-            "risks. Do not infer hidden-test outcomes and do not reward verbosity. "
-            "Use the full 0-100 range and keep feedback concise and specific. "
+            "observable solution quality: algorithm choice, complexity, input "
+            "handling, edge-case handling, runtime/memory risks, and correctness "
+            "risks visible in the code. Do not evaluate or comment on comments, "
+            "variable naming, function/class organization, helper extraction, "
+            "whether code is inside a class, or other style-only preferences. "
+            "Do not use those style-only factors in the numeric score. Set "
+            "readability and maintainability fields to "
+            "'Style-only factors are not evaluated.' "
+            "Do not suggest adding comments, renaming variables, creating "
+            "functions/classes, or restructuring solely for readability. Do not "
+            "infer hidden-test outcomes and do not reward verbosity. Use the full "
+            "0-100 range and keep feedback concise and specific. "
             "Return JSON only, matching this schema exactly: "
             f"{schema}"
         )

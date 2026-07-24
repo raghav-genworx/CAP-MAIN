@@ -7,9 +7,9 @@ x-api-healthcheck: &api-healthcheck
     - -c
     - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
   interval: 30s
-  timeout: 5s
+  timeout: 30s
   retries: 5
-  start_period: 20s
+  start_period: 30s
 
 x-service-common-env: &service-common-env
   APP_ENV: ${APP_ENV:-development}
@@ -76,7 +76,7 @@ services:
       <<: *service-common-env
       APP_NAME: API Gateway Service
       CORE_SERVICE_BASE_URL: http://core-assessment-platform-service:8000
-      CODE_EXECUTION_SERVICE_BASE_URL: http://code-execution-service:8000
+      CODE_EXECUTION_SERVICE_BASE_URL: ${CODE_EXECUTION_SERVICE_BASE_URL:-http://code-execution-service:8000}
       CODE_EVALUATION_SERVICE_BASE_URL: http://code-evaluation-service:8000
       UPSTREAM_REQUEST_TIMEOUT_SECONDS: ${UPSTREAM_REQUEST_TIMEOUT_SECONDS:-10}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
@@ -84,12 +84,16 @@ services:
     depends_on:
       core-assessment-platform-service:
         condition: service_healthy
-      code-execution-service:
-        condition: service_healthy
       code-evaluation-service:
         condition: service_healthy
     ports:
       - "${API_GATEWAY_PORT:-8001}:8000"
+    volumes:
+      - ./api-gateway-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   core-assessment-migrate:
@@ -104,10 +108,7 @@ services:
       - ./core-assessment-platform-service/.env
     environment:
       APP_ENV: ${APP_ENV:-development}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
 
   core-assessment-platform-service:
     build:
@@ -119,11 +120,11 @@ services:
       <<: *service-common-env
       APP_NAME: Core Assessment Platform Service
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
       AUTO_CREATE_RECRUITER_ROLE: ${AUTO_CREATE_RECRUITER_ROLE:-true}
-      CODE_EXECUTION_API_BASE_URL: http://code-execution-service:8000/api/v1
-      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-90}
+      CODE_EXECUTION_API_BASE_URL: ${CODE_EXECUTION_API_BASE_URL:-http://code-execution-service:8000/api/v1}
+      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-300}
       CODE_EVALUATION_API_BASE_URL: http://code-evaluation-service:8000/api/v1
       CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -146,12 +147,16 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      code-execution-service:
-        condition: service_started
       code-evaluation-service:
         condition: service_started
     ports:
       - "${CORE_SERVICE_PORT:-8002}:8000"
+    volumes:
+      - ./core-assessment-platform-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
     healthcheck: *api-healthcheck
 
   code-execution-service:
@@ -171,8 +176,9 @@ services:
       JUDGE0_MAX_POLL_ATTEMPTS: ${JUDGE0_MAX_POLL_ATTEMPTS:-30}
       DEFAULT_CPU_TIME_LIMIT_SECONDS: ${DEFAULT_CPU_TIME_LIMIT_SECONDS:-2}
       DEFAULT_MEMORY_LIMIT_KB: ${DEFAULT_MEMORY_LIMIT_KB:-128000}
+      JAVA_MINIMUM_MEMORY_LIMIT_KB: ${JAVA_MINIMUM_MEMORY_LIMIT_KB:-512000}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -182,6 +188,12 @@ services:
         condition: service_healthy
     ports:
       - "${CODE_EXECUTION_PORT:-8003}:8000"
+    volumes:
+      - ./code-execution-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   code-evaluation-migrate:
@@ -193,11 +205,9 @@ services:
       - ./code-evaluation-service/.env
     environment:
       APP_ENV: ${APP_ENV:-development}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
-    depends_on:
-      postgres:
-        condition: service_healthy
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
 
   code-evaluation-service:
     build:
@@ -208,9 +218,10 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Code Evaluation Service
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       EVALUATION_REPORT_DIR: /app/data/reports
       SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
       EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
       EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
       EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
@@ -224,17 +235,18 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
     volumes:
       - cap-evaluation-data:/app/data
+      - ./code-evaluation-service/src:/app/src:ro
     depends_on:
-      postgres:
-        condition: service_healthy
       code-evaluation-migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      code-execution-service:
-        condition: service_healthy
     ports:
       - "${CODE_EVALUATION_PORT:-8004}:8000"
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   code-evaluation-worker:
@@ -247,9 +259,10 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Code Evaluation Worker
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       EVALUATION_REPORT_DIR: /app/data/reports
       SEED_DEMO_EVALUATIONS: "false"
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
       EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
       EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
       EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
@@ -262,6 +275,7 @@ services:
       GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
     volumes:
       - cap-evaluation-data:/app/data
+      - ./code-evaluation-service/src:/app/src:ro
     depends_on:
       code-evaluation-service:
         condition: service_healthy
@@ -269,18 +283,24 @@ services:
   frontend:
     build:
       context: ./frontend
-      secrets:
-        - frontend_env
+      target: development
     restart: unless-stopped
+    environment:
+      VITE_API_GATEWAY_BASE_URL: /api
+      VITE_DEV_PROXY_TARGET: http://api-gateway-service:8000
+      CHOKIDAR_USEPOLLING: "true"
     depends_on:
       api-gateway-service:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-5173}:8080"
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
     healthcheck:
       test:
         - CMD-SHELL
-        - wget -qO- http://127.0.0.1:8080/ >/dev/null
+        - wget -qO- http://127.0.0.1:5173/ >/dev/null
       interval: 30s
       timeout: 5s
       retries: 5
@@ -350,3 +370,4 @@ volumes:
   cap-postgres-data:
   cap-redis-data:
   cap-evaluation-data:
+  frontend-node-modules:

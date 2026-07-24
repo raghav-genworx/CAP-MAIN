@@ -1,4 +1,23 @@
-"""State and structured-output schemas for the question agent."""
+"""State and structured-output schemas for the question agent.
+
+=============================================================================
+Two DIFFERENT kinds of models live in this file — don't confuse them:
+
+1. `QuestionGenerationState` (bottom of file) — the ONE shared, mutable state
+   that flows through the whole LangGraph. Think of it as a blackboard: every
+   node reads what it needs and writes back a small patch. It is a TypedDict
+   with `total=False`, meaning every key is OPTIONAL — early nodes fill in the
+   basics (title, statement), later nodes add tests, solution, metadata, etc.
+
+2. The `*Output` Pydantic models (e.g. `ProblemStatementOutput`,
+   `SolutionOutput`) — strict schemas for a SINGLE LLM call. Each node asks the
+   model to return JSON matching one of these (`extra="forbid"` rejects any
+   stray fields), then copies the validated fields into the shared state.
+
+So the pattern for every node is:
+    LLM -> <SomethingOutput> (validated) -> copy fields into QuestionGenerationState
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -35,6 +54,15 @@ class ProblemStatementOutput(BaseModel):
     output_checker: str = ""
     output_checker_explanation: str = ""
     sample_test_cases: list[TestCase] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ProblemStatementOnlyOutput(BaseModel):
+    """Structured output when only the candidate-facing statement is requested."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    problem_statement: str = Field(min_length=20)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -228,60 +256,80 @@ class QualityOutput(BaseModel):
 
 
 class QuestionGenerationState(TypedDict, total=False):
-    """Mutable LangGraph state for a single question draft."""
+    """Mutable LangGraph state (the "blackboard") for a single question draft.
 
-    prompt: str
-    generation_scope: str
+    `total=False` => every field is optional. Fields are grouped below by which
+    node first populates them, so you can trace how the draft is built up as it
+    flows through the pipeline.
+    """
+
+    # ── Inputs / request context (set by `_build_initial_state`) ──────────────
+    prompt: str  # the recruiter's natural-language description
+    generation_scope: str  # "full" or a section like "problem"/"tests"/"solution"
     difficulty_hint: str
     title_hint: str
     focus_tags: list[str]
-    reference_language: str
-    target_language: str
-    generation_settings: QuestionGenerationSettings
-    existing_question_titles: list[str]
+    reference_language: str  # primary solution language, e.g. "python"
+    target_language: str  # a specific extra language to generate (optional)
+    generation_settings: QuestionGenerationSettings  # counts, limits, languages
+    existing_question_titles: list[str]  # used by duplicate_detection
     existing_question_tags: list[str]
     question_count: int
+
+    # ── Written by the problem_statement node ─────────────────────────────────
     title: str
     problem_statement: str
     topics: list[str]
     tags: list[str]
     category: str
-    constraints: str
     input_format: str
     input_explanation: str
     output_format: str
     output_explanation: str
-    answer_validation_mode: AnswerValidationMode | str
-    output_checker: str
+    answer_validation_mode: AnswerValidationMode | str  # exact / multiple_valid / ...
+    output_checker: str  # custom checker code for non-exact answers
     output_checker_explanation: str
-    difficulty: str
-    expected_solve_time_minutes: int
+
+    # ── Written by the constraints node ───────────────────────────────────────
+    constraints: str
     candidate_solve_time_minutes: int
     execution_time_limit_seconds: int
     memory_limit_mb: int
+
+    # ── Written by the metadata node ──────────────────────────────────────────
+    difficulty: str
+    expected_solve_time_minutes: int
     metadata_status: str
     difficulty_source: str
+
+    # ── Written by examples / hidden_tests / constraint_script nodes ──────────
     sample_test_cases: list[TestCase]
     hidden_test_cases: list[TestCase]
-    constraint_validation_script: str
+    constraint_validation_script: str  # generated Python validator for inputs
     constraint_validation_warnings: list[str]
-    reference_solution: str
-    reference_solutions: dict[str, ReferenceSolutionArtifact]
+
+    # ── Written by solution / validation / multi_language nodes ───────────────
+    reference_solution: str  # primary solution source code
+    reference_solutions: dict[str, ReferenceSolutionArtifact]  # per-language code
     supported_languages: list[str]
     validation_checks: list[str]
     validation_warnings: list[str]
-    validation_status: str
-    solution_validation: SolutionValidationReport
+    validation_status: str  # passed / failed / skipped
+    solution_validation: SolutionValidationReport  # per-test execution results
     solution_approach: str
     time_complexity: str
     space_complexity: str
+
+    # ── Written by duplicate_detection / quality_review nodes ─────────────────
     duplicate_warnings: list[str]
     quality_score: int
     readiness_score: int
     ai_confidence_score: int
-    notes: list[str]
-    execution_history: list[str]
-    summary: str
+
+    # ── Running logs appended by every node ───────────────────────────────────
+    notes: list[str]  # human-readable notes surfaced to the recruiter
+    execution_history: list[str]  # short per-node audit trail
+    summary: str  # final one-line summary of what was generated
 
 
 __all__ = [

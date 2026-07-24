@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -23,6 +24,7 @@ from reportlab.pdfbase.ttfonts import TTFont  # type: ignore[import-untyped]
 from reportlab.pdfgen.canvas import Canvas  # type: ignore[import-untyped]
 from reportlab.platypus import (  # type: ignore[import-untyped]
     HRFlowable,
+    KeepTogether,
     LongTable,
     PageBreak,
     Paragraph,
@@ -66,6 +68,37 @@ LINE = colors.HexColor("#D0D5DD")
 SOFT = colors.HexColor("#F7F9FC")
 PALE_BLUE = colors.HexColor("#EFF6FF")
 PALE_GREEN = colors.HexColor("#ECFDF3")
+STYLE_ONLY_REVIEW_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bcomments?\b",
+        r"\bdocstrings?\b",
+        r"\bvariable\s+nam(?:e|ing)s?\b",
+        r"\bnaming\b",
+        r"\brename\b",
+        r"\bcamelcase\b",
+        r"\bsnake[_\s-]?case\b",
+        r"\bhelper\s+functions?\b",
+        r"\bsplit\s+into\s+functions?\b",
+        r"\bextract\s+(?:a\s+)?functions?\b",
+        r"\bwrap\s+.*\bfunctions?\b",
+        r"\bclasses?\b",
+        r"\bclass-based\b",
+        r"\bobject[-\s]?oriented\b",
+        r"\bmodulari[sz]e\b",
+        r"\bformatting\b",
+        r"\bindentation\b",
+        r"\bcode\s+style\b",
+    )
+]
+HIDDEN_BREAKDOWN_KEYS = {
+    "comments",
+    "formatting",
+    "maintainability",
+    "naming",
+    "readability",
+    "style",
+}
 
 
 @dataclass(frozen=True)
@@ -227,7 +260,7 @@ class ReportPdfService:
                         f"{candidate.scores.coding_score:.1f}%",
                         TEAL,
                     ),
-                    ("AI quality", f"{candidate.scores.ai_score:.1f}%", GREEN),
+                    ("AI review", f"{candidate.scores.ai_score:.1f}%", GREEN),
                 ],
                 self._styles,
             ),
@@ -243,7 +276,7 @@ class ReportPdfService:
             Spacer(1, 5 * mm),
             self._benchmark_context(report.benchmark),
             Spacer(1, 7 * mm),
-            self._section_title("Code quality review", "04"),
+            self._section_title("AI solution review", "04"),
             self._ai_review(candidate),
             Spacer(1, 7 * mm),
             self._section_title("Question-wise performance", "05"),
@@ -269,15 +302,20 @@ class ReportPdfService:
                                 BLUE,
                             ),
                             (
-                                "Hidden / metrics / AI",
-                                f"{question.test_case_score:.0f}% / "
-                                f"{question.coding_score:.0f}% / "
-                                f"{question.ai_score:.0f}%",
+                                "Hidden score",
+                                f"{question.test_case_score:.0f}%",
                                 TEAL,
                             ),
+                            (
+                                "Coding metrics",
+                                f"{question.coding_score:.0f}%",
+                                TEAL,
+                            ),
+                            ("AI review", f"{question.ai_score:.0f}%", GREEN),
                             ("Language", question.language or candidate.language, TEAL),
                         ],
                         self._styles,
+                        columns=3,
                     ),
                     Spacer(1, 5 * mm),
                     self._question_context(question),
@@ -302,20 +340,33 @@ class ReportPdfService:
                         Spacer(1, 5 * mm),
                     ]
                 )
-            if question.suggested_solution or question.suggested_improvement_notes:
-                story.extend(
-                    [
-                        Paragraph("Suggested improvements", self._styles["h3"]),
-                        Spacer(1, 2 * mm),
-                        self._suggested_improvements(question),
-                        Spacer(1, 5 * mm),
-                    ]
+            filtered_notes = _filter_review_items(
+                question.suggested_improvement_notes or []
+            )
+            if question.suggested_solution or filtered_notes:
+                story.append(
+                    KeepTogether(
+                        [
+                            Paragraph("Suggested improvements", self._styles["h3"]),
+                            Spacer(1, 2 * mm),
+                            self._suggested_improvements(question, filtered_notes),
+                            Spacer(1, 5 * mm),
+                        ]
+                    )
                 )
             story.extend(
                 [
                     PageBreak(),
-                    Paragraph("Submitted source", self._styles["h3"]),
+                    Paragraph(
+                        "Submitted source and candidate approach",
+                        self._styles["h3"],
+                    ),
                     Spacer(1, 2 * mm),
+                    self._source_context_panel(
+                        question,
+                        question.ai_quality or candidate.ai_quality,
+                    ),
+                    Spacer(1, 4 * mm),
                 ]
             )
             story.extend(self._code_panels(question.submitted_code))
@@ -829,16 +880,6 @@ class ReportPdfService:
                     Paragraph(escape(quality.approach), self._styles["tableBody"]),
                 ],
                 [
-                    Paragraph("Readability", self._styles["metaLabel"]),
-                    Paragraph(escape(quality.readability), self._styles["tableBody"]),
-                ],
-                [
-                    Paragraph("Maintainability", self._styles["metaLabel"]),
-                    Paragraph(
-                        escape(quality.maintainability), self._styles["tableBody"]
-                    ),
-                ],
-                [
                     Paragraph("Complexity", self._styles["metaLabel"]),
                     Paragraph(
                         f"Time: {escape(quality.time_complexity)} &nbsp;&nbsp; "
@@ -874,16 +915,22 @@ class ReportPdfService:
             [
                 [
                     _bullet_panel(
-                        "Strengths", quality.strengths, PALE_GREEN, self._styles
+                        "Strengths",
+                        _filter_review_items(quality.strengths),
+                        PALE_GREEN,
+                        self._styles,
                     ),
                     _bullet_panel(
                         "Watch areas",
-                        quality.weaknesses,
+                        _filter_review_items(quality.weaknesses),
                         colors.HexColor("#FFF7ED"),
                         self._styles,
                     ),
                     _bullet_panel(
-                        "Improvements", quality.improvements, PALE_BLUE, self._styles
+                        "Improvements",
+                        _filter_review_items(quality.improvements),
+                        PALE_BLUE,
+                        self._styles,
                     ),
                 ]
             ],
@@ -1024,7 +1071,9 @@ class ReportPdfService:
                 [
                     Paragraph("Quality concerns", self._styles["metaLabel"]),
                     Paragraph(
-                        escape(_join_or_fallback(quality.weaknesses)),
+                        escape(
+                            _join_or_fallback(_filter_review_items(quality.weaknesses))
+                        ),
                         self._styles["tableBody"],
                     ),
                 ],
@@ -1032,9 +1081,10 @@ class ReportPdfService:
                     Paragraph("Why AI score may differ", self._styles["metaLabel"]),
                     Paragraph(
                         escape(
-                            "AI quality scores include readability, maintainability, "
-                            "complexity, and input/error handling, so a submission can "
-                            "pass hidden tests but still lose quality marks."
+                            "AI quality scores focus on algorithm choice, complexity, "
+                            "input handling, edge-case risks, and runtime/memory "
+                            "behavior, so a submission can pass hidden tests but still "
+                            "lose quality marks."
                         ),
                         self._styles["tableBody"],
                     ),
@@ -1161,7 +1211,7 @@ class ReportPdfService:
             font_size=7,
         )
 
-    def _suggested_improvements(self, question: Any) -> Any:
+    def _suggested_improvements(self, question: Any, notes: list[str]) -> Any:
         if question.suggested_solution:
             return Table(
                 [
@@ -1187,15 +1237,72 @@ class ReportPdfService:
                     ]
                 ),
             )
-        notes = question.suggested_improvement_notes or [
-            "No suggested improvement notes were supplied."
-        ]
+        notes = notes or ["No suggested improvement notes were supplied."]
         return _bullet_panel(
             "Suggested improvement notes",
             notes,
             PALE_BLUE,
             self._styles,
         )
+
+    def _source_context_panel(self, question: Any, quality: Any) -> Table:
+        """Show the candidate's inferred approach next to the submitted source."""
+
+        weaknesses = _filter_review_items(getattr(quality, "weaknesses", []) or [])
+        reviewer_focus = (
+            "; ".join(str(item).strip() for item in weaknesses[:3] if str(item).strip())
+            or "No major quality concerns recorded."
+        )
+        rows = [
+            [
+                Paragraph("Candidate approach", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(_summarize(getattr(quality, "approach", ""), 900)),
+                    self._styles["bodyLead"],
+                ),
+            ],
+            [
+                Paragraph("Complexity", self._styles["metaLabel"]),
+                Paragraph(
+                    "Time: "
+                    f"{escape(safe_text(getattr(quality, 'time_complexity', None)))}"
+                    " &nbsp;&nbsp; Space: "
+                    f"{escape(safe_text(getattr(quality, 'space_complexity', None)))}",
+                    self._styles["tableBody"],
+                ),
+            ],
+            [
+                Paragraph("Reviewer focus", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(_summarize(reviewer_focus, 700)),
+                    self._styles["tableBody"],
+                ),
+            ],
+            [
+                Paragraph("Question", self._styles["metaLabel"]),
+                Paragraph(
+                    escape(safe_text(getattr(question, "question_title", None))),
+                    self._styles["tableBody"],
+                ),
+            ],
+        ]
+        table = Table(rows, colWidths=[34 * mm, CONTENT_WIDTH - 34 * mm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), PALE_GREEN),
+                    ("BACKGROUND", (0, 0), (0, -1), SOFT),
+                    ("BOX", (0, 0), (-1, -1), 0.7, LINE),
+                    ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+        return table
 
     @staticmethod
     def _ai_quality_breakdown(quality: Any) -> str:
@@ -1204,8 +1311,6 @@ class ReportPdfService:
             return "(sub-score breakdown not available)"
         ordered_keys = [
             "correctness",
-            "readability",
-            "maintainability",
             "complexity",
             "error_handling",
             "input_handling",
@@ -1217,7 +1322,7 @@ class ReportPdfService:
         parts = [
             f"{labels.get(key, key.replace('_', ' '))}: {breakdown[key]:.0f}%"
             for key in ordered_keys
-            if key in breakdown
+            if key in breakdown and key.lower() not in HIDDEN_BREAKDOWN_KEYS
         ]
         return (
             f"({'; '.join(parts)})" if parts else "(sub-score breakdown not available)"
@@ -1748,3 +1853,12 @@ def _summarize(value: str, limit: int) -> str:
 def _join_or_fallback(items: list[str], fallback: str = "Not available") -> str:
     cleaned = [item.strip() for item in items if item.strip()]
     return "; ".join(cleaned) if cleaned else fallback
+
+
+def _filter_review_items(items: list[str]) -> list[str]:
+    return [
+        item.strip()
+        for item in items
+        if item.strip()
+        and not any(pattern.search(item) for pattern in STYLE_ONLY_REVIEW_PATTERNS)
+    ]
