@@ -18,6 +18,7 @@ from ..prompts.problem_statement_prompt import (
 )
 from ..states.question_state import (
     CheckerOutput,
+    ProblemStatementOnlyOutput,
     ProblemStatementOutput,
     QuestionGenerationState,
 )
@@ -50,6 +51,25 @@ class ProblemStatementNodeMixin(QuestionAgentToolsMixin):
             prompt=prompt,
             title_hint=title_hint,
         )
+        if state.get("generation_scope") == "problem":
+            statement_model = self._structured_completion(
+                schema_name="problem_statement_only",
+                schema_model=ProblemStatementOnlyOutput,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            return {
+                "problem_statement": statement_model.problem_statement.strip(),
+                "notes": self._append_notes(
+                    state.get("notes", []),
+                    *statement_model.notes,
+                ),
+                "execution_history": self._append_notes(
+                    state.get("execution_history", []),
+                    "Problem Statement Agent: generated only the problem statement",
+                ),
+            }
+
         model = self._structured_completion(
             schema_name="problem_statement",
             schema_model=ProblemStatementOutput,

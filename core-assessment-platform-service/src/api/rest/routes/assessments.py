@@ -1,13 +1,19 @@
 """Assessment recruiter routes."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from api.rest.dependencies import get_assessment_service, require_role
+from api.rest.dependencies import (
+    database_session_dependency,
+    get_assessment_service,
+    require_role,
+)
 from core.services.assessment_service import AssessmentService
 from schemas.assessments import (
     AssessmentCreateRequest,
@@ -552,38 +558,51 @@ async def slot_monitoring_stream(
         Depends(require_role(UserRole.RECRUITER)),
     ],
     service: Annotated[AssessmentService, Depends(get_assessment_service)],
+    session: Annotated[Session, Depends(database_session_dependency)],
     slot_id: str = Path(min_length=1),
 ) -> StreamingResponse:
-    initial_payload = await run_in_threadpool(
-        service.monitoring,
-        current_user.uid,
-        slot_id,
-    )
+    try:
+        initial_payload = await run_in_threadpool(
+            service.monitoring,
+            current_user.uid,
+            slot_id,
+        )
+    finally:
+        await run_in_threadpool(session.close)
+    # FastAPI keeps yielded dependencies alive until a StreamingResponse ends.
+    # Release the checked-out connection after each snapshot so long-lived SSE
+    # clients do not exhaust the SQLAlchemy pool.
 
-    async def monitoring_events():
+    async def monitoring_events() -> AsyncIterator[str]:
         last_payload = initial_payload.model_dump_json()
-        yield f"event: monitoring\ndata: {last_payload}\n\n"
+        yield f"retry: 3000\nevent: monitoring\ndata: {last_payload}\n\n"
 
-        while not await request.is_disconnected():
-            await asyncio.sleep(3)
-            payload = await run_in_threadpool(
-                service.monitoring,
-                current_user.uid,
-                slot_id,
-            )
-            serialized = payload.model_dump_json()
-            if serialized == last_payload:
-                yield "event: heartbeat\ndata: {}\n\n"
-                continue
+        try:
+            while not await request.is_disconnected():
+                await asyncio.sleep(3)
+                try:
+                    payload = await run_in_threadpool(
+                        service.monitoring,
+                        current_user.uid,
+                        slot_id,
+                    )
+                finally:
+                    await run_in_threadpool(session.close)
+                serialized = payload.model_dump_json()
+                if serialized == last_payload:
+                    yield "event: heartbeat\ndata: {}\n\n"
+                    continue
 
-            last_payload = serialized
-            yield f"event: monitoring\ndata: {serialized}\n\n"
+                last_payload = serialized
+                yield f"event: monitoring\ndata: {serialized}\n\n"
+        finally:
+            await run_in_threadpool(session.close)
 
     return StreamingResponse(
         monitoring_events(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },

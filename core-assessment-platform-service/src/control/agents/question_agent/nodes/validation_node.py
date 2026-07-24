@@ -15,6 +15,14 @@ from ..tools.question_tools import QuestionAgentToolsMixin
 class ValidationNodeMixin(QuestionAgentToolsMixin):
     """Validation node for the question agent."""
 
+    def _normalize_expected_outputs_with_oracle(
+        self,
+        state: QuestionGenerationState,
+    ) -> QuestionGenerationState:
+        """Return oracle-normalized tests in the concrete graph implementation."""
+
+        raise NotImplementedError
+
     def _validation_node(
         self, state: QuestionGenerationState
     ) -> QuestionGenerationState:

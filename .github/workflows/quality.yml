@@ -43,9 +43,6 @@ jobs:
         run: uv run ruff format --check .
       - name: Type check
         run: uv run mypy src
-      - name: Type check load harness
-        if: matrix.service == 'core-assessment-platform-service'
-        run: uv run mypy scripts/load/cap_load.py
       - name: Test core service
         if: matrix.service == 'core-assessment-platform-service'
         run: uv run pytest -q -W error

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { User } from "firebase/auth";
 
@@ -15,6 +16,7 @@ import {
   resendCandidateInvite,
   sendSlotInvites,
   setAssessmentQuestions,
+  streamSlotMonitoring,
   updateAssessment,
   updateAssessmentSlot,
 } from "../services/assessmentService";
@@ -242,11 +244,80 @@ export function useResendCandidateInvite(user: User | null) {
 }
 
 export function useSlotMonitoring(user: User | null, slotId: string | null) {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const [isStreaming, setIsStreaming] = useState(false);
+  const query = useQuery({
     queryKey: ["slot-monitoring", user?.uid, slotId],
     queryFn: async () =>
       fetchSlotMonitoring(await getRequiredIdToken(user), slotId || ""),
     enabled: Boolean(user && slotId),
-    refetchInterval: 15000,
+    refetchInterval: isStreaming ? false : 15000,
   });
+
+  useEffect(() => {
+    if (!user || !slotId) {
+      setIsStreaming(false);
+      return;
+    }
+
+    let active = true;
+    let reconnectDelayMs = 1000;
+    let reconnectTimer: number | undefined;
+    let controller: AbortController | undefined;
+
+    const connect = async () => {
+      controller = new AbortController();
+      try {
+        const idToken = await user.getIdToken();
+        await streamSlotMonitoring(
+          idToken,
+          slotId,
+          (payload) => {
+            if (!active) {
+              return;
+            }
+            reconnectDelayMs = 1000;
+            setIsStreaming(true);
+            queryClient.setQueryData(
+              ["slot-monitoring", user.uid, slotId],
+              payload,
+            );
+          },
+          () => {
+            if (active) {
+              setIsStreaming(true);
+            }
+          },
+          controller.signal,
+        );
+      } catch (error) {
+        if (active && !(error instanceof DOMException && error.name === "AbortError")) {
+          setIsStreaming(false);
+        }
+      }
+
+      if (!active) {
+        return;
+      }
+      setIsStreaming(false);
+      void queryClient.invalidateQueries({
+        queryKey: ["slot-monitoring", user.uid, slotId],
+      });
+      reconnectTimer = window.setTimeout(() => {
+        void connect();
+      }, reconnectDelayMs);
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 15000);
+    };
+
+    void connect();
+    return () => {
+      active = false;
+      controller?.abort();
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+      }
+    };
+  }, [queryClient, slotId, user]);
+
+  return { ...query, isStreaming };
 }

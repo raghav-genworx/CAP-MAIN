@@ -1738,7 +1738,7 @@ class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
                     token=result.token,
                     execution_time=result.execution_time,
                     memory_kb=result.memory_kb,
-            )
+                )
             case_results.append(case_result)
             outcome = self._validation_case_outcome(case_result)
             progress_context.callback(

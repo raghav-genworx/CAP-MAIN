@@ -1,4 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  ListChecks,
+  Plus,
+  Send,
+  Trash2,
+  Upload,
+  UserPlus,
+} from "lucide-react";
 
 import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
@@ -22,7 +30,6 @@ import {
 } from "./AssessmentStatusPrimitives";
 
 type CandidateEntryMode = "csv" | "manual";
-type CandidateStatusCounts = Record<CandidateAssessmentStatus, number>;
 
 function createManualCandidateRow(): ManualCandidateRow {
   return {
@@ -33,87 +40,9 @@ function createManualCandidateRow(): ManualCandidateRow {
   };
 }
 
-function createCandidateStatusCounts(): CandidateStatusCounts {
-  return {
-    not_started: 0,
-    in_progress: 0,
-    submitted: 0,
-    auto_submitted: 0,
-    revoked: 0,
-  };
-}
-
-function percentage(value: number, total: number) {
-  return total > 0
-    ? Math.min(100, Math.max(0, Math.round((value / total) * 100)))
-    : 0;
-}
-
-function CandidatePipelineCard({
-  candidates,
-}: {
-  candidates: SlotCandidate[];
-}) {
-  const counts = candidates.reduce((nextCounts, candidate) => {
-    nextCounts[candidate.assessment_status] += 1;
-    return nextCounts;
-  }, createCandidateStatusCounts());
-  const candidateCount = candidates.length;
-  const submittedCount = counts.submitted + counts.auto_submitted;
-  const inProgressCount = counts.in_progress;
-  const revokedCount = counts.revoked;
-  const notStartedCount = counts.not_started;
-  const completionRate = percentage(submittedCount, candidateCount);
-
-  return (
-    <Card className="assessment-panel candidate-pipeline-card">
-      <div className="dashboard-analytics-heading">
-        <div>
-          <p className="dashboard-eyebrow">Candidate pipeline</p>
-          <h2>Test candidate progress</h2>
-        </div>
-        <strong>{submittedCount}/{candidateCount}</strong>
-      </div>
-
-      {candidateCount ? (
-        <>
-          <div
-            className="dashboard-pipeline-bar"
-            aria-label={`${completionRate}% of candidates submitted`}
-          >
-            <span
-              className="is-submitted"
-              style={{ width: `${percentage(submittedCount, candidateCount)}%` }}
-            />
-            <span
-              className="is-progress"
-              style={{ width: `${percentage(inProgressCount, candidateCount)}%` }}
-            />
-            <span
-              className="is-not-started"
-              style={{ width: `${percentage(notStartedCount, candidateCount)}%` }}
-            />
-            <span
-              className="is-revoked"
-              style={{ width: `${percentage(revokedCount, candidateCount)}%` }}
-            />
-          </div>
-          <div className="dashboard-pipeline-legend">
-            <span className="is-submitted">Submitted <strong>{submittedCount}</strong></span>
-            <span className="is-progress">In progress <strong>{inProgressCount}</strong></span>
-            <span className="is-not-started">Not started <strong>{notStartedCount}</strong></span>
-            <span className="is-revoked">Revoked <strong>{revokedCount}</strong></span>
-          </div>
-        </>
-      ) : (
-        <p className="empty-state">Add candidates to see their test progress here.</p>
-      )}
-    </Card>
-  );
-}
-
 export function CandidatesTab({
   slot,
+  passingScore,
   candidateCsv,
   candidates,
   importPending,
@@ -128,6 +57,7 @@ export function CandidatesTab({
   onResend,
 }: {
   slot: AssessmentSlot;
+  passingScore: number;
   candidateCsv: string;
   candidates: SlotCandidate[];
   importPending: boolean;
@@ -217,42 +147,51 @@ export function CandidatesTab({
         .filter(Boolean)
         .join(" ")}
     >
-      <CandidatePipelineCard candidates={candidates} />
-
       <Card className="assessment-panel candidates-list-card">
         <div className="panel-heading candidates-list-heading">
           <div>
             <span>Candidate List</span>
             <h2>{candidates.length} candidates</h2>
-            <p>Select rows when you want to send invites to only a few people.</p>
           </div>
-          <Button
-            type="button"
-            onClick={() => setShowCandidateEntry(true)}
-            disabled={showCandidateEntry}
-          >
-            Add Candidate
-          </Button>
-        </div>
-        <div className="candidate-invite-actions">
-          <Button
-            type="button"
-            disabled={invitePending || candidates.length === 0}
-            onClick={() => onSendInvites()}
-          >
-            {invitePending ? "Sending invites..." : "Send invites"}
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={invitePending || selectedIds.length === 0}
-            onClick={() => onSendInvites(selectedIds)}
-          >
-            Send selected ({selectedIds.length})
-          </Button>
+          <div className="candidate-invite-actions">
+            <Button
+              type="button"
+              className="candidate-action-add"
+              variant={candidates.length ? "secondary" : "primary"}
+              onClick={() => setShowCandidateEntry(true)}
+              disabled={showCandidateEntry}
+            >
+              <UserPlus size={16} aria-hidden="true" />
+              Add Candidate
+            </Button>
+            <Button
+              type="button"
+              className="candidate-action-send-all"
+              disabled={invitePending || candidates.length === 0}
+              onClick={() => onSendInvites()}
+            >
+              <Send size={16} aria-hidden="true" />
+              {invitePending ? "Sending..." : "Send invites"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              className={
+                selectedIds.length
+                  ? "candidate-action-send-selected is-ready"
+                  : "candidate-action-send-selected"
+              }
+              disabled={invitePending || selectedIds.length === 0}
+              onClick={() => onSendInvites(selectedIds)}
+            >
+              <ListChecks size={16} aria-hidden="true" />
+              Send selected ({selectedIds.length})
+            </Button>
+          </div>
         </div>
         <CandidateTable
           candidates={candidates}
+          passingScore={passingScore}
           resendPendingId={resendPendingId}
           selectedCandidateIds={selectedCandidateIds}
           allSelected={allSelected}
@@ -263,12 +202,11 @@ export function CandidatesTab({
       </Card>
 
       {showCandidateEntry ? (
-        <Card className="assessment-panel candidate-import-card action-drawer-card">
+        <Card className="assessment-panel candidate-import-card candidate-import-popup">
           <div className="panel-heading">
             <div>
               <span>Candidate Setup</span>
               <h2>Add candidates</h2>
-              <p>Add an individual candidate first, or use group upload for batches.</p>
             </div>
             <div className="assessment-row-actions">
               <StatusBadge value={slot.status} />
@@ -307,6 +245,18 @@ export function CandidatesTab({
               <div className="manual-candidate-list">
                 {manualRows.map((row, index) => (
                   <div className="manual-candidate-row" key={row.row_id}>
+                    <div className="manual-candidate-row-heading">
+                      <strong>Candidate {index + 1}</strong>
+                      <button
+                        type="button"
+                        className="manual-candidate-delete"
+                        onClick={() => removeManualRow(row.row_id)}
+                        title={`Remove candidate ${index + 1}`}
+                        aria-label={`Remove candidate ${index + 1}`}
+                      >
+                        <Trash2 size={16} aria-hidden="true" />
+                      </button>
+                    </div>
                     <label className="field">
                       <span>Name</span>
                       <input
@@ -342,17 +292,10 @@ export function CandidatesTab({
                         }
                       />
                     </label>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={() => removeManualRow(row.row_id)}
-                    >
-                      Remove
-                    </Button>
                   </div>
                 ))}
               </div>
-              <div className="assessment-actions-row">
+              <div className="assessment-actions-row candidate-entry-actions">
                 <Button
                   type="button"
                   variant="secondary"
@@ -360,14 +303,16 @@ export function CandidatesTab({
                     setManualRows((current) => [...current, createManualCandidateRow()])
                   }
                 >
-                  Add another candidate
+                  <Plus size={16} aria-hidden="true" />
+                  Add another
                 </Button>
                 <Button
                   type="button"
                   onClick={() => onImport(manualCsv)}
                   disabled={importPending || !manualHasRows}
                 >
-                  {importPending ? "Importing..." : "Import Candidate"}
+                  <Upload size={16} aria-hidden="true" />
+                  {importPending ? "Importing..." : "Import candidates"}
                 </Button>
               </div>
             </div>
@@ -404,7 +349,8 @@ export function CandidatesTab({
                   onClick={() => onImport(candidateCsv)}
                   disabled={importPending || !candidateCsv.trim()}
                 >
-                  {importPending ? "Importing..." : "Import Group"}
+                  <Upload size={16} aria-hidden="true" />
+                  {importPending ? "Importing..." : "Import group"}
                 </Button>
               </div>
             </div>
@@ -429,6 +375,7 @@ export function CandidatesTab({
 
 function CandidateTable({
   candidates,
+  passingScore,
   resendPendingId,
   selectedCandidateIds,
   allSelected,
@@ -437,6 +384,7 @@ function CandidateTable({
   onResend,
 }: {
   candidates: SlotCandidate[];
+  passingScore: number;
   resendPendingId: string | null;
   selectedCandidateIds: Set<string>;
   allSelected: boolean;
@@ -445,7 +393,7 @@ function CandidateTable({
   onResend: (candidateAssessmentId: string) => void;
 }) {
   if (!candidates.length) {
-    return <EmptyState label="Imported candidates for this test will appear here." />;
+    return <EmptyState label="Imported candidates for this test slot will appear here." />;
   }
 
   return (
@@ -469,8 +417,14 @@ function CandidateTable({
           </tr>
         </thead>
         <tbody>
-          {candidates.map((candidate) => (
-            <tr key={candidate.candidate_assessment_id}>
+          {candidates.map((candidate) => {
+            const resultStatus = candidate.percentage === null
+              ? null
+              : candidate.percentage >= passingScore
+                ? "passed"
+                : "failed";
+            return (
+              <tr key={candidate.candidate_assessment_id}>
               <td className="candidate-select-cell">
                 <input
                   type="checkbox"
@@ -497,8 +451,11 @@ function CandidateTable({
               </td>
               <td>
                 <div className="status-with-dot">
-                  <HealthDot status={candidate.assessment_status} />
-                  <StatusBadge value={candidate.assessment_status} />
+                  <HealthDot status={resultStatus ?? candidate.assessment_status} />
+                  <StatusBadge value={resultStatus ?? candidate.assessment_status} />
+                  {candidate.percentage !== null ? (
+                    <small>{Math.round(candidate.percentage)}%</small>
+                  ) : null}
                 </div>
               </td>
               <td>{formatDateTime(candidate.last_activity_at)}</td>
@@ -526,8 +483,9 @@ function CandidateTable({
                   );
                 })()}
               </td>
-            </tr>
-          ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -537,10 +495,12 @@ function CandidateTable({
 export function LiveMonitoringTab({
   items,
   loading,
+  connected,
   liveSummary,
 }: {
   items: MonitoringCandidate[];
   loading: boolean;
+  connected: boolean;
   liveSummary?: {
     isLive: boolean;
     statusLabel: string;
@@ -565,7 +525,9 @@ export function LiveMonitoringTab({
           <span>Live Monitoring</span>
           <h2>Candidate Activity</h2>
         </div>
-        <strong>Refreshes every 15 seconds</strong>
+        <strong>
+          {connected ? "Live stream connected" : "Reconnecting · 15s fallback"}
+        </strong>
       </div>
 
       {liveSummary?.isLive ? (

@@ -20,6 +20,7 @@ import { RecruiterScorecardPreview } from "./RecruiterScorecardPreview";
 interface TestResultsTabProps {
   assessmentId: string;
   slotId: string;
+  passingScore: number;
   candidates: SlotCandidate[];
   backfillPending: boolean;
   backfillError: string;
@@ -32,6 +33,7 @@ interface TestResultsTabProps {
 export function TestResultsTab({
   assessmentId,
   slotId,
+  passingScore,
   candidates,
   backfillPending,
   backfillError,
@@ -58,9 +60,12 @@ export function TestResultsTab({
     }
     return first.name.localeCompare(second.name);
   });
-  const evaluatedCount = candidates.filter(
-    (candidate) => candidate.percentage !== null,
-  ).length;
+  const hasScorecard = (candidate: SlotCandidate) =>
+    candidate.percentage !== null &&
+    candidate.percentage >= passingScore &&
+    candidate.rank !== null;
+  const evaluatedCandidates = candidates.filter(hasScorecard);
+  const evaluatedCount = evaluatedCandidates.length;
   const submittedCount = candidates.filter((candidate) =>
     ["submitted", "auto_submitted"].includes(candidate.assessment_status),
   ).length;
@@ -68,11 +73,12 @@ export function TestResultsTab({
     .filter(
       (candidate) =>
         ["submitted", "auto_submitted"].includes(candidate.assessment_status) &&
-        candidate.percentage === null,
+        candidate.rank === null &&
+        (candidate.percentage === null || candidate.percentage >= passingScore),
     )
     .map((candidate) => candidate.candidate_assessment_id);
   const averageScore = evaluatedCount
-    ? candidates.reduce(
+    ? evaluatedCandidates.reduce(
         (total, candidate) => total + (candidate.percentage ?? 0),
         0,
       ) / evaluatedCount
@@ -278,7 +284,7 @@ export function TestResultsTab({
                       : "Not submitted"}
                   </td>
                   <td>
-                    {candidate.percentage !== null ? (
+                    {hasScorecard(candidate) ? (
                       <div className="assessment-row-actions compact-actions">
                         <Button
                           type="button"
@@ -307,12 +313,22 @@ export function TestResultsTab({
                         </button>
                       </div>
                     ) : (
-                      "-"
+                      candidate.percentage !== null &&
+                        candidate.percentage < passingScore
+                        ? "Not eligible"
+                        : "-"
                     )}
                   </td>
                   <td>
                     <StatusBadge
-                      value={candidate.percentage !== null ? "evaluated" : "pending"}
+                      value={
+                        candidate.percentage !== null &&
+                        candidate.percentage < passingScore
+                          ? "not_passed"
+                          : hasScorecard(candidate)
+                            ? "evaluated"
+                            : "pending"
+                      }
                     />
                   </td>
                 </tr>

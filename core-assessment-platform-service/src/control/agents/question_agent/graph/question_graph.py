@@ -178,7 +178,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         execution_adapter: ExecutionAdapterService,
     ) -> None:
         self._settings = settings
-        # LLM gateway: every node calls the model through this (via `_structured_completion`).
+        # Every node calls the model through this LLM gateway.
         self._ai_gateway = ai_gateway
         # Code runner (Judge0-style): used to actually EXECUTE reference solutions
         # against test cases during the validation node and QC repair loops.
@@ -912,11 +912,14 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
                 ),
             ),
         )
-        return self._structured_completion(
-            schema_name="oracle_testcase_review",
-            schema_model=ValidationOutput,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
+        return cast(
+            ValidationOutput,
+            self._structured_completion(
+                schema_name="oracle_testcase_review",
+                schema_model=ValidationOutput,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            ),
         )
 
     def _refine_oracle_solution_from_review(

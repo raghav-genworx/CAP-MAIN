@@ -38,6 +38,16 @@ class ExecutionLimitTests(TestCase):
         client = Judge0Client(settings)
         self.assertGreaterEqual(client._poll_attempt_budget(2), 30)
 
+    def test_batch_poll_budget_scales_with_submission_count(self) -> None:
+        settings = Settings(
+            judge0_poll_interval_seconds=0.5,
+            judge0_max_poll_attempts=30,
+            judge0_poll_margin_seconds=5,
+        )
+        client = Judge0Client(settings)
+        attempts = client._poll_attempt_budget(2, submission_count=10)
+        self.assertGreaterEqual(attempts * 0.5, 70)
+
     def test_java_receives_room_for_vm_overhead(self) -> None:
         service = CodeExecutionService(Settings(java_minimum_memory_limit_kb=512000))
         payload = service._build_payload(

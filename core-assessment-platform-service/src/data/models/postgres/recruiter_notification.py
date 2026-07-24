@@ -32,7 +32,7 @@ class RecruiterNotificationModel(Base):
     slot_id: Mapped[str | None] = mapped_column(String(36), index=True)
     candidate_assessment_id: Mapped[str | None] = mapped_column(String(36))
     group_key: Mapped[str | None] = mapped_column(String(160), index=True)
-    data: Mapped[dict] = mapped_column(
+    data: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
     is_read: Mapped[bool] = mapped_column(

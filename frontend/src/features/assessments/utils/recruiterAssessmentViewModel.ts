@@ -37,8 +37,9 @@ export function addMinutesToLocalInput(value: string, minutes: number) {
 export function nextAvailableTimeInput(
   timezoneName: string,
   offsetMinutes: number,
+  nowMs = Date.now(),
 ) {
-  const nextMinute = new Date(Math.ceil(Date.now() / MINUTE_MS) * MINUTE_MS);
+  const nextMinute = new Date(Math.ceil(nowMs / MINUTE_MS) * MINUTE_MS);
   return toTimezoneInputValue(nextMinute.toISOString(), timezoneName, offsetMinutes);
 }
 

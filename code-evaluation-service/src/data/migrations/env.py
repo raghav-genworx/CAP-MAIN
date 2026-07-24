@@ -4,9 +4,9 @@ from collections.abc import MutableMapping
 from logging.config import fileConfig
 from typing import Literal
 
+from alembic import context
 from sqlalchemy import engine_from_config, pool, text
 
-from alembic import context
 from config.settings import get_settings
 from data.models.postgres import Base
 from data.models.postgres.base import EVALUATION_SCHEMA

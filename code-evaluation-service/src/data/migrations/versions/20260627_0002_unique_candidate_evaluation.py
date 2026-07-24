@@ -8,6 +8,7 @@ Create Date: 2026-06-27
 from collections.abc import Sequence
 
 from alembic import op
+
 from data.models.postgres.base import EVALUATION_SCHEMA
 
 revision: str = "20260627_0002"

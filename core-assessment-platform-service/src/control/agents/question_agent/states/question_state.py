@@ -57,6 +57,15 @@ class ProblemStatementOutput(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ProblemStatementOnlyOutput(BaseModel):
+    """Structured output when only the candidate-facing statement is requested."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    problem_statement: str = Field(min_length=20)
+    notes: list[str] = Field(default_factory=list)
+
+
 class CheckerOutput(BaseModel):
     """Structured output for the output checker generator."""
 

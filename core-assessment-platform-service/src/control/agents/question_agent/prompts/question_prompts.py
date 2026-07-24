@@ -43,10 +43,7 @@ SCOPE_NODE_SEQUENCE: dict[str, list[str]] = {
 # the same scope names as SCOPE_NODE_SEQUENCE above.
 SCOPE_SUMMARIES: dict[str, str] = {
     "basics": "Generated starter title/context from your description.",
-    "problem": (
-        "Generated the problem statement, I/O formats, and constraints from "
-        "your description."
-    ),
+    "problem": "Generated only the problem statement from your description.",
     "problem_field": (
         "Completed the requested problem section using the current context."
     ),

@@ -11,6 +11,7 @@ const STATUS_TONES: Record<string, StatusTone> = {
   failed: "danger",
   in_progress: "info",
   live: "success",
+  not_passed: "warning",
   passed: "success",
   published: "success",
   revoked: "danger",

@@ -27,8 +27,6 @@ x-judge0-slim-build: &judge0-slim-build
 
 services:
   postgres:
-    profiles:
-      - local-infra
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-cap_core}
@@ -90,6 +88,12 @@ services:
         condition: service_healthy
     ports:
       - "${API_GATEWAY_PORT:-8001}:8000"
+    volumes:
+      - ./api-gateway-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   core-assessment-migrate:
@@ -120,7 +124,7 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
       AUTO_CREATE_RECRUITER_ROLE: ${AUTO_CREATE_RECRUITER_ROLE:-true}
       CODE_EXECUTION_API_BASE_URL: ${CODE_EXECUTION_API_BASE_URL:-http://code-execution-service:8000/api/v1}
-      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-90}
+      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-300}
       CODE_EVALUATION_API_BASE_URL: http://code-evaluation-service:8000/api/v1
       CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -147,11 +151,15 @@ services:
         condition: service_started
     ports:
       - "${CORE_SERVICE_PORT:-8002}:8000"
+    volumes:
+      - ./core-assessment-platform-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
     healthcheck: *api-healthcheck
 
   code-execution-service:
-    profiles:
-      - local-infra
     build:
       context: ./code-execution-service
     restart: unless-stopped
@@ -180,6 +188,12 @@ services:
         condition: service_healthy
     ports:
       - "${CODE_EXECUTION_PORT:-8003}:8000"
+    volumes:
+      - ./code-execution-service/src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   code-evaluation-migrate:
@@ -221,6 +235,7 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
     volumes:
       - cap-evaluation-data:/app/data
+      - ./code-evaluation-service/src:/app/src:ro
     depends_on:
       code-evaluation-migrate:
         condition: service_completed_successfully
@@ -228,6 +243,10 @@ services:
         condition: service_healthy
     ports:
       - "${CODE_EVALUATION_PORT:-8004}:8000"
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck: *api-healthcheck
 
   code-evaluation-worker:
@@ -256,6 +275,7 @@ services:
       GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
     volumes:
       - cap-evaluation-data:/app/data
+      - ./code-evaluation-service/src:/app/src:ro
     depends_on:
       code-evaluation-service:
         condition: service_healthy
@@ -263,27 +283,29 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        VITE_API_GATEWAY_BASE_URL: /api/v1
-      secrets:
-        - frontend_env
+      target: development
     restart: unless-stopped
+    environment:
+      VITE_API_GATEWAY_BASE_URL: /api
+      VITE_DEV_PROXY_TARGET: http://api-gateway-service:8000
+      CHOKIDAR_USEPOLLING: "true"
     depends_on:
       api-gateway-service:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
     healthcheck:
       test:
         - CMD-SHELL
-        - wget -qO- http://127.0.0.1:80/ >/dev/null
+        - wget -qO- http://127.0.0.1:5173/ >/dev/null
       interval: 30s
       timeout: 5s
       retries: 5
 
   judge0-server:
-    profiles:
-      - local-infra
     image: cap/judge0-slim:local
     build: *judge0-slim-build
     volumes:
@@ -316,8 +338,6 @@ services:
       start_period: 60s
 
   judge0-worker:
-    profiles:
-      - local-infra
     image: cap/judge0-slim:local
     build: *judge0-slim-build
     command: [ "./scripts/workers" ]
@@ -350,3 +370,4 @@ volumes:
   cap-postgres-data:
   cap-redis-data:
   cap-evaluation-data:
+  frontend-node-modules:

@@ -11,17 +11,47 @@ from core.exceptions.assessment import (
     CandidateInviteError,
 )
 from core.services.assessment_lifecycle import effective_slot_status
+from core.services.assessment_schedule import normalize_assessment_schedule
 from core.services.assessment_service import (
     AssessmentService,
     CandidateAssessmentContext,
 )
 from data.models.postgres.assessment_slot import AssessmentSlotModel
 from data.models.postgres.submission import SubmissionModel
-from schemas.assessments import AssessmentCreateRequest, SlotStatus
+from schemas.assessments import (
+    AssessmentCreateRequest,
+    SlotStatus,
+    SubmissionExecutionSummary,
+)
 from schemas.candidate_portal import CandidateCheckpointRequest
 
 
 class ConsolidatedFixesTests(TestCase):
+    def test_new_slot_rejects_a_past_start(self) -> None:
+        now = datetime.now(UTC)
+        with self.assertRaisesRegex(
+            AssessmentValidationError,
+            "start time cannot be in the past",
+        ):
+            normalize_assessment_schedule(
+                start_at=now - timedelta(hours=2),
+                end_at=now - timedelta(hours=1),
+                timezone_name="UTC",
+                duration_minutes=60,
+                reject_past_start=True,
+            )
+
+    def test_existing_slot_allows_a_past_start(self) -> None:
+        now = datetime.now(UTC)
+        schedule = normalize_assessment_schedule(
+            start_at=now - timedelta(hours=2),
+            end_at=now - timedelta(hours=1),
+            timezone_name="UTC",
+            duration_minutes=60,
+            reject_past_start=False,
+        )
+        self.assertLess(schedule.start_at, now)
+
     def test_passing_score_must_be_above_zero(self) -> None:
         with self.assertRaises(ValidationError):
             AssessmentCreateRequest(title="Backend test", passing_score=0)
@@ -115,3 +145,28 @@ class ConsolidatedFixesTests(TestCase):
                 ["python", "java"],
                 questions,
             )
+
+    def test_initial_screen_score_is_weighted_by_question_marks(self) -> None:
+        earned_score, percentage = AssessmentService._initial_screen_score(
+            [
+                SimpleNamespace(question_id="easy", marks=20),
+                SimpleNamespace(question_id="hard", marks=80),
+            ],
+            [
+                SubmissionExecutionSummary(
+                    question_id="easy",
+                    passed_count=2,
+                    total_count=2,
+                    results=[],
+                ),
+                SubmissionExecutionSummary(
+                    question_id="hard",
+                    passed_count=2,
+                    total_count=4,
+                    results=[],
+                ),
+            ],
+        )
+
+        self.assertEqual(earned_score, 60)
+        self.assertEqual(percentage, 60)

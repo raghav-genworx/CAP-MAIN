@@ -441,11 +441,7 @@ class AssessmentService:
                 if payload.duration_minutes is not None
                 else slot.duration_minutes
             ),
-            reject_past_start=(
-                payload.start_at is not None
-                and payload.start_at.astimezone(UTC)
-                != slot.start_at.astimezone(UTC)
-            ),
+            reject_past_start=False,
         )
 
         if payload.title is not None:
@@ -794,6 +790,11 @@ class AssessmentService:
         """Return one candidate scorecard after verifying assessment ownership."""
 
         assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
+        self._require_scorecard_eligible_candidate(
+            recruiter_uid=recruiter_uid,
+            assessment=assessment,
+            candidate_assessment_id=candidate_assessment_id,
+        )
         try:
             return self._evaluation_adapter.get_candidate_report(
                 assessment_id,
@@ -895,7 +896,12 @@ class AssessmentService:
     ) -> EvaluationReportDownload:
         """Download a candidate PDF after verifying assessment ownership."""
 
-        self._require_owned_assessment(recruiter_uid, assessment_id)
+        assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
+        self._require_scorecard_eligible_candidate(
+            recruiter_uid=recruiter_uid,
+            assessment=assessment,
+            candidate_assessment_id=candidate_assessment_id,
+        )
         return self._evaluation_adapter.download_candidate_report(
             assessment_id,
             candidate_assessment_id,
@@ -909,11 +915,18 @@ class AssessmentService:
     ) -> EvaluationReportDownload:
         """Download a report scoped to one recruiter-owned scheduled test."""
 
-        self._require_owned_assessment(recruiter_uid, assessment_id)
+        assessment = self._require_owned_assessment(recruiter_uid, assessment_id)
         slot = self._get_slot(recruiter_uid, slot_id)
         if slot is None or slot.assessment_id != assessment_id:
             raise AssessmentNotFoundError("Test not found")
         candidates = self._slot_candidate_assignments(recruiter_uid, slot_id)
+        scorecard_candidate_ids = [
+            candidate.candidate_assessment_id
+            for candidate in candidates
+            if candidate.percentage is not None
+            and candidate.percentage >= assessment.passing_score
+            and candidate.rank is not None
+        ]
         submitted_statuses = {
             CandidateAssessmentStatus.SUBMITTED,
             CandidateAssessmentStatus.AUTO_SUBMITTED,
@@ -935,9 +948,7 @@ class AssessmentService:
                     for candidate in candidates
                     if candidate.assessment_status in submitted_statuses
                 ),
-                "candidate_assessment_ids": [
-                    candidate.candidate_assessment_id for candidate in candidates
-                ],
+                "candidate_assessment_ids": scorecard_candidate_ids,
             },
         )
 
@@ -1492,6 +1503,10 @@ class AssessmentService:
     def monitoring(self, recruiter_uid: str, slot_id: str) -> MonitoringResponse:
         """Return recruiter-visible monitoring for a slot."""
 
+        # SSE reuses this service and SQLAlchemy session for the stream lifetime.
+        # Expire the identity map so candidate updates committed by other requests
+        # are visible on every snapshot instead of serving cached ORM objects.
+        self._repository.expire_all()
         slot = self._get_slot(recruiter_uid, slot_id)
         if slot is None:
             raise AssessmentNotFoundError("Assessment slot not found")
@@ -1957,8 +1972,7 @@ class AssessmentService:
             slot_status = effective_slot_status(context.slot)
             deadline = context.candidate_assessment.deadline_at
             if slot_status == SlotStatus.CLOSED or (
-                deadline is not None
-                and datetime.now(UTC) > deadline.astimezone(UTC)
+                deadline is not None and datetime.now(UTC) > deadline.astimezone(UTC)
             ):
                 self._auto_submit_if_expired(context)
                 return self.submit_assessment(claims, payload, auto_submit=True)
@@ -2043,23 +2057,10 @@ class AssessmentService:
                 )
             )
 
-        total_possible_score = (
-            sum(float(getattr(mapping, "marks", 1)) for mapping in delivered_mappings)
-            or 1
+        earned_score, percentage = self._initial_screen_score(
+            delivered_mappings,
+            summaries,
         )
-        earned_score = 0.0
-        summary_by_question = {summary.question_id: summary for summary in summaries}
-        for mapping in delivered_mappings:
-            summary = summary_by_question.get(mapping.question_id)
-            if summary is None:
-                continue
-            pass_ratio = (
-                summary.passed_count / summary.total_count
-                if summary.total_count > 0
-                else 0.0
-            )
-            earned_score += float(getattr(mapping, "marks", 1)) * pass_ratio
-        percentage = (earned_score / total_possible_score) * 100
         passed_initial_screen = percentage >= float(
             getattr(context.assessment, "passing_score", 0),
         )
@@ -2068,7 +2069,7 @@ class AssessmentService:
             self._get_submission_for_question(context, question.id).final_code.strip()
             for question in delivered_questions
         )
-        if summaries and has_submitted_source:
+        if passed_initial_screen and summaries and has_submitted_source:
             try:
                 evaluation_job = self._evaluation_adapter.create_job(
                     self._evaluation_payload_from_context(
@@ -2235,6 +2236,26 @@ class AssessmentService:
                 message="No final hidden execution evidence could be produced.",
             )
 
+        earned_score, percentage = self._initial_screen_score(
+            delivered_mappings,
+            summaries,
+        )
+        passing_score = float(getattr(context.assessment, "passing_score", 0))
+        if percentage < passing_score:
+            assignment.total_score = earned_score
+            assignment.percentage = percentage
+            assignment.rank = None
+            for submission in delivered_submissions:
+                submission.status = SubmissionStatus.SKIPPED_EVALUATION.value
+            return EvaluationBackfillCandidateResult(
+                candidate_assessment_id=assignment.id,
+                status="skipped",
+                message=(
+                    f"Initial score {percentage:.2f}% did not meet the "
+                    f"{passing_score:.2f}% pass mark; no scorecard was created."
+                ),
+            )
+
         try:
             evaluation_payload = self._evaluation_payload_from_context(
                 context=context,
@@ -2292,6 +2313,61 @@ class AssessmentService:
             final_score=evaluation_job.result.scores.final_score,
             rank=evaluation_job.result.rank,
         )
+
+    @staticmethod
+    def _initial_screen_score(
+        mappings: list[Any],
+        summaries: list[SubmissionExecutionSummary],
+    ) -> tuple[float, float]:
+        """Return the weighted hidden-test score used to gate evaluation."""
+
+        total_possible_score = (
+            sum(float(getattr(mapping, "marks", 1)) for mapping in mappings) or 1
+        )
+        summary_by_question = {summary.question_id: summary for summary in summaries}
+        earned_score = 0.0
+        for mapping in mappings:
+            summary = summary_by_question.get(mapping.question_id)
+            if summary is None:
+                continue
+            pass_ratio = (
+                summary.passed_count / summary.total_count
+                if summary.total_count > 0
+                else 0.0
+            )
+            earned_score += float(getattr(mapping, "marks", 1)) * pass_ratio
+        percentage = (earned_score / total_possible_score) * 100
+        return earned_score, percentage
+
+    def _require_scorecard_eligible_candidate(
+        self,
+        *,
+        recruiter_uid: str,
+        assessment: AssessmentTemplateModel,
+        candidate_assessment_id: str,
+    ) -> CandidateAssessmentModel:
+        """Reject scorecard access when the candidate did not meet the pass mark."""
+
+        try:
+            assignment = self._repository.get_candidate_assignment(
+                recruiter_uid=recruiter_uid,
+                candidate_assessment_id=candidate_assessment_id,
+            )
+        except SQLAlchemyError as exc:
+            raise AssessmentStoreUnavailableError(
+                "Unable to read candidate assessment"
+            ) from exc
+        if assignment is None or assignment.assessment_id != assessment.id:
+            raise AssessmentNotFoundError("Candidate assessment not found")
+        if (
+            assignment.percentage is not None
+            and assignment.percentage < assessment.passing_score
+        ):
+            raise EvaluationResourceNotFoundError(
+                "Scorecard is not available because the candidate did not meet "
+                "the assessment pass mark."
+            )
+        return assignment
 
     def _notify_candidate_events(
         self,
@@ -2465,9 +2541,7 @@ class AssessmentService:
             time_limit_seconds=(
                 getattr(question, "execution_time_limit_seconds", 2) or 2
             ),
-            memory_limit_kb=(
-                (getattr(question, "memory_limit_mb", 256) or 256) * 1024
-            ),
+            memory_limit_kb=((getattr(question, "memory_limit_mb", 256) or 256) * 1024),
         )
         return self._score_results_for_question(question, results)
 
@@ -3246,8 +3320,8 @@ class AssessmentService:
         submission: SubmissionModel,
     ) -> dict[str, object]:
         result = dict(submission.final_hidden_result or {})
-        passed_count = int(result.get("passed_count") or 0)
-        total_count = int(result.get("total_count") or 0)
+        passed_count = int(str(result.get("passed_count") or 0))
+        total_count = int(str(result.get("total_count") or 0))
         return {
             "status": submission.status,
             "passed_count": passed_count,

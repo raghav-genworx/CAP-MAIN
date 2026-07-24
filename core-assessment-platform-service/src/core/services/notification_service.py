@@ -299,8 +299,7 @@ class NotificationService:
                     type=NotificationType.EVALUATION_PER_CANDIDATE,
                     title=f"{candidate_name}'s submission was evaluated",
                     body=(
-                        f"{evaluated} of {submitted} submissions "
-                        f"evaluated for {label}."
+                        f"{evaluated} of {submitted} submissions evaluated for {label}."
                     ),
                     data=data,
                     **base,
@@ -355,9 +354,7 @@ class NotificationService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _effective_settings(
-        self, recruiter_uid: str
-    ) -> EffectiveNotificationSettings:
+    def _effective_settings(self, recruiter_uid: str) -> EffectiveNotificationSettings:
         model = self._repository.get_settings(recruiter_uid)
         if model is None:
             return EffectiveNotificationSettings(

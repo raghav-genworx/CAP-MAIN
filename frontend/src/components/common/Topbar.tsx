@@ -1,7 +1,8 @@
-import { Bell, ChevronDown, LogOut } from "lucide-react";
+import { ChevronDown, LogOut } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../../features/auth";
+import { NotificationBell } from "../../features/notifications";
 
 export function Topbar() {
   const navigate = useNavigate();
@@ -32,14 +33,7 @@ export function Topbar() {
       </Link>
 
       <div className="topbar-actions">
-        <button
-          type="button"
-          className="icon-button"
-          title="Notifications"
-          aria-label="Notifications"
-        >
-          <Bell size={18} aria-hidden="true" />
-        </button>
+        <NotificationBell />
 
         <details className="topbar-user-menu">
           <summary aria-label="Open account menu">

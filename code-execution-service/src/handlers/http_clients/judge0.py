@@ -163,7 +163,12 @@ class Judge0Client:
     ) -> list[Judge0SubmissionResult]:
         token_set = set(tokens)
         latest_by_token: dict[str, Judge0SubmissionResult] = {}
-        for _ in range(self._poll_attempt_budget(cpu_time_limit)):
+        for _ in range(
+            self._poll_attempt_budget(
+                cpu_time_limit,
+                submission_count=len(tokens),
+            )
+        ):
             results = await self._get_batch_submission(client, tokens)
             latest_by_token = {
                 result.token: result for result in results if result.token in token_set
@@ -176,19 +181,23 @@ class Judge0Client:
                 result.status is not None and result.status.id not in PENDING_STATUS_IDS
                 for result in latest_by_token.values()
             ):
-                return [
-                    self._decode_result(latest_by_token[token]) for token in tokens
-                ]
+                return [self._decode_result(latest_by_token[token]) for token in tokens]
             await asyncio.sleep(self._poll_interval)
         raise CodeExecutionTimeoutError()
 
-    def _poll_attempt_budget(self, cpu_time_limit: float) -> int:
-        """Allow legitimate runs their configured limit plus an overhead margin."""
+    def _poll_attempt_budget(
+        self,
+        cpu_time_limit: float,
+        submission_count: int = 1,
+    ) -> int:
+        """Allow queued batch submissions enough aggregate processing time."""
 
         configured_window = self._max_poll_attempts * self._poll_interval
+        normalized_count = max(1, submission_count)
         required_window = max(
             configured_window,
-            cpu_time_limit + self._settings.judge0_poll_margin_seconds,
+            (cpu_time_limit + self._settings.judge0_poll_margin_seconds)
+            * normalized_count,
         )
         return max(1, int(required_window / self._poll_interval) + 1)
 

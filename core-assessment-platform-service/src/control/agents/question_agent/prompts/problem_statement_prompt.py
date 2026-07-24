@@ -18,6 +18,45 @@ def build_problem_statement_prompt(
     prompt: str,
     title_hint: str,
 ) -> tuple[str, str]:
+    if state.get("generation_scope") == "problem":
+        system_prompt = build_task_system_prompt(
+            role="coding-problem statement editor",
+            objective=(
+                "Write only the self-contained candidate-facing problem statement "
+                "while preserving explicit recruiter facts."
+            ),
+            rules=(
+                (
+                    "Do not generate or revise the title, formats, constraints, "
+                    "metadata, tests, or validation rules."
+                ),
+                (
+                    "Describe the required behavior clearly without inventing "
+                    "hidden requirements."
+                ),
+                "Use complete-program STDIN/STDOUT semantics, not function signatures.",
+            ),
+        )
+        user_prompt = build_task_user_prompt(
+            task="Generate or refine only the problem_statement field.",
+            context={
+                "recruiter_request": parse_recruiter_request(prompt),
+                "title": title_hint or state.get("title", ""),
+                "current_problem_statement": state.get("problem_statement", ""),
+                "focus_tags": state.get("focus_tags", []),
+            },
+            requirements=(
+                "Return only problem_statement and notes.",
+                "Make the statement self-contained, precise, and candidate-facing.",
+                (
+                    "Do not include input format, output format, constraints, "
+                    "examples, solutions, or metadata."
+                ),
+                "Use notes only for material assumptions or unresolved ambiguity.",
+            ),
+        )
+        return system_prompt, user_prompt
+
     system_prompt = build_task_system_prompt(
         role="coding-problem specification editor",
         objective=(

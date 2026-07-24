@@ -1,6 +1,7 @@
 """Business logic for candidate evaluation and recruiter scorecards."""
 
 import logging
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -40,6 +41,30 @@ from schemas.evaluation import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+STYLE_ONLY_REVIEW_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bcomments?\b",
+        r"\bdocstrings?\b",
+        r"\bvariable\s+nam(?:e|ing)\b",
+        r"\bnaming\b",
+        r"\brename\b",
+        r"\bcamelcase\b",
+        r"\bsnake_case\b",
+        r"\bhelper\s+functions?\b",
+        r"\bsplit\s+into\s+functions?\b",
+        r"\bextract\s+(?:a\s+)?functions?\b",
+        r"\bwrap\s+.*\bfunctions?\b",
+        r"\bclasses?\b",
+        r"\bclass-based\b",
+        r"\bobject-oriented\b",
+        r"\bmodulari[sz]e\b",
+        r"\bformatting\b",
+        r"\bindentation\b",
+        r"\bcode\s+style\b",
+    )
+)
 
 
 class EvaluationService:
@@ -724,12 +749,14 @@ class EvaluationService:
         use_request_quality: bool,
     ) -> AICodeQualitySignal:
         if use_request_quality and request.ai_quality is not None:
-            return request.ai_quality
+            return _sanitize_ai_quality(request.ai_quality)
         if self._code_quality_evaluator is not None:
             try:
-                return self._code_quality_evaluator.evaluate(
-                    language=submission.language,
-                    source_code=submission.source_code,
+                return _sanitize_ai_quality(
+                    self._code_quality_evaluator.evaluate(
+                        language=submission.language,
+                        source_code=submission.source_code,
+                    )
                 )
             except Exception as exc:
                 LOGGER.warning(
@@ -738,10 +765,12 @@ class EvaluationService:
                     request.candidate_assessment_id,
                     type(exc).__name__,
                 )
-        return self._heuristic_ai_quality(
-            submission.source_code,
-            test_case_score,
-            coding_score,
+        return _sanitize_ai_quality(
+            self._heuristic_ai_quality(
+                submission.source_code,
+                test_case_score,
+                coding_score,
+            )
         )
 
     @staticmethod
@@ -768,7 +797,7 @@ class EvaluationService:
         def unique_values(attribute: str) -> list[str]:
             values: list[str] = []
             for quality in qualities:
-                for value in getattr(quality, attribute):
+                for value in _filter_review_items(getattr(quality, attribute)):
                     if value not in values:
                         values.append(value)
             return values[:6]
@@ -778,8 +807,8 @@ class EvaluationService:
             approach=f"Aggregated from {len(qualities)} question-level code reviews.",
             time_complexity="See each question's code-quality review.",
             space_complexity="See each question's code-quality review.",
-            readability="Aggregated across answered questions.",
-            maintainability="Aggregated across answered questions.",
+            readability="Style-only factors are not evaluated.",
+            maintainability="Style-only factors are not evaluated.",
             strengths=unique_values("strengths"),
             weaknesses=unique_values("weaknesses"),
             improvements=unique_values("improvements"),
@@ -791,48 +820,26 @@ class EvaluationService:
         test_case_score: float,
         coding_score: float,
     ) -> AICodeQualitySignal:
-        lines = [
-            line
-            for line in source_code.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        has_function = any(
-            token in source_code for token in ("def ", "class ", "public ", "int main")
-        )
         nesting_hits = source_code.count("for ") + source_code.count("while ")
-        line_score = 100 if len(lines) <= 90 else max(60, 110 - len(lines) * 0.55)
-        structure_score = 10 if has_function else -8
         complexity_penalty = max(0, nesting_hits - 3) * 4
+        complexity_score = max(0, 20 - complexity_penalty)
         score = max(
             0,
             min(
                 100,
-                (test_case_score * 0.35)
-                + (coding_score * 0.25)
-                + (line_score * 0.25)
-                + 15
-                + structure_score
-                - complexity_penalty,
+                (test_case_score * 0.45) + (coding_score * 0.35) + complexity_score,
             ),
         )
         return AICodeQualitySignal(
             score=round(score, 2),
             approach=(
                 "Fallback quality estimate based on hidden correctness, execution "
-                "stability, and observable code structure."
+                "stability, and loop complexity risk."
             ),
-            time_complexity="Estimated from implementation structure",
-            space_complexity="Estimated from memory usage and code structure",
-            readability=(
-                "Readable structure detected."
-                if has_function
-                else "Readable enough for MVP scoring, but structure can improve."
-            ),
-            maintainability=(
-                "Keeps the solution compact and reviewable."
-                if len(lines) <= 90
-                else "Long implementation; consider extracting helpers."
-            ),
+            time_complexity="Estimated from loop usage",
+            space_complexity="Estimated from submitted memory evidence where available",
+            readability="Style-only factors are not evaluated.",
+            maintainability="Style-only factors are not evaluated.",
             strengths=[
                 "Final score uses hidden execution evidence.",
                 "Execution stability is included in the quality signal.",
@@ -1041,8 +1048,8 @@ class EvaluationService:
                     approach="Uses a direct algorithm with clear control flow.",
                     time_complexity="O(n log n)",
                     space_complexity="O(n)",
-                    readability="Variables and blocks are easy to follow.",
-                    maintainability="Solution is compact enough for review.",
+                    readability="Style-only factors are not evaluated.",
+                    maintainability="Style-only factors are not evaluated.",
                     strengths=["Clear implementation", "Handles most hidden cases"],
                     weaknesses=["Needs stronger edge-case handling"],
                     improvements=["Add boundary checks for sparse inputs"],
@@ -1054,6 +1061,27 @@ class EvaluationService:
             "assessment_algorithms_june",
             "Backend Engineer Screening - June",
         )
+
+
+def _sanitize_ai_quality(quality: AICodeQualitySignal) -> AICodeQualitySignal:
+    return quality.model_copy(
+        update={
+            "readability": "Style-only factors are not evaluated.",
+            "maintainability": "Style-only factors are not evaluated.",
+            "strengths": _filter_review_items(quality.strengths),
+            "weaknesses": _filter_review_items(quality.weaknesses),
+            "improvements": _filter_review_items(quality.improvements),
+        }
+    )
+
+
+def _filter_review_items(items: list[str]) -> list[str]:
+    return [
+        item.strip()
+        for item in items
+        if item.strip()
+        and not any(pattern.search(item) for pattern in STYLE_ONLY_REVIEW_PATTERNS)
+    ]
 
 
 def _average(values: list[float | int | None]) -> float:

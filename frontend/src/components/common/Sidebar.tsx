@@ -2,6 +2,7 @@ import {
   ClipboardList,
   FileQuestion,
   Gauge,
+  PlusCircle,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -74,22 +75,36 @@ export function Sidebar() {
                 <span className="nav-label">{item.label}</span>
               </NavLink>
 
-              {item.icon === "assessments" && recentAssessments.length ? (
+              {item.icon === "assessments" ? (
                 <div
                   className="sidebar-subnav"
-                  aria-label="Recent assessments"
+                  aria-label="Assessment shortcuts"
                 >
-                  <span className="sidebar-subnav-label">Recent</span>
-                  {recentAssessments.map((assessment) => (
-                    <NavLink
-                      className="sidebar-assessment-link"
-                      key={assessment.id}
-                      to={assessmentPath(assessment.id)}
-                      title={assessment.title}
-                    >
-                      <span>{assessment.title}</span>
-                    </NavLink>
-                  ))}
+                  <NavLink
+                    className="sidebar-create-assessment-link"
+                    to="/recruiter/assessments/new"
+                    title="New assessment"
+                    aria-label="New assessment"
+                  >
+                    <PlusCircle size={17} strokeWidth={1.9} aria-hidden="true" />
+                    <span>New assessment</span>
+                  </NavLink>
+
+                  {recentAssessments.length ? (
+                    <>
+                      <span className="sidebar-subnav-label">Recent</span>
+                      {recentAssessments.map((assessment) => (
+                        <NavLink
+                          className="sidebar-assessment-link"
+                          key={assessment.id}
+                          to={assessmentPath(assessment.id)}
+                          title={assessment.title}
+                        >
+                          <span>{assessment.title}</span>
+                        </NavLink>
+                      ))}
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>
