@@ -233,32 +233,33 @@ deploy_http_service() {
   local secret_vars="$5"
   shift 5
 
-  local cloudsql_args=()
+  local deploy_args=(
+    run deploy "$service_name"
+    --image="$image"
+    --region="$REGION"
+    --project="$PROJECT_ID"
+    --platform=managed
+    --allow-unauthenticated
+    --port="$port"
+    --cpu=1
+    --memory=512Mi
+    --min-instances=0
+    --max-instances=2
+    --min=0
+    --max=2
+    --service-account="$SERVICE_ACCOUNT"
+    --vpc-connector="$VPC_CONNECTOR"
+    --vpc-egress=private-ranges-only
+    --set-env-vars="$env_vars"
+    --set-secrets="$secret_vars"
+  )
   if [[ -n "$CLOUDSQL_INSTANCE" ]]; then
-    cloudsql_args+=(--add-cloudsql-instances="$CLOUDSQL_INSTANCE")
+    deploy_args+=(--add-cloudsql-instances="$CLOUDSQL_INSTANCE")
   fi
+  deploy_args+=("$@")
 
   log "Deploying $service_name"
-  gcloud run deploy "$service_name" \
-    --image="$image" \
-    --region="$REGION" \
-    --project="$PROJECT_ID" \
-    --platform=managed \
-    --allow-unauthenticated \
-    --port="$port" \
-    --cpu=1 \
-    --memory=512Mi \
-    --min-instances=0 \
-    --max-instances=2 \
-    --min=0 \
-    --max=2 \
-    --service-account="$SERVICE_ACCOUNT" \
-    --vpc-connector="$VPC_CONNECTOR" \
-    --vpc-egress=private-ranges-only \
-    --set-env-vars="$env_vars" \
-    --set-secrets="$secret_vars" \
-    "${cloudsql_args[@]}" \
-    "$@"
+  gcloud "${deploy_args[@]}"
 }
 
 deploy_migration_job() {
@@ -267,24 +268,25 @@ deploy_migration_job() {
   local env_vars="$3"
   local secret_vars="$4"
 
-  local cloudsql_args=()
+  local deploy_args=(
+    run jobs deploy "$job_name"
+    --image="$image"
+    --region="$REGION"
+    --project="$PROJECT_ID"
+    --service-account="$SERVICE_ACCOUNT"
+    --vpc-connector="$VPC_CONNECTOR"
+    --vpc-egress=private-ranges-only
+    --command=alembic
+    --args=-c,alembic.ini,upgrade,head
+    --set-env-vars="$env_vars"
+    --set-secrets="$secret_vars"
+  )
   if [[ -n "$CLOUDSQL_INSTANCE" ]]; then
-    cloudsql_args+=(--set-cloudsql-instances="$CLOUDSQL_INSTANCE")
+    deploy_args+=(--set-cloudsql-instances="$CLOUDSQL_INSTANCE")
   fi
 
   log "Deploying migration job $job_name"
-  gcloud run jobs deploy "$job_name" \
-    --image="$image" \
-    --region="$REGION" \
-    --project="$PROJECT_ID" \
-    --service-account="$SERVICE_ACCOUNT" \
-    --vpc-connector="$VPC_CONNECTOR" \
-    --vpc-egress=private-ranges-only \
-    --command=alembic \
-    --args=-c,alembic.ini,upgrade,head \
-    --set-env-vars="$env_vars" \
-    --set-secrets="$secret_vars" \
-    "${cloudsql_args[@]}"
+  gcloud "${deploy_args[@]}"
 
   log "Running migration job $job_name"
   gcloud run jobs execute "$job_name" \
@@ -299,25 +301,26 @@ deploy_worker_pool() {
   local env_vars="$3"
   local secret_vars="$4"
 
-  local cloudsql_args=()
+  local deploy_args=(
+    run worker-pools deploy "$pool_name"
+    --image="$image"
+    --region="$REGION"
+    --project="$PROJECT_ID"
+    --service-account="$SERVICE_ACCOUNT"
+    --instances="$EVALUATION_WORKER_INSTANCES"
+    --cpu=1
+    --memory=512Mi
+    --command=python
+    --args=-m,worker
+    --set-env-vars="$env_vars"
+    --set-secrets="$secret_vars"
+  )
   if [[ -n "$CLOUDSQL_INSTANCE" ]]; then
-    cloudsql_args+=(--set-cloudsql-instances="$CLOUDSQL_INSTANCE")
+    deploy_args+=(--set-cloudsql-instances="$CLOUDSQL_INSTANCE")
   fi
 
   log "Deploying worker pool $pool_name"
-  gcloud run worker-pools deploy "$pool_name" \
-    --image="$image" \
-    --region="$REGION" \
-    --project="$PROJECT_ID" \
-    --service-account="$SERVICE_ACCOUNT" \
-    --instances="$EVALUATION_WORKER_INSTANCES" \
-    --cpu=1 \
-    --memory=512Mi \
-    --command=python \
-    --args=-m,worker \
-    --set-env-vars="$env_vars" \
-    --set-secrets="$secret_vars" \
-    "${cloudsql_args[@]}"
+  gcloud "${deploy_args[@]}"
 }
 
 frontend_build() {
