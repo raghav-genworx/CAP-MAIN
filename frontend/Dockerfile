@@ -27,12 +27,14 @@ RUN --mount=type=secret,id=frontend_env,target=/app/.env npm run build
 
 FROM nginx:1.27-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+ENV API_GATEWAY_PROXY_URL=http://api-gateway-service:8000/api/v1
+
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-EXPOSE 8080
+EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
-  CMD wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
