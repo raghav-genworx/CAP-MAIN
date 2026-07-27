@@ -4,8 +4,18 @@ const SESSION_KEY = "cap_candidate_session_token";
 const INVITE_KEY = "cap_candidate_invite_token";
 const SUBMISSION_KEY = "cap_candidate_submission_result";
 
+/**
+ * The stored receipt is the backend `CandidateSubmitResponse` plus a few
+ * optional, locally captured display fields. They are read from the already
+ * loaded assessment before the session token is cleared so the completion page
+ * can name the assessment without a second request. The backend contract is
+ * unchanged.
+ */
 export interface CandidateSubmissionReceipt extends CandidateSubmitResponse {
   auto?: boolean;
+  candidate_name?: string;
+  assessment_title?: string;
+  slot_title?: string;
 }
 
 export function saveCandidateSessionToken(token: string) {
@@ -54,6 +64,10 @@ export function readSubmissionResult(): CandidateSubmissionReceipt | null {
   }
 }
 
+function isOptionalString(value: unknown) {
+  return value === undefined || typeof value === "string";
+}
+
 function isSubmissionReceipt(value: unknown): value is CandidateSubmissionReceipt {
   if (!value || typeof value !== "object") {
     return false;
@@ -63,6 +77,9 @@ function isSubmissionReceipt(value: unknown): value is CandidateSubmissionReceip
     typeof receipt.candidate_assessment_id === "string" &&
     (receipt.status === "submitted" || receipt.status === "auto_submitted") &&
     typeof receipt.submitted_at === "string" &&
-    typeof receipt.pending_evaluation === "boolean"
+    typeof receipt.pending_evaluation === "boolean" &&
+    isOptionalString(receipt.candidate_name) &&
+    isOptionalString(receipt.assessment_title) &&
+    isOptionalString(receipt.slot_title)
   );
 }

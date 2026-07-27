@@ -1,29 +1,8 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import Editor from "@monaco-editor/react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Clock3,
-  Code2,
-  LoaderCircle,
-  Play,
-  Save,
-  Send,
-  ShieldCheck,
-  XCircle,
-} from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Info } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { Button } from "../../../components/ui/Button";
 import { Card } from "../../../components/ui/Card";
 import { ApiError } from "../../../lib/axios";
 import {
@@ -47,6 +26,25 @@ import type {
   CandidateExecutionCaseResult,
   CandidateSampleRunResponse,
 } from "../types/CandidatePortal";
+import { CandidatePageShell } from "./CandidatePageShell";
+import { CandidateAssessmentHeader } from "./assessment/CandidateAssessmentHeader";
+import { CandidateEditorPanel } from "./assessment/CandidateEditorPanel";
+import { CandidateFinalSubmitDialog } from "./assessment/CandidateFinalSubmitDialog";
+import { CandidateProblemPanel } from "./assessment/CandidateProblemPanel";
+import { CandidateQuestionNavigator } from "./assessment/CandidateQuestionNavigator";
+import { CandidateResultsPanel } from "./assessment/CandidateResultsPanel";
+import {
+  CandidateFullscreenGate,
+  CandidatePausedNotice,
+  CandidateProctoringNotice,
+} from "./assessment/CandidateSecurityNotice";
+import type {
+  QuestionProgress,
+  QuestionProgressStatus,
+  RunResultCase,
+  RunResultState,
+  SaveState,
+} from "./assessment/types";
 
 interface DraftState {
   language: string;
@@ -65,58 +63,6 @@ const FULLSCREEN_EXIT_MESSAGE =
   "Assessment closed because strict fullscreen mode was exited.";
 const HIDDEN_CHECK_COOLDOWN_SECONDS = 5;
 const TEST_RESULT_REVEAL_INTERVAL_MS = 100;
-const CANDIDATE_ANSWER_VALIDATION_LABELS = {
-  exact: "Exact output",
-  unordered: "Order flexible",
-  floating: "Numeric tolerance",
-  multiple_valid: "Multiple answers",
-  constructive: "Any valid construction",
-} as const;
-
-interface RunResultCase {
-  index: number;
-  passed: boolean;
-  status: string;
-  executionTime: string;
-  detail: string;
-  expectedOutput?: string;
-  actualOutput?: string;
-  errorType: string;
-}
-
-type RunResultState =
-  | {
-      kind: "sample";
-      summary: string;
-      cases: RunResultCase[];
-    }
-  | {
-      kind: "hidden";
-      summary: string;
-      cases: RunResultCase[];
-    }
-  | null;
-
-function formatRemainingTime(seconds: number) {
-  const safeSeconds = Math.max(0, seconds);
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  const remainder = safeSeconds % 60;
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
-  }
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
-}
-
-function formatDateTime(value: string | null) {
-  if (!value) {
-    return "Not available";
-  }
-  return new Date(value).toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
 
 function deriveRemainingSeconds(assessment: CandidateAssessmentPortal | undefined) {
   if (!assessment) {
@@ -138,62 +84,22 @@ function mutationError(error: unknown) {
   return error instanceof Error ? error.message : "";
 }
 
-function formatSpecLines(value: string, fallback: string) {
-  const rawLines = (value.trim() || fallback)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  return rawLines.map((line) => line.replace(/^[-*•]\s*/, ""));
-}
-
-function CandidateSpecSection({
-  title,
-  value,
-  fallback,
-  forceList = false,
-}: {
-  title: string;
-  value: string;
-  fallback: string;
-  forceList?: boolean;
-}) {
-  const lines = formatSpecLines(value, fallback);
-  return (
-    <section className="candidate-problem-section candidate-spec-section">
-      <h3>{title}</h3>
-      {forceList || lines.length > 1 ? (
-        <ul>
-          {lines.map((line) => (
-            <li key={line}>{line}</li>
-          ))}
-        </ul>
-      ) : (
-        <p>{lines[0]}</p>
-      )}
-    </section>
-  );
-}
-
-function monacoLanguage(language: string) {
-  const normalized = language.trim().toLowerCase();
-  const languageMap: Record<string, string> = {
-    "c++": "cpp",
-    cplusplus: "cpp",
-    cpp: "cpp",
-    c: "c",
-    csharp: "csharp",
-    "c#": "csharp",
-    java: "java",
-    javascript: "javascript",
-    js: "javascript",
-    python: "python",
-    python3: "python",
-    py: "python",
-    typescript: "typescript",
-    ts: "typescript",
+/** Normalise a sample-run case. Sample cases may show inputs and outputs. */
+function toSampleCase(item: CandidateExecutionCaseResult): RunResultCase {
+  return {
+    index: item.index,
+    passed: item.passed,
+    status: item.status,
+    executionTime: item.execution_time,
+    errorType: item.passed ? "" : item.status || "Execution failed",
+    input: item.input,
+    expectedOutput: item.expected_output,
+    actualOutput: item.actual_output,
+    stderr: item.stderr,
+    compileOutput: item.compile_output,
+    checkerMessage: item.checker_message || item.message,
+    memoryKb: item.memory_kb,
   };
-  return languageMap[normalized] || normalized || "plaintext";
 }
 
 export function CandidateAssessmentPage() {
@@ -202,9 +108,16 @@ export function CandidateAssessmentPage() {
   const [sessionWarning, setSessionWarning] = useState("");
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>("");
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
-  const [runResult, setRunResult] = useState<RunResultState>(null);
+  const [runResult, setRunResult] = useState<RunResultState | null>(null);
+  const [runAnnouncement, setRunAnnouncement] = useState("");
   const [hiddenCheckCooldownSeconds, setHiddenCheckCooldownSeconds] = useState(0);
+  const [hiddenAttemptsRemaining, setHiddenAttemptsRemaining] = useState<
+    Record<string, number>
+  >({});
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState("");
+  const [versionConflict, setVersionConflict] = useState("");
+  const [autosaveBusy, setAutosaveBusy] = useState(false);
   const [displayRemainingSeconds, setDisplayRemainingSeconds] = useState(0);
   const [tabSwitchWarnings, setTabSwitchWarnings] = useState(0);
   const [proctorMessage, setProctorMessage] = useState("");
@@ -295,7 +208,7 @@ export function CandidateAssessmentPage() {
         return totals;
       } catch {
         setProctorMessage(
-          "A proctoring event could not be synchronized. Check your connection.",
+          "A monitoring event could not be synchronized. Check your connection.",
         );
         return null;
       }
@@ -353,8 +266,8 @@ export function CandidateAssessmentPage() {
           if (next[question.id].source_code === savedDraft.draft_code) {
             draftVersionsRef.current[question.id] = savedDraft.version;
           } else {
-            setSessionWarning(
-              `Question ${question.question_order} changed in another tab. Reload before saving it.`,
+            setVersionConflict(
+              `Question ${question.question_order} changed in another tab. Reload this page before saving it.`,
             );
           }
         }
@@ -407,22 +320,8 @@ export function CandidateAssessmentPage() {
     const results = saved.results as CandidateExecutionCaseResult[];
     setRunResult({
       kind: "sample",
-      summary: `${saved.passed_count || 0}/${saved.total_count || results.length} sample cases passed`,
-      cases: results.map((item) => ({
-        index: item.index,
-        passed: item.passed,
-        status: item.status,
-        executionTime: item.execution_time,
-        detail:
-          item.actual_output ||
-          item.stderr ||
-          item.compile_output ||
-          item.checker_message ||
-          item.message,
-        expectedOutput: item.expected_output,
-        actualOutput: item.actual_output,
-        errorType: item.passed ? "" : item.status || "Execution failed",
-      })),
+      summary: `${saved.passed_count || 0} of ${saved.total_count || results.length} sample cases passed`,
+      cases: results.map(toSampleCase),
     });
     setResultsExpanded(true);
   }, [assessmentQuery.data?.drafts, selectedQuestionId]);
@@ -435,95 +334,48 @@ export function CandidateAssessmentPage() {
     [assessmentQuery.data?.questions, selectedQuestionId],
   );
   const selectedDraft = selectedQuestion ? drafts[selectedQuestion.id] : null;
-  const attemptedQuestionIds = useMemo(
-    () =>
-      new Set(
-        Object.entries(drafts)
-          .filter(([, draft]) => draft.source_code.trim().length > 0)
-          .map(([questionId]) => questionId),
-      ),
-    [drafts],
-  );
-  const submittedQuestionCount = submittedQuestionIds.size;
-  const answeredQuestionCount = attemptedQuestionIds.size;
-  const progressPercent = Math.round(
-    (answeredQuestionCount / Math.max(assessmentQuery.data?.questions.length || 1, 1)) *
-      100,
-  );
   const totalDurationSeconds = (assessmentQuery.data?.duration_minutes || 0) * 60;
-  const timeTakenSeconds =
-    totalDurationSeconds > 0
-      ? Math.max(0, totalDurationSeconds - displayRemainingSeconds)
-      : assessmentQuery.data?.started_at
-        ? Math.max(
-            0,
-            Math.floor(
-              (Date.now() - new Date(assessmentQuery.data.started_at).getTime()) /
-                1000,
-            ),
-          )
-        : 0;
-  const trackedQuestionTimeSeconds = Object.values(questionTimeSpentSeconds).reduce(
-    (sum, value) => sum + value,
-    0,
-  );
   const requiresEndConfirmation =
     totalDurationSeconds > 0 &&
     displayRemainingSeconds > Math.floor(totalDurationSeconds * 0.5);
-  const questionSubmissionSummary =
-    assessmentQuery.data?.questions.map((question) => {
+
+  const questionProgress = useMemo<QuestionProgress[]>(() => {
+    const assessment = assessmentQuery.data;
+    if (!assessment) {
+      return [];
+    }
+    return assessment.questions.map((question) => {
       const draft = drafts[question.id];
-      const serverDraft = assessmentQuery.data?.drafts.find(
+      const serverDraft = assessment.drafts.find(
         (item) => item.question_id === question.id,
       );
-      const sourceCode = draft?.source_code || serverDraft?.draft_code || "";
-      const lineCount = sourceCode.trim()
-        ? sourceCode.trim().split(/\r?\n/).length
-        : 0;
+      const sourceCode = draft?.source_code ?? serverDraft?.draft_code ?? "";
+      const isAttempted = sourceCode.trim().length > 0;
       const isSubmitted =
         submittedQuestionIds.has(question.id) ||
         Boolean(serverDraft?.submitted_at) ||
         serverDraft?.status === "submitted";
-      const currentSampleCases =
-        runResult?.kind === "sample" && question.id === selectedQuestion?.id
-          ? runResult.cases
-          : [];
-      const samplePassed = currentSampleCases.filter((item) => item.passed).length;
-      const sampleTotal = currentSampleCases.length;
-      const answerSignal = !sourceCode.trim()
-        ? 0
-        : isSubmitted
-          ? sampleTotal
-            ? Math.min(100, 70 + Math.round((samplePassed / sampleTotal) * 30))
-            : 82
-          : sampleTotal
-            ? Math.min(88, 45 + Math.round((samplePassed / sampleTotal) * 35))
-            : Math.min(75, 35 + Math.min(lineCount, 40));
+      const outcome = questionOutcomes[question.id];
+      let status: QuestionProgressStatus = "not_started";
+      if (isSubmitted) {
+        status =
+          outcome === "passed"
+            ? "passed"
+            : outcome === "failed"
+              ? "needs_attention"
+              : "submitted";
+      } else if (isAttempted) {
+        status = "in_progress";
+      }
+      return { question, status, isAttempted, isSubmitted };
+    });
+  }, [assessmentQuery.data, drafts, questionOutcomes, submittedQuestionIds]);
 
-      return {
-        question,
-        sourceCode,
-        lineCount,
-        timeSpentSeconds: questionTimeSpentSeconds[question.id] || 0,
-        language:
-          draft?.language ||
-          serverDraft?.source_language ||
-          question.supported_languages[0] ||
-          "python",
-        isAttempted: sourceCode.trim().length > 0,
-        isSubmitted,
-        lastSavedAt: serverDraft?.last_saved_at || null,
-        submittedAt: serverDraft?.submitted_at || null,
-        samplePassed,
-        sampleTotal,
-        answerSignal,
-      };
-    }) || [];
-  const mandatoryUnansweredCount = questionSubmissionSummary.filter(
+  const attemptedCount = questionProgress.filter((item) => item.isAttempted).length;
+  const submittedCount = questionProgress.filter((item) => item.isSubmitted).length;
+  const unansweredCount = questionProgress.filter((item) => !item.isAttempted).length;
+  const mandatoryUnansweredCount = questionProgress.filter(
     (item) => item.question.is_mandatory && !item.isAttempted,
-  ).length;
-  const unansweredCount = questionSubmissionSummary.filter(
-    (item) => !item.isAttempted,
   ).length;
 
   const revealTestCaseResults = useCallback(
@@ -534,7 +386,7 @@ export function CandidateAssessmentPage() {
     ) => {
       setRunResult({
         kind,
-        summary: `0/${cases.length} test cases completed`,
+        summary: `0 of ${cases.length} test cases completed`,
         cases: [],
       });
       for (let index = 0; index < cases.length; index += 1) {
@@ -543,11 +395,12 @@ export function CandidateAssessmentPage() {
         );
         setRunResult({
           kind,
-          summary: `${index + 1}/${cases.length} test cases completed`,
+          summary: `${index + 1} of ${cases.length} test cases completed`,
           cases: cases.slice(0, index + 1),
         });
       }
       setRunResult({ kind, summary: finalSummary, cases });
+      setRunAnnouncement(finalSummary);
     },
     [],
   );
@@ -578,6 +431,10 @@ export function CandidateAssessmentPage() {
     onSuccess: (data, variables) => {
       draftVersionsRef.current[variables.questionId] = data.version;
       setLastSavedAt(data.saved_at);
+      setSaveError("");
+    },
+    onError: (error: unknown) => {
+      setSaveError(mutationError(error) || "Your work could not be saved.");
     },
   });
 
@@ -592,9 +449,10 @@ export function CandidateAssessmentPage() {
       language: string;
     }) => {
       setResultsExpanded(true);
+      setRunAnnouncement("Running sample tests.");
       setRunResult({
         kind: "sample",
-        summary: "Executing sample test cases...",
+        summary: "Running sample tests…",
         cases: [],
       });
       return runCandidateSample(sessionToken || "", {
@@ -606,25 +464,10 @@ export function CandidateAssessmentPage() {
     },
     onSuccess: (data: CandidateSampleRunResponse, variables) => {
       draftVersionsRef.current[variables.questionId] = data.version;
-      const cases = data.results.map((item: CandidateExecutionCaseResult) => ({
-          index: item.index,
-          passed: item.passed,
-          status: item.status,
-          executionTime: item.execution_time,
-          detail:
-            item.actual_output ||
-            item.stderr ||
-            item.compile_output ||
-            item.checker_message ||
-            item.message,
-          expectedOutput: item.expected_output,
-          actualOutput: item.actual_output,
-          errorType: item.passed ? "" : item.status || "Execution failed",
-        }));
       void revealTestCaseResults(
         "sample",
-        `${data.passed_count}/${data.total_count} sample cases passed`,
-        cases,
+        `${data.passed_count} of ${data.total_count} sample cases passed`,
+        data.results.map(toSampleCase),
       );
     },
   });
@@ -640,9 +483,10 @@ export function CandidateAssessmentPage() {
       language: string;
     }) => {
       setResultsExpanded(true);
+      setRunAnnouncement("Running hidden tests for this question.");
       setRunResult({
         kind: "hidden",
-        summary: "Executing hidden test cases...",
+        summary: "Running hidden tests…",
         cases: [],
       });
       return runCandidateHiddenCheck(sessionToken || "", {
@@ -657,17 +501,25 @@ export function CandidateAssessmentPage() {
       setHiddenCheckCooldownSeconds(
         data.cooldown_remaining_seconds || HIDDEN_CHECK_COOLDOWN_SECONDS,
       );
-      const cases = data.results.map((item) => ({
-          index: item.index,
-          passed: item.passed,
-          status: item.status,
-          executionTime: item.execution_time,
-          detail: "",
-          errorType: item.error_type,
+      if (typeof data.remaining_attempts === "number") {
+        const remaining = data.remaining_attempts;
+        setHiddenAttemptsRemaining((current) => ({
+          ...current,
+          [variables.questionId]: remaining,
         }));
+      }
+      // Hidden cases intentionally expose only index, status, timing, and the
+      // error category. Inputs, expected output, and actual output stay hidden.
+      const cases: RunResultCase[] = data.results.map((item) => ({
+        index: item.index,
+        passed: item.passed,
+        status: item.status,
+        executionTime: item.execution_time,
+        errorType: item.error_type,
+      }));
       void revealTestCaseResults(
         "hidden",
-        `${data.passed_count}/${data.total_count} hidden test cases passed`,
+        `${data.passed_count} of ${data.total_count} hidden test cases passed`,
         cases,
       );
       setQuestionOutcomes((current) => ({
@@ -690,10 +542,11 @@ export function CandidateAssessmentPage() {
       submissionTag?: string;
       submissionMessage?: string;
     }) => {
-      if (!assessmentQuery.data || !sessionToken) {
+      const assessment = assessmentQuery.data;
+      if (!assessment || !sessionToken) {
         throw new Error("Assessment session is not available.");
       }
-      const answers = assessmentQuery.data.questions.map((question) => ({
+      const answers = assessment.questions.map((question) => ({
         question_id: question.id,
         source_code: latestDraftsRef.current[question.id]?.source_code || "",
         language:
@@ -716,6 +569,12 @@ export function CandidateAssessmentPage() {
         auto,
         submission_tag: response.submission_tag || submissionTag || "",
         submission_message: response.submission_message || submissionMessage || "",
+        // Locally captured display fields for the completion receipt. The
+        // session token is cleared immediately after, so they cannot be
+        // re-fetched.
+        candidate_name: assessment.candidate_name,
+        assessment_title: assessment.assessment_title,
+        slot_title: assessment.slot_title,
       };
     },
     onSuccess: (response) => {
@@ -745,12 +604,15 @@ export function CandidateAssessmentPage() {
     if (!selectedQuestion || !selectedDraft) {
       return;
     }
-    void checkpointMutation.mutateAsync({
-      questionId: selectedQuestion.id,
-      sourceCode: selectedDraft.source_code,
-      language: selectedDraft.language,
-      currentQuestionOrder: selectedQuestion.question_order,
-    });
+    // Failures surface through `checkpointMutation.error` and the save state.
+    void checkpointMutation
+      .mutateAsync({
+        questionId: selectedQuestion.id,
+        sourceCode: selectedDraft.source_code,
+        language: selectedDraft.language,
+        currentQuestionOrder: selectedQuestion.question_order,
+      })
+      .catch(() => undefined);
   }, [checkpointMutation, selectedDraft, selectedQuestion]);
 
   const submitSelectedQuestion = useCallback(async () => {
@@ -775,12 +637,16 @@ export function CandidateAssessmentPage() {
     });
   }, [checkpointMutation, hiddenCheckMutation, selectedDraft, selectedQuestion]);
 
-  function moveToQuestion(questionId: string) {
-    saveSelectedQuestion();
-    setRunResult(null);
-    setResultsExpanded(false);
-    setSelectedQuestionId(questionId);
-  }
+  const moveToQuestion = useCallback(
+    (questionId: string) => {
+      saveSelectedQuestion();
+      setRunResult(null);
+      setRunAnnouncement("");
+      setResultsExpanded(false);
+      setSelectedQuestionId(questionId);
+    },
+    [saveSelectedQuestion],
+  );
 
   function requestFinalSubmit() {
     setFinalSubmitConfirmation("");
@@ -795,6 +661,11 @@ export function CandidateAssessmentPage() {
       return;
     }
     submitMutation.mutate({ auto: false });
+  }
+
+  function reviewQuestion(questionId: string) {
+    setShowSubmitAssessmentDialog(false);
+    moveToQuestion(questionId);
   }
 
   const syncedRemainingSeconds = useCallback(() => {
@@ -824,6 +695,7 @@ export function CandidateAssessmentPage() {
         return;
       }
       autosaveInFlightRef.current = true;
+      setAutosaveBusy(true);
       void saveCandidateCheckpoint(sessionToken, {
         question_id: questionId,
         source_code: draft.source_code,
@@ -838,14 +710,18 @@ export function CandidateAssessmentPage() {
         .then((result) => {
           draftVersionsRef.current[questionId] = result.version;
           setLastSavedAt(result.saved_at);
+          setSaveError("");
         })
         .catch((error: unknown) => {
-          setSessionWarning(
-            error instanceof Error ? error.message : "Autosave failed. Please retry.",
+          setSaveError(
+            error instanceof Error
+              ? error.message
+              : "Autosave failed. We will keep retrying.",
           );
         })
         .finally(() => {
           autosaveInFlightRef.current = false;
+          setAutosaveBusy(false);
         });
     }, 15000);
     return () => window.clearInterval(interval);
@@ -891,6 +767,18 @@ export function CandidateAssessmentPage() {
           Number(draft.hidden_check_result.total_count || 0) > 0,
       )
       .map((draft) => draft.question_id);
+    setHiddenAttemptsRemaining((current) => {
+      const next = { ...current };
+      let changed = false;
+      assessment.drafts.forEach((draft) => {
+        const remaining = draft.hidden_check_result.remaining_attempts;
+        if (typeof remaining === "number" && next[draft.question_id] === undefined) {
+          next[draft.question_id] = remaining;
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
     if (!serverSubmittedIds.length) {
       return;
     }
@@ -1028,7 +916,7 @@ export function CandidateAssessmentPage() {
           return next;
         }
         setProctorMessage(
-          `Tab switch detected. Warning ${next}/${TAB_SWITCH_LIMIT}. Your assessment will auto-submit after ${TAB_SWITCH_LIMIT} warnings.`,
+          `Leaving the assessment was recorded. Warning ${next} of ${TAB_SWITCH_LIMIT}. Your assessment is submitted automatically after ${TAB_SWITCH_LIMIT} warnings.`,
         );
         return next;
       });
@@ -1066,7 +954,7 @@ export function CandidateAssessmentPage() {
             submitAutomatically(TAB_SWITCH_TAG, TAB_SWITCH_MESSAGE);
           } else {
             setProctorMessage(
-              `Window focus lost. Warning ${next}/${TAB_SWITCH_LIMIT}.`,
+              `Focus left the assessment window. Warning ${next} of ${TAB_SWITCH_LIMIT}.`,
             );
           }
         });
@@ -1096,8 +984,8 @@ export function CandidateAssessmentPage() {
       }
       setProctorMessage(
         mode === "strict"
-          ? "Copy, cut, and paste are disabled for this strictly monitored assessment."
-          : "Clipboard activity detected and recorded by assessment monitoring.",
+          ? "Copy, cut, and paste are turned off for this assessment."
+          : "Clipboard activity was recorded.",
       );
     }
 
@@ -1111,15 +999,52 @@ export function CandidateAssessmentPage() {
     };
   }, [assessmentQuery.data?.proctoring_mode, persistProctorEvent]);
 
+  if (assessmentQuery.isError && !assessmentQuery.data) {
+    return (
+      <CandidatePageShell>
+        <Card className="cap-panel cap-panel-narrow" aria-labelledby="cap-ws-error">
+          <div className="cap-panel-intro">
+            <h1 id="cap-ws-error">We could not load your assessment</h1>
+            <p role="alert">
+              {mutationError(assessmentQuery.error) ||
+                "Your assessment could not be loaded right now."}
+            </p>
+          </div>
+          <p className="cap-muted">
+            Your saved work is not lost. Check your connection and try again.
+          </p>
+          <div className="cap-actions">
+            <button
+              type="button"
+              className="button button-primary cap-btn"
+              onClick={() => void assessmentQuery.refetch()}
+              disabled={assessmentQuery.isFetching}
+            >
+              {assessmentQuery.isFetching ? "Retrying…" : "Try again"}
+            </button>
+          </div>
+        </Card>
+      </CandidatePageShell>
+    );
+  }
+
   if (!assessmentQuery.data || !selectedQuestion || !selectedDraft) {
     return (
-      <main className="candidate-shell candidate-shell-branded">
-        <Card className="candidate-card candidate-status-card">
-          <span className="candidate-kicker">Assessment Portal</span>
-          <h1>Preparing your workspace</h1>
-          <p>We are loading your questions, saved drafts, and timer.</p>
+      <CandidatePageShell>
+        <Card className="cap-panel cap-panel-narrow" aria-labelledby="cap-ws-loading">
+          <div className="cap-panel-intro">
+            <h1 id="cap-ws-loading">Preparing your workspace</h1>
+            <p role="status">
+              Loading your questions, saved work, and timer. This takes a moment.
+            </p>
+          </div>
+          <div className="cap-skeleton-stack" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
         </Card>
-      </main>
+      </CandidatePageShell>
     );
   }
 
@@ -1139,651 +1064,189 @@ export function CandidateAssessmentPage() {
     selectedQuestionIndex >= 0
       ? assessment.questions[selectedQuestionIndex + 1] || null
       : null;
-  const warningTooltip =
-    proctorMessage ||
-    (assessment.proctoring_mode === "none"
-      ? "No proctoring warnings are active."
-      : `${tabSwitchWarnings}/${TAB_SWITCH_LIMIT} tab-switch warnings recorded. The assessment auto-submits at ${TAB_SWITCH_LIMIT}.`);
   const isTestRunning = sampleMutation.isPending || hiddenCheckMutation.isPending;
-  const resultTone = isTestRunning
-    ? "is-running"
-    : runResult?.cases.length
-      ? runResult.cases.every((testCase) => testCase.passed)
-        ? "is-passed"
-        : "is-failed"
-      : "is-idle";
+  const saveState: SaveState = versionConflict
+    ? { kind: "conflict", message: versionConflict }
+    : checkpointMutation.isPending || autosaveBusy
+      ? { kind: "saving" }
+      : saveError
+        ? { kind: "error", message: saveError }
+        : lastSavedAt
+          ? { kind: "saved", at: lastSavedAt }
+          : { kind: "idle" };
+  const resultErrors = [
+    mutationError(checkpointMutation.error),
+    mutationError(sampleMutation.error),
+    mutationError(hiddenCheckMutation.error),
+  ].filter(Boolean);
+  const selectedAttemptsRemaining =
+    selectedQuestion.id in hiddenAttemptsRemaining
+      ? hiddenAttemptsRemaining[selectedQuestion.id]
+      : null;
 
   return (
-    <main className="candidate-portal candidate-portal-pro">
-      <aside className="candidate-questions-panel">
-        <div className="candidate-sidebar-header">
-          <span className="candidate-kicker">Live Assessment</span>
-          <h2>{assessment.assessment_title}</h2>
-          <p>{assessment.slot_title}</p>
-        </div>
+    <div className="cap-root cap-workspace">
+      <CandidateAssessmentHeader
+        assessmentTitle={assessment.assessment_title}
+        candidateName={assessment.candidate_name}
+        questionPosition={selectedQuestion.question_order}
+        questionCount={assessment.questions.length}
+        remainingSeconds={displayRemainingSeconds}
+        saveState={saveState}
+        showWarnings={assessment.proctoring_mode !== "none"}
+        warningCount={tabSwitchWarnings}
+        warningLimit={TAB_SWITCH_LIMIT}
+        onFinish={requestFinalSubmit}
+        finishDisabled={submitMutation.isPending}
+      />
 
-        <div className="candidate-progress">
-          <span>
-            {attemptedQuestionIds.size}/{assessment.questions.length} questions touched
-          </span>
-          <div>
-            <span
-              style={{
-                width: `${Math.round(
-                  (attemptedQuestionIds.size / Math.max(assessment.questions.length, 1)) *
-                    100,
-                )}%`,
+      <p className="sr-only" role="status" aria-live="polite">
+        {runAnnouncement}
+      </p>
+
+      {sessionWarning || versionConflict || saveError || proctorMessage ? (
+        <div className="cap-banners" role="status" aria-live="polite">
+          {sessionWarning ? <p className="cap-banner">{sessionWarning}</p> : null}
+          {versionConflict ? (
+            <p className="cap-banner is-danger">{versionConflict}</p>
+          ) : null}
+          {saveError ? <p className="cap-banner is-warning">{saveError}</p> : null}
+          {proctorMessage ? (
+            <p className="cap-banner is-warning">{proctorMessage}</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <p className="cap-mobile-note">
+        <Info size={14} aria-hidden="true" />
+        <span>
+          Coding assessments work best on a desktop or laptop. Everything here
+          still works on a small screen, but the editor is easier to use on a
+          larger one.
+        </span>
+      </p>
+
+      <div className="cap-workspace-body">
+        <CandidateQuestionNavigator
+          items={questionProgress}
+          selectedQuestionId={selectedQuestion.id}
+          onSelect={moveToQuestion}
+        />
+
+        <main className="cap-panels">
+          <CandidateProblemPanel question={selectedQuestion} />
+
+          <div className="cap-editor-stack">
+            <CandidateEditorPanel
+              question={selectedQuestion}
+              language={selectedDraft.language}
+              sourceCode={selectedDraft.source_code}
+              saveState={saveState}
+              isSubmitted={isSelectedQuestionSubmitted}
+              isPaused={isPaused}
+              isSaving={checkpointMutation.isPending}
+              isRunningSample={sampleMutation.isPending}
+              isCheckingHidden={hiddenCheckMutation.isPending}
+              actionsDisabled={isActionBusy}
+              hiddenCooldownSeconds={hiddenCheckCooldownSeconds}
+              hiddenAttemptsRemaining={selectedAttemptsRemaining}
+              nextQuestionTitle={nextQuestion?.title || null}
+              onLanguageChange={(language) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [selectedQuestion.id]: {
+                    ...current[selectedQuestion.id],
+                    language,
+                  },
+                }))
+              }
+              onCodeChange={(sourceCode) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [selectedQuestion.id]: {
+                    ...current[selectedQuestion.id],
+                    source_code: sourceCode,
+                  },
+                }))
+              }
+              onSave={saveSelectedQuestion}
+              onRunSample={() =>
+                void sampleMutation
+                  .mutateAsync({
+                    questionId: selectedQuestion.id,
+                    sourceCode: selectedDraft.source_code,
+                    language: selectedDraft.language,
+                  })
+                  .catch(() => undefined)
+              }
+              onSubmitQuestion={() => void submitSelectedQuestion().catch(() => undefined)}
+              onNextQuestion={() => {
+                if (nextQuestion) {
+                  moveToQuestion(nextQuestion.id);
+                }
               }}
             />
-          </div>
-        </div>
 
-        <div className="candidate-question-nav">
-          {assessment.questions.map((question) => {
-            const isAttempted = attemptedQuestionIds.has(question.id);
-            return (
-              <button
-                key={question.id}
-                type="button"
-                className={`candidate-question-button ${
-                  selectedQuestion.id === question.id ? "is-selected" : ""
-                } ${
-                  submittedQuestionIds.has(question.id)
-                    ? `is-submitted is-${questionOutcomes[question.id] || "failed"}`
-                    : ""
-                }`}
-                onClick={() => moveToQuestion(question.id)}
-              >
-                <span>Question {question.question_order}</span>
-                <strong>{question.title}</strong>
-                <em>
-                  {submittedQuestionIds.has(question.id)
-                    ? questionOutcomes[question.id] === "passed"
-                      ? "Submitted - passed"
-                      : "Submitted - needs work"
-                    : isAttempted
-                      ? "Draft saved locally"
-                      : "Not attempted"}
-                </em>
-              </button>
-            );
-          })}
-        </div>
-      </aside>
-
-      <section className="candidate-workspace">
-        {sessionWarning ? (
-          <span className="candidate-proctor-live-message" role="status">
-            {sessionWarning}
-          </span>
-        ) : null}
-        {proctorMessage ? (
-          <span className="candidate-proctor-live-message" role="status">
-            {proctorMessage}
-          </span>
-        ) : null}
-
-        {isPaused ? (
-          <div className="candidate-security-gate" role="status">
-            <div className="candidate-fullscreen-prompt">
-              <Clock3 size={18} aria-hidden="true" />
-              <div>
-                <strong>Assessment paused</strong>
-                <p>Your timer is frozen. Work can resume when the recruiter continues the slot.</p>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {fullscreenPromptVisible ? (
-          <div className="candidate-security-gate" role="dialog" aria-modal="true">
-            <div className="candidate-fullscreen-prompt">
-            <ShieldCheck size={18} aria-hidden="true" />
-            <div>
-              <strong>Strict fullscreen is required</strong>
-              <p>This assessment cannot continue outside fullscreen mode.</p>
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() =>
-                void document.documentElement
-                  .requestFullscreen()
-                  .then(() => {
-                    hasEnteredFullscreenRef.current = true;
-                    setFullscreenPromptVisible(false);
-                  })
+            <CandidateResultsPanel
+              expanded={resultsExpanded}
+              onToggle={() => setResultsExpanded((current) => !current)}
+              result={runResult}
+              isRunning={isTestRunning}
+              runLabel={
+                sampleMutation.isPending
+                  ? "Running sample tests…"
+                  : "Running hidden tests…"
               }
-            >
-              Enter Fullscreen
-            </Button>
-            </div>
+              errors={resultErrors}
+            />
           </div>
-        ) : null}
+        </main>
+      </div>
 
-        <div className="candidate-topbar">
-          <div className="candidate-topbar-question">
-            <span>
-              Question {selectedQuestion.question_order} of {assessment.questions.length}
-            </span>
-            <strong>{selectedQuestion.title}</strong>
-          </div>
-          <div className="candidate-topbar-person">
-            <span>Candidate</span>
-            <strong>{assessment.candidate_name}</strong>
-          </div>
-          <div
-            className={`candidate-topbar-timer ${
-              displayRemainingSeconds <= 300 ? "is-critical" : ""
-            }`}
-          >
-            <Clock3 size={18} aria-hidden="true" />
-            <div>
-              <span>Time remaining</span>
-              <strong>{formatRemainingTime(displayRemainingSeconds)}</strong>
-            </div>
-          </div>
-          <button
-            type="button"
-            className={`candidate-warning-counter ${
-              tabSwitchWarnings ? "has-warnings" : ""
-            }`}
-            aria-label={`Proctoring warnings: ${tabSwitchWarnings}`}
-            data-tooltip={warningTooltip}
-          >
-            <AlertTriangle size={18} aria-hidden="true" />
-            <strong>{tabSwitchWarnings}</strong>
-          </button>
-          <Button
-            type="button"
-            className="candidate-topbar-submit"
-            onClick={requestFinalSubmit}
-            disabled={submitMutation.isPending}
-          >
-            <Send size={16} aria-hidden="true" />
-            Submit Assessment
-          </Button>
-        </div>
+      <CandidateProctoringNotice
+        mode={assessment.proctoring_mode}
+        warningCount={tabSwitchWarnings}
+        warningLimit={TAB_SWITCH_LIMIT}
+      />
 
-        <div className="candidate-workbench">
-          <Card className="candidate-problem-card">
-            <div className="candidate-problem-scroll">
-              <div className="candidate-problem-header">
-                <div>
-                  <span className="candidate-kicker">
-                    {selectedQuestion.difficulty} · {selectedQuestion.marks} marks
-                  </span>
-                  <h1>{selectedQuestion.title}</h1>
-                </div>
-                <div className="candidate-problem-badges">
-                  <span
-                    className={`candidate-answer-checker ${
-                      selectedQuestion.answer_validation_mode !== "exact"
-                        ? "is-highlighted"
-                        : ""
-                    }`}
-                    title={selectedQuestion.output_checker_explanation}
-                  >
-                    <CheckCircle2 size={14} aria-hidden="true" />
-                    {
-                      CANDIDATE_ANSWER_VALIDATION_LABELS[
-                        selectedQuestion.answer_validation_mode
-                      ]
-                    }
-                  </span>
-                  {selectedQuestion.is_mandatory ? (
-                    <span className="status-badge status-info">mandatory</span>
-                  ) : null}
-                </div>
-              </div>
+      {isPaused ? <CandidatePausedNotice /> : null}
 
-              <section className="candidate-problem-section">
-                <h3>Problem</h3>
-                <p>{selectedQuestion.problem_statement}</p>
-              </section>
-              <CandidateSpecSection
-                title="Input Format"
-                value={selectedQuestion.input_format}
-                fallback="Input format is included in the problem statement."
-              />
-              <CandidateSpecSection
-                title="Output Format"
-                value={selectedQuestion.output_format}
-                fallback="Print the required answer only."
-              />
-              <CandidateSpecSection
-                title="Constraints"
-                value={selectedQuestion.constraints}
-                fallback="Use an efficient approach for the stated limits."
-                forceList
-              />
+      {fullscreenPromptVisible ? (
+        <CandidateFullscreenGate
+          onEnterFullscreen={() =>
+            void document.documentElement
+              .requestFullscreen()
+              .then(() => {
+                hasEnteredFullscreenRef.current = true;
+                setFullscreenPromptVisible(false);
+              })
+              .catch(() =>
+                setProctorMessage(
+                  "Your browser blocked fullscreen. Select Enter fullscreen again to continue.",
+                ),
+              )
+          }
+        />
+      ) : null}
 
-              <div className="candidate-sample-grid">
-                {selectedQuestion.sample_test_cases.map((testCase, index) => (
-                  <article key={`${selectedQuestion.id}-${index}`}>
-                    <strong>Sample {index + 1}</strong>
-                    <span>Input</span>
-                    <pre>{testCase.input}</pre>
-                    <span>Expected Output</span>
-                    <pre>{testCase.expected_output}</pre>
-                  </article>
-                ))}
-              </div>
-            </div>
-          </Card>
-
-          <Card className="candidate-editor-card">
-            <div className="candidate-editor-header">
-              <div>
-                <span className="candidate-kicker">
-                  <Code2 size={14} aria-hidden="true" />
-                  Code workspace
-                </span>
-                <h2>Solution editor</h2>
-                <p>
-                  {checkpointMutation.isPending
-                    ? "Saving..."
-                    : lastSavedAt
-                      ? `Last saved ${formatDateTime(lastSavedAt)}`
-                      : "Autosaves every 15 seconds"}
-                </p>
-              </div>
-              <label className="field">
-                <span>Language</span>
-                <select
-                  value={selectedDraft.language}
-                  onChange={(event) =>
-                    setDrafts((current) => ({
-                      ...current,
-                      [selectedQuestion.id]: {
-                        ...current[selectedQuestion.id],
-                        language: event.target.value,
-                      },
-                    }))
-                  }
-                >
-                  {selectedQuestion.supported_languages.map((language) => (
-                    <option key={language} value={language}>
-                      {language}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            {isSelectedQuestionSubmitted ? (
-              <div className="candidate-question-submitted-note">
-                <CheckCircle2 size={18} aria-hidden="true" />
-                <div>
-                  <strong>This question is marked submitted.</strong>
-                  <p>You can still edit and resubmit before final assessment submission.</p>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="candidate-monaco-shell">
-              <Editor
-                height="100%"
-                language={monacoLanguage(selectedDraft.language)}
-                theme="vs-dark"
-                value={selectedDraft.source_code}
-                loading={
-                  <div className="candidate-editor-loading">Loading editor...</div>
-                }
-                options={{
-                  automaticLayout: true,
-                  fontFamily:
-                    '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-                  fontSize: 14,
-                  minimap: { enabled: false },
-                  padding: { top: 16, bottom: 16 },
-                  scrollBeyondLastLine: false,
-                  tabSize: 2,
-                  wordWrap: "on",
-                }}
-                onChange={(value) =>
-                  setDrafts((current) => ({
-                    ...current,
-                    [selectedQuestion.id]: {
-                      ...current[selectedQuestion.id],
-                      source_code: value || "",
-                    },
-                  }))
-                }
-              />
-            </div>
-
-            <div
-              className="assessment-actions-row candidate-action-row"
-              role="toolbar"
-              aria-label="Code actions"
-            >
-              <div className="candidate-action-context" aria-live="polite">
-                <span className={`candidate-action-state ${isActionBusy ? "is-busy" : ""}`}>
-                  {isActionBusy ? (
-                    <LoaderCircle size={15} aria-hidden="true" />
-                  ) : (
-                    <Code2 size={15} aria-hidden="true" />
-                  )}
-                  {sampleMutation.isPending
-                    ? "Running sample tests"
-                    : hiddenCheckMutation.isPending
-                      ? "Checking hidden tests"
-                      : checkpointMutation.isPending
-                        ? "Saving solution"
-                        : "Editor ready"}
-                </span>
-                <small>Run before submitting to verify sample cases.</small>
-              </div>
-              <div className="candidate-action-buttons">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={saveSelectedQuestion}
-                  disabled={checkpointMutation.isPending}
-                >
-                  <Save size={16} aria-hidden="true" />
-                  {checkpointMutation.isPending ? "Saving..." : "Save Progress"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={isActionBusy || !selectedDraft.source_code.trim()}
-                  onClick={() =>
-                    void sampleMutation.mutateAsync({
-                      questionId: selectedQuestion.id,
-                      sourceCode: selectedDraft.source_code,
-                      language: selectedDraft.language,
-                    })
-                  }
-                >
-                  <Play size={16} aria-hidden="true" />
-                  {sampleMutation.isPending ? "Running..." : "Run Test"}
-                </Button>
-                <Button
-                  type="button"
-                  className="candidate-submit-question"
-                  disabled={
-                    isActionBusy ||
-                    hiddenCheckCooldownSeconds > 0 ||
-                    !selectedDraft.source_code.trim()
-                  }
-                  onClick={() => void submitSelectedQuestion()}
-                >
-                  <CheckCircle2 size={16} aria-hidden="true" />
-                  {hiddenCheckMutation.isPending
-                    ? "Evaluating..."
-                    : checkpointMutation.isPending
-                      ? "Saving..."
-                      : hiddenCheckCooldownSeconds > 0
-                        ? `Submit again in ${hiddenCheckCooldownSeconds}s`
-                        : "Submit Question"}
-                </Button>
-                {isSelectedQuestionSubmitted && nextQuestion ? (
-                  <Button
-                    type="button"
-                    className="candidate-next-question"
-                    onClick={() => moveToQuestion(nextQuestion.id)}
-                  >
-                    Move to next question
-                    <ChevronRight size={16} aria-hidden="true" />
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-
-            <section
-              className={`candidate-results-drawer ${resultsExpanded ? "is-expanded" : ""} ${resultTone}`}
-              aria-label="Test case results"
-            >
-              <div className="candidate-results-handle">
-                <button
-                  type="button"
-                  className="candidate-results-toggle"
-                  aria-expanded={resultsExpanded}
-                  onClick={() => setResultsExpanded((current) => !current)}
-                >
-                  <span>
-                    <i className="candidate-results-indicator" aria-hidden="true" />
-                    Testcase Results
-                    {runResult ? <small>{runResult.summary}</small> : null}
-                  </span>
-                  <ChevronDown size={18} aria-hidden="true" />
-                </button>
-              </div>
-
-              {resultsExpanded ? (
-                <div className="candidate-results-content">
-                  {runResult ? (
-                    <div className="candidate-run-result">
-                      <strong>{runResult.summary}</strong>
-                      {runResult.cases.length ? (
-                        <div className="candidate-result-cases">
-                          {runResult.cases.map((testCase) => (
-                            <article
-                              key={testCase.index}
-                              className={testCase.passed ? "is-passed" : "is-failed"}
-                            >
-                              <div className="candidate-case-status">
-                                {testCase.passed ? (
-                                  <CheckCircle2 size={18} aria-hidden="true" />
-                                ) : (
-                                  <XCircle size={18} aria-hidden="true" />
-                                )}
-                                <span>
-                                  TC {testCase.index} · {testCase.passed ? "Passed" : "Failed"}
-                                </span>
-                                <time>
-                                  {testCase.executionTime
-                                    ? `${testCase.executionTime}s`
-                                    : "Time unavailable"}
-                                </time>
-                              </div>
-                              {testCase.passed ? (
-                                <p>Executed successfully</p>
-                              ) : (
-                                <p>{testCase.errorType || testCase.status || "Execution failed"}</p>
-                              )}
-                              {runResult.kind === "sample" && testCase.detail ? (
-                                <div className="candidate-result-output-grid">
-                                  <div>
-                                    <span>Expected</span>
-                                    <pre>{testCase.expectedOutput || "(empty)"}</pre>
-                                  </div>
-                                  <div>
-                                    <span>Actual</span>
-                                    <pre>{testCase.actualOutput || testCase.detail || "(empty)"}</pre>
-                                  </div>
-                                </div>
-                              ) : null}
-                            </article>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <div className="candidate-results-empty">
-                      <Play size={20} aria-hidden="true" />
-                      <div>
-                        <strong>No testcase run yet</strong>
-                        <p>Run the code or submit this question to view results here.</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {mutationError(checkpointMutation.error) ? (
-                    <p className="form-error">{mutationError(checkpointMutation.error)}</p>
-                  ) : null}
-                  {mutationError(sampleMutation.error) ? (
-                    <p className="form-error">{mutationError(sampleMutation.error)}</p>
-                  ) : null}
-                  {mutationError(hiddenCheckMutation.error) ? (
-                    <p className="form-error">{mutationError(hiddenCheckMutation.error)}</p>
-                  ) : null}
-                  {mutationError(submitMutation.error) ? (
-                    <p className="form-error">{mutationError(submitMutation.error)}</p>
-                  ) : null}
-                </div>
-              ) : null}
-            </section>
-          </Card>
-        </div>
-
-        {showSubmitAssessmentDialog ? (
-          <div className="dialog-backdrop">
-            <div className="candidate-final-submit-modal" role="dialog" aria-modal="true">
-              <span className="candidate-kicker">Final Submission</span>
-              <h2>Review your assessment progress</h2>
-              <p>
-                Once submitted, your assessment will be completed and you cannot continue editing.
-              </p>
-              <div className="candidate-final-progress-grid">
-                <div>
-                  <span>Attempted</span>
-                  <strong>
-                    {answeredQuestionCount}/{assessment.questions.length}
-                  </strong>
-                </div>
-                <div>
-                  <span>Question submitted</span>
-                  <strong>
-                    {submittedQuestionCount}/{assessment.questions.length}
-                  </strong>
-                </div>
-                <div>
-                  <span>Time remaining</span>
-                  <strong>{formatRemainingTime(displayRemainingSeconds)}</strong>
-                </div>
-                <div>
-                  <span>Time taken</span>
-                  <strong>{formatRemainingTime(timeTakenSeconds)}</strong>
-                </div>
-                <div>
-                  <span>Tracked question time</span>
-                  <strong>{formatRemainingTime(trackedQuestionTimeSeconds)}</strong>
-                </div>
-              </div>
-              <div className="candidate-final-progress-bar">
-                <span style={{ width: `${progressPercent}%` }} />
-              </div>
-              {unansweredCount || mandatoryUnansweredCount ? (
-                <div className="candidate-final-warning">
-                  <AlertTriangle size={18} aria-hidden="true" />
-                  <div>
-                    <strong>Review before submitting</strong>
-                    <p>
-                      {unansweredCount} question{unansweredCount === 1 ? "" : "s"} still
-                      unanswered
-                      {mandatoryUnansweredCount
-                        ? `, including ${mandatoryUnansweredCount} mandatory question${
-                            mandatoryUnansweredCount === 1 ? "" : "s"
-                          }`
-                        : ""}
-                      .
-                    </p>
-                  </div>
-                </div>
-              ) : null}
-              <div className="candidate-final-question-summary">
-                <div className="candidate-final-summary-heading">
-                  <div>
-                    <span className="candidate-kicker">Question Review</span>
-                    <h3>Your answers before final submission</h3>
-                  </div>
-                  <p>
-                    The understanding signal is an answer-completion estimate from
-                    code presence, saved/submitted state, and visible sample test
-                    results.
-                  </p>
-                </div>
-                {questionSubmissionSummary.map((item) => (
-                  <article key={item.question.id} className="candidate-final-question-card">
-                    <div className="candidate-final-question-head">
-                      <div>
-                        <span>
-                          Question {item.question.question_order} · {item.question.marks} marks
-                        </span>
-                        <strong>{item.question.title}</strong>
-                      </div>
-                      <span
-                        className={`status-badge ${
-                          item.isSubmitted
-                            ? "status-success"
-                            : item.isAttempted
-                              ? "status-warning"
-                              : "status-danger"
-                        }`}
-                      >
-                        {item.isSubmitted
-                          ? "submitted"
-                          : item.isAttempted
-                            ? "draft"
-                            : "unanswered"}
-                      </span>
-                    </div>
-                    <div className="candidate-final-question-meta">
-                      <span>{item.language}</span>
-                      <span>Time spent {formatRemainingTime(item.timeSpentSeconds)}</span>
-                      <span>{item.lineCount} code lines</span>
-                      <span>
-                        {item.sampleTotal
-                          ? `${item.samplePassed}/${item.sampleTotal} visible tests passed`
-                          : "No visible test run in this review"}
-                      </span>
-                      <span>
-                        {item.submittedAt
-                          ? `Submitted ${formatDateTime(item.submittedAt)}`
-                          : item.lastSavedAt
-                            ? `Saved ${formatDateTime(item.lastSavedAt)}`
-                            : "Not saved yet"}
-                      </span>
-                    </div>
-                    <div className="candidate-understanding-meter">
-                      <div>
-                        <span style={{ width: `${item.answerSignal}%` }} />
-                      </div>
-                      <strong>{item.answerSignal}% answer signal</strong>
-                    </div>
-                    <pre className="candidate-final-code-preview">
-                      {item.sourceCode.trim() || "No code answered for this question."}
-                    </pre>
-                  </article>
-                ))}
-              </div>
-              {requiresEndConfirmation ? (
-                <label className="field candidate-end-confirmation">
-                  <span>More than 50% of your time is still remaining.</span>
-                  <small>Type end to confirm early final submission.</small>
-                  <input
-                    value={finalSubmitConfirmation}
-                    onChange={(event) => setFinalSubmitConfirmation(event.target.value)}
-                    placeholder="Type end"
-                  />
-                </label>
-              ) : null}
-              <div className="confirm-dialog-actions">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setShowSubmitAssessmentDialog(false)}
-                >
-                  Continue Test
-                </Button>
-                <Button
-                  type="button"
-                  disabled={
-                    submitMutation.isPending ||
-                    (requiresEndConfirmation &&
-                      finalSubmitConfirmation.trim().toLowerCase() !== "end")
-                  }
-                  onClick={confirmFinalSubmit}
-                >
-                  {submitMutation.isPending ? "Submitting..." : "Submit Assessment"}
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
-      </section>
-    </main>
+      {showSubmitAssessmentDialog ? (
+        <CandidateFinalSubmitDialog
+          items={questionProgress}
+          attemptedCount={attemptedCount}
+          submittedCount={submittedCount}
+          unansweredCount={unansweredCount}
+          mandatoryUnansweredCount={mandatoryUnansweredCount}
+          remainingSeconds={displayRemainingSeconds}
+          requiresEndConfirmation={requiresEndConfirmation}
+          confirmationValue={finalSubmitConfirmation}
+          onConfirmationChange={setFinalSubmitConfirmation}
+          isSubmitting={submitMutation.isPending}
+          errorMessage={mutationError(submitMutation.error)}
+          onClose={() => setShowSubmitAssessmentDialog(false)}
+          onSubmit={confirmFinalSubmit}
+          onReview={reviewQuestion}
+        />
+      ) : null}
+    </div>
   );
 }
