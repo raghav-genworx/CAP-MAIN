@@ -3,6 +3,8 @@
 from typing import Any
 from unittest import TestCase
 
+import pytest
+
 from control.agents.question_agent.nodes.problem_statement_node import (
     ProblemStatementNodeMixin,
 )
@@ -10,6 +12,8 @@ from control.agents.question_agent.states.question_state import (
     ProblemStatementOnlyOutput,
     QuestionGenerationState,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class _ProblemStatementNodeHarness(ProblemStatementNodeMixin):

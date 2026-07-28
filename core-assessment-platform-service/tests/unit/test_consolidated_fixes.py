@@ -4,26 +4,29 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest import TestCase
 
+import pytest
 from pydantic import ValidationError
 
 from core.exceptions.assessment import (
     AssessmentValidationError,
     CandidateInviteError,
 )
-from core.services.assessment_lifecycle import effective_slot_status
-from core.services.assessment_schedule import normalize_assessment_schedule
-from core.services.assessment_service import (
+from core.services.assessments.assessment_lifecycle import effective_slot_status
+from core.services.assessments.assessment_schedule import normalize_assessment_schedule
+from core.services.assessments.assessment_service import (
     AssessmentService,
     CandidateAssessmentContext,
 )
-from data.models.postgres.assessment_slot import AssessmentSlotModel
-from data.models.postgres.submission import SubmissionModel
+from data.models.postgres.core.assessment_slot import AssessmentSlotModel
+from data.models.postgres.core.submission import SubmissionModel
 from schemas.assessments import (
     AssessmentCreateRequest,
     SlotStatus,
     SubmissionExecutionSummary,
 )
 from schemas.candidate_portal import CandidateCheckpointRequest
+
+pytestmark = pytest.mark.unit
 
 
 class ConsolidatedFixesTests(TestCase):

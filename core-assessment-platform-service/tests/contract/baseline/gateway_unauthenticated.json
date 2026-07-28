@@ -1,0 +1,575 @@
+{
+  "DELETE /api/v1/assessments/{assessment_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "DELETE /api/v1/question-bank/groups/{group_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "DELETE /api/v1/question-bank/questions/{question_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/slots/{slot_id}/candidates": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/slots/{slot_id}/monitoring": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/slots/{slot_id}/monitoring/stream": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": true,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/dashboard": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/reports": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/reports/candidates/{candidate_assessment_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/reports/candidates/{candidate_assessment_id}/download": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/reports/download": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/evaluations/reports/tests/{slot_id}/download": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/assessments/{assessment_id}/slots": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/auth/firebase-config": {
+    "auth": "public",
+    "detail": null,
+    "envelope_keys": [
+      "apiKey",
+      "appId",
+      "authDomain",
+      "measurementId",
+      "messagingSenderId",
+      "projectId",
+      "storageBucket"
+    ],
+    "sse": false,
+    "unauthenticated_status": 200
+  },
+  "GET /api/v1/auth/me": {
+    "auth": "recruiter-onboarding",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/candidate/assessment": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/notifications": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/notifications/settings": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/notifications/stream": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": true,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/notifications/unread-count": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/question-bank/groups": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "GET /api/v1/question-bank/questions": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "PATCH /api/v1/assessments/slots/{slot_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "PATCH /api/v1/assessments/{assessment_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "PATCH /api/v1/question-bank/groups/{group_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "PATCH /api/v1/question-bank/questions/{question_id}": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/candidate-assessments/{candidate_assessment_id}/invite/resend": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/slots/{slot_id}/actions": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/slots/{slot_id}/candidates/import": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/slots/{slot_id}/invites/send": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/{assessment_id}/evaluations/backfill": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/{assessment_id}/evaluations/jobs/{job_id}/retry": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/{assessment_id}/questions": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/assessments/{assessment_id}/slots": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/auth/start-free-trial": {
+    "auth": "recruiter-onboarding",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/checkpoint": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/hidden-check": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/proctoring-events": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/run-sample": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/start": {
+    "auth": "public",
+    "detail": [
+      {
+        "loc": [
+          "body",
+          "token"
+        ],
+        "msg": "Field required",
+        "type": "missing"
+      }
+    ],
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 422
+  },
+  "POST /api/v1/candidate/submit": {
+    "auth": "candidate",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/candidate/verify-invite": {
+    "auth": "public",
+    "detail": [
+      {
+        "loc": [
+          "body",
+          "token"
+        ],
+        "msg": "Field required",
+        "type": "missing"
+      }
+    ],
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 422
+  },
+  "POST /api/v1/notifications/read-all": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/notifications/{notification_id}/read": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/groups": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/ai-draft": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/ai-draft/stream": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": true,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/bulk-import": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/refine-solution": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/refine-test-cases": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "POST /api/v1/question-bank/questions/validate-draft": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  },
+  "PUT /api/v1/notifications/settings": {
+    "auth": "recruiter",
+    "detail": "Missing bearer token",
+    "envelope_keys": [
+      "detail",
+      "trace_id"
+    ],
+    "sse": false,
+    "unauthenticated_status": 401
+  }
+}
