@@ -1,0 +1,197 @@
+# The consolidated backend: one API process and one background worker.
+#
+# Both build from core-assessment-platform-service and both run the whole
+# platform. Execution and evaluation are reached in-process, so this file no
+# longer starts a container per bounded context -- compose.legacy.yml keeps those
+# for rollback.
+#
+# Requires compose.infra.yml to be running. `depends_on` does not cross projects,
+# so the migration jobs block on the database themselves.
+#
+#   docker compose -f compose.backend.yml up -d
+name: cap-backend
+
+x-api-healthcheck: &api-healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
+  interval: 30s
+  timeout: 30s
+  retries: 5
+  start_period: 30s
+
+# Duplicated in compose.legacy.yml: YAML anchors do not cross files, and the
+# alternative (an include: that merges everything into one project) is what the
+# split exists to avoid. Keep the two in step when editing.
+x-service-common-env: &service-common-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_PREFIX: /api/v1
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/1
+  # Judge0 reachability is shared, not execution-service-only: with
+  # EXECUTION_TRANSPORT=inprocess any process may drive the sandbox directly.
+  JUDGE0_BASE_URL: http://judge0-server:2358
+  JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
+  JUDGE0_AUTH_HEADER: ${JUDGE0_AUTH_HEADER:-X-Auth-Token}
+  JUDGE0_REQUEST_TIMEOUT_SECONDS: ${JUDGE0_REQUEST_TIMEOUT_SECONDS:-10}
+  JUDGE0_POLL_INTERVAL_SECONDS: ${JUDGE0_POLL_INTERVAL_SECONDS:-0.5}
+  JUDGE0_MAX_POLL_ATTEMPTS: ${JUDGE0_MAX_POLL_ATTEMPTS:-30}
+  DEFAULT_CPU_TIME_LIMIT_SECONDS: ${DEFAULT_CPU_TIME_LIMIT_SECONDS:-2}
+  DEFAULT_MEMORY_LIMIT_KB: ${DEFAULT_MEMORY_LIMIT_KB:-128000}
+  JAVA_MINIMUM_MEMORY_LIMIT_KB: ${JAVA_MINIMUM_MEMORY_LIMIT_KB:-512000}
+
+x-database-url: &database-url
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
+
+services:
+  # Two Alembic trees against one database, each with its own version table.
+  # Run core first: it owns the shared schema the evaluation tables sit beside.
+  core-assessment-migrate:
+    build:
+      context: ./core-assessment-platform-service
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - python -m wait_for_db && alembic -c alembic.ini upgrade head
+    env_file:
+      - ./core-assessment-platform-service/.env
+    environment:
+      <<: *database-url
+      APP_ENV: ${APP_ENV:-development}
+    networks: [cap-net]
+
+  code-evaluation-migrate:
+    build:
+      context: ./core-assessment-platform-service
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - python -m wait_for_db && alembic -c alembic.evaluation.ini upgrade head
+    env_file:
+      - ./code-evaluation-service/.env
+    environment:
+      <<: *database-url
+      APP_ENV: ${APP_ENV:-development}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
+    depends_on:
+      core-assessment-migrate:
+        condition: service_completed_successfully
+    networks: [cap-net]
+
+  core-assessment-platform-service:
+    build:
+      context: ./core-assessment-platform-service
+    restart: unless-stopped
+    env_file:
+      - ./core-assessment-platform-service/.env
+    environment:
+      <<: [*service-common-env, *database-url]
+      APP_NAME: Core Assessment Platform Service
+      # Core reaches execution and evaluation in-process. Set either back to
+      # "http" to route over the network again, with compose.legacy.yml up.
+      EXECUTION_TRANSPORT: ${EXECUTION_TRANSPORT:-inprocess}
+      EVALUATION_TRANSPORT: ${EVALUATION_TRANSPORT:-inprocess}
+      # With evaluation in-process this process generates the PDFs, so it needs
+      # the report directory the worker also writes to.
+      EVALUATION_REPORT_DIR: /app/data/reports
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      AUTO_CREATE_RECRUITER_ROLE: ${AUTO_CREATE_RECRUITER_ROLE:-true}
+      SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
+      EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
+      EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
+      EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
+      EVALUATION_JOB_LEASE_SECONDS: ${EVALUATION_JOB_LEASE_SECONDS:-300}
+      # Only consulted when the matching transport is "http".
+      CODE_EXECUTION_API_BASE_URL: ${CODE_EXECUTION_API_BASE_URL:-http://code-execution-service:8000/api/v1}
+      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-300}
+      CODE_EVALUATION_API_BASE_URL: ${CODE_EVALUATION_API_BASE_URL:-http://code-evaluation-service:8000/api/v1}
+      CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_API_KEY_1: ${GROQ_API_KEY_1:-}
+      GROQ_API_KEY_2: ${GROQ_API_KEY_2:-}
+      GROQ_API_KEY_3: ${GROQ_API_KEY_3:-}
+      GROQ_API_KEY_4: ${GROQ_API_KEY_4:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_GPT_OSS_MODEL: ${GROQ_GPT_OSS_MODEL:-openai/gpt-oss-120b}
+      GROQ_RETRY_COUNT: ${GROQ_RETRY_COUNT:-3}
+      GROQ_RETRY_BACKOFF_SECONDS: ${GROQ_RETRY_BACKOFF_SECONDS:-0.5}
+      GROQ_REQUEST_TIMEOUT_SECONDS: ${GROQ_REQUEST_TIMEOUT_SECONDS:-60}
+      GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
+      BREVO_REQUEST_TIMEOUT_SECONDS: ${BREVO_REQUEST_TIMEOUT_SECONDS:-30}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      INVITE_TOKEN_PEPPER: ${INVITE_TOKEN_PEPPER:-change-me-local-invite-token-pepper}
+      CANDIDATE_SESSION_SECRET: ${CANDIDATE_SESSION_SECRET:-change-me-local-candidate-session-secret}
+    depends_on:
+      code-evaluation-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${CORE_SERVICE_PORT:-8002}:8000"
+    volumes:
+      - ./core-assessment-platform-service/src:/app/src:ro
+      # Shared with the worker: whichever process generates a report, the process
+      # serving the download has to see the file.
+      - cap-evaluation-data:/app/data
+    networks:
+      cap-net:
+        # The frontend proxies to this name from its own project.
+        aliases: [core-assessment-platform-service]
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
+    healthcheck: *api-healthcheck
+
+  code-evaluation-worker:
+    build:
+      context: ./core-assessment-platform-service
+    restart: unless-stopped
+    command: [ "python", "-m", "worker" ]
+    env_file:
+      - ./code-evaluation-service/.env
+    environment:
+      <<: [*service-common-env, *database-url]
+      APP_NAME: Code Evaluation Worker
+      # /app/data is the one writable path in the image (chowned to appuser).
+      # Beat shelves its schedule here; left in the working directory it dies on
+      # a permission error while the worker still reports ready.
+      CELERY_BEAT_SCHEDULE_PATH: /app/data/celerybeat-schedule
+      EVALUATION_REPORT_DIR: /app/data/reports
+      SEED_DEMO_EVALUATIONS: "false"
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
+      EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
+      EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
+      EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
+      EVALUATION_JOB_LEASE_SECONDS: ${EVALUATION_JOB_LEASE_SECONDS:-300}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_REQUEST_TIMEOUT_SECONDS: ${GROQ_REQUEST_TIMEOUT_SECONDS:-60}
+      GROQ_RETRY_COUNT: ${GROQ_RETRY_COUNT:-3}
+      GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
+    depends_on:
+      core-assessment-platform-service:
+        condition: service_healthy
+    volumes:
+      - ./core-assessment-platform-service/src:/app/src:ro
+      - cap-evaluation-data:/app/data
+    networks: [cap-net]
+
+networks:
+  cap-net:
+    external: true
+
+volumes:
+  # External so compose.legacy.yml can mount the same reports directory. A
+  # project-scoped volume would silently give each project its own copy.
+  cap-evaluation-data:
+    external: true

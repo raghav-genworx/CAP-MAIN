@@ -163,6 +163,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Prepare ignored environment files
         run: |
+          cp .env.example .env
+          cp api-gateway-service/.env.example api-gateway-service/.env
+          cp code-evaluation-service/.env.example code-evaluation-service/.env
+          cp code-execution-service/.env.example code-execution-service/.env
           cp core-assessment-platform-service/.env.example core-assessment-platform-service/.env
           cp frontend/.env.example frontend/.env
-      - run: docker compose config --quiet
+      # Infrastructure, backend and frontend are independent Compose projects, so
+      # each file is validated on its own -- there is no single entry point to
+      # check. compose.legacy.yml is included: it is the rollback target and has
+      # to stay parseable even though nothing starts it.
+      - name: Validate every Compose project
+        run: |
+          for f in compose.infra.yml compose.backend.yml compose.frontend.yml compose.legacy.yml; do
+            echo "validating $f"
+            docker compose -f "$f" config --quiet
+          done

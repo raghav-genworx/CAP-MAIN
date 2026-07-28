@@ -516,7 +516,7 @@ Core additionally has:
 ```bash
 cp .env.example .env
 # Copy each service .env.example → .env
-docker compose up --build
+make up
 ```
 
 Open `http://localhost:5173` for the frontend.

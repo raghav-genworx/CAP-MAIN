@@ -1,0 +1,51 @@
+# The recruiter and candidate React application.
+#
+# Its own Compose project, so the SPA can be restarted or rebuilt without
+# touching the backend, and the backend can be cycled without dropping the dev
+# server and its node_modules volume.
+#
+# Requires compose.backend.yml to be running: the dev server proxies /api to it
+# by name over the shared network. `depends_on` does not cross projects, so Vite
+# starts regardless and the first request fails until the backend is up.
+#
+#   docker compose -f compose.frontend.yml up -d
+name: cap-frontend
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: development
+    restart: unless-stopped
+    environment:
+      # The SPA calls /api/core/... ; Vite rewrites /api to /api/v1, so the
+      # backend receives /api/v1/core/... -- the prefix it serves directly now
+      # that the gateway is folded in.
+      VITE_API_GATEWAY_BASE_URL: /api
+      # Rollback: point this at http://api-gateway-service:8000 with
+      # compose.legacy.yml up to put the gateway back in front.
+      VITE_DEV_PROXY_TARGET: ${FRONTEND_PROXY_TARGET:-http://core-assessment-platform-service:8000}
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    networks:
+      cap-net:
+        aliases: [frontend]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:5173/ >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+networks:
+  cap-net:
+    external: true
+
+volumes:
+  frontend-node-modules:
+    name: cap-frontend-node-modules

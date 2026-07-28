@@ -12,15 +12,22 @@ For a full codebase walkthrough with diagrams, service map, data model, and
 
 ## Services
 
-| Service | Local port | Responsibility |
-| --- | ---: | --- |
-| Frontend | 5173 | Recruiter and candidate React application |
-| API gateway | 8001 | Browser authentication, authorization, and upstream routing |
-| Core platform | 8002 | Assessments, candidates, authentication, AI orchestration, email |
-| Code execution | 8003 | Trusted backend-only Judge0 adapter |
-| Code evaluation | 8004 | Scoring, ranking, evaluation jobs, PDF reports |
-| Judge0 | 12358 | Sandboxed compilation and execution |
-| PostgreSQL | 55432 | Core, evaluation, and Judge0 databases |
+The four backends were consolidated into one modular FastAPI application. It
+serves every browser route, reaches code execution and evaluation in-process, and
+runs long jobs in a separate Celery worker.
+
+| Compose project | Service | Local port | Responsibility |
+| --- | --- | ---: | --- |
+| `cap-frontend` | Frontend | 5173 | Recruiter and candidate React application |
+| `cap-backend` | Core platform | 8002 | Every `/api/v1` route: assessments, candidates, auth, question bank, notifications, execution, evaluation |
+| `cap-backend` | Evaluation worker | — | Celery worker and beat: scoring, PDF reports, retention |
+| `cap-infra` | Judge0 | 12358 | Sandboxed compilation and execution |
+| `cap-infra` | PostgreSQL | 55432 | Core, evaluation, and Judge0 databases |
+| `cap-infra` | Redis | 6379 | Judge0 queue, notification pub/sub, Celery broker |
+
+`compose.legacy.yml` still defines the pre-consolidation gateway (8001),
+execution (8003) and evaluation (8004) services. Nothing calls them; they exist
+as the rollback target and are not started by default.
 
 ## Local Start
 
@@ -31,10 +38,28 @@ cp code-evaluation-service/.env.example code-evaluation-service/.env
 cp code-execution-service/.env.example code-execution-service/.env
 cp core-assessment-platform-service/.env.example core-assessment-platform-service/.env
 cp frontend/.env.example frontend/.env
-docker compose up --build
+make up
 ```
 
-The repository root contains the only Compose entry point. Root `.env` values
+Infrastructure, backend and frontend are **independent Compose projects** sharing
+one external network, so any one can be rebuilt or restarted without cycling the
+others. `make up` creates the shared network and reports volume, then starts them
+in order; `make ps` shows all projects and `make down` stops them.
+
+Start order matters, because `depends_on` does not span Compose projects: the
+backend blocks on the database itself (`python -m wait_for_db`) rather than
+relying on a healthcheck condition it can no longer see.
+
+| Command | Effect |
+| --- | --- |
+| `make up` | Network, volume, then infra + backend + frontend |
+| `make up-backend` | Rebuild and restart only the backend |
+| `make up-frontend` | Rebuild and restart only the SPA |
+| `make up-legacy` | Start the pre-consolidation services, for rollback |
+| `make down` | Stop every project, keeping volumes |
+| `make nuke` | Also drop the report volume and the shared network |
+
+Root `.env` values
 control shared infrastructure, published ports, and shared tokens. Each
 application keeps its standalone settings in its own ignored `.env` file. The
 frontend build uses same-origin `/api/*` routes and reads Firebase configuration

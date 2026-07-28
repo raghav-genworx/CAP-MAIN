@@ -188,7 +188,7 @@ both matter when it moves to `routes/sse.py`.
 
 | ✔ | Method | Path | Auth | Consumer |
 |---|---|---|---|---|
-| | GET | `/health` | infra | `docker-compose.yml` `x-api-healthcheck`, Cloud Run probes |
+| | GET | `/health` | infra | `compose.backend.yml` `x-api-healthcheck`, Cloud Run probes |
 
 ---
 

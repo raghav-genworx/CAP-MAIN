@@ -12,7 +12,7 @@ cp code-evaluation-service/.env.example code-evaluation-service/.env
 cp code-execution-service/.env.example code-execution-service/.env
 cp core-assessment-platform-service/.env.example core-assessment-platform-service/.env
 cp frontend/.env.example frontend/.env
-docker compose up --build
+make up
 ```
 
 Open the frontend at http://localhost:5173.
@@ -55,7 +55,10 @@ docker compose build frontend
 docker compose up frontend
 ```
 
-The root `docker-compose.yml` is the single Compose entry point. It uses `docker/judge0/judge0.conf` so Judge0 connects to the shared Compose `postgres` and `redis` services.
+Infrastructure, backend and frontend are independent Compose projects
+(`compose.infra.yml`, `compose.backend.yml`, `compose.frontend.yml`) sharing one
+external network, orchestrated by the root `Makefile`. `compose.legacy.yml` holds
+the pre-consolidation services and is not started by default. It uses `docker/judge0/judge0.conf` so Judge0 connects to the shared Compose `postgres` and `redis` services.
 
 ## Cloud Run Notes
 
@@ -129,7 +132,7 @@ If you previously ran the full Judge0 image, recreate Judge0's database state so
 
 ```sh
 docker compose down -v
-docker compose up --build
+make up
 ```
 
 ## Reset Data
