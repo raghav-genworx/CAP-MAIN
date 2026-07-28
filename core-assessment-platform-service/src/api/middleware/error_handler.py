@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from api.middleware.logging import get_request_id
 from core.exceptions.base import COEApplicationError
+from core.exceptions.mapper import detail_for, status_code_for
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,8 @@ def setup_error_handlers(app: FastAPI) -> None:
             exc.message,
         )
         return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.message, "trace_id": request_id},
+            status_code=status_code_for(exc),
+            content={"detail": detail_for(exc), "trace_id": request_id},
         )
 
     @app.exception_handler(RequestValidationError)
@@ -80,6 +81,6 @@ def setup_error_handlers(app: FastAPI) -> None:
             exc_info=exc,
         )
         return JSONResponse(
-            status_code=500,
-            content={"detail": "Internal server error", "trace_id": request_id},
+            status_code=status_code_for(exc),
+            content={"detail": detail_for(exc), "trace_id": request_id},
         )

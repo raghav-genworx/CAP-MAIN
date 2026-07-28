@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from core.exceptions.assessment import ExecutionAdapterError
-from core.services.output_validation import (
+from core.services.execution.ports import ExecutionPort
+from core.services.question_bank.output_validation import (
     apply_answer_validation,
     default_checker_explanation,
     normalize_answer_validation_mode,
 )
-from handlers.http_clients.execution import ExecutionAdapterService
 from schemas.question_bank import (
     AnswerValidationMode,
     SolutionValidationCaseResult,
@@ -94,7 +94,7 @@ _INT_RE = re.compile(r"-?\d+")
 class QuestionAgentToolsMixin(QuestionAgentUtilsMixin):
     """Execution validation, repair, and testcase helper routines."""
 
-    _execution_adapter: ExecutionAdapterService
+    _execution_adapter: ExecutionPort
 
     @staticmethod
     def _answer_validation_kwargs(

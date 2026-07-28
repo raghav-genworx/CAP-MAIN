@@ -22,6 +22,7 @@ from schemas.evaluation_reports import (
     EvaluationJobResult,
     RetryEvaluationResponse,
 )
+from utils.helpers.concurrency import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class EvaluationAdapterService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def create_job(self, payload: dict[str, Any]) -> EvaluationJobResult:
+    async def create_job_async(self, payload: dict[str, Any]) -> EvaluationJobResult:
         """Create an evaluation job and return the normalized response."""
 
         url = (
@@ -49,11 +50,11 @@ class EvaluationAdapterService:
             "/evaluations/jobs"
         )
         try:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=self._settings.code_evaluation_request_timeout_seconds,
                 headers=self._service_headers(),
             ) as client:
-                response = client.post(url, json=payload)
+                response = await client.post(url, json=payload)
                 if response.status_code == 404:
                     logger.info(
                         "evaluation_service_job_not_found status_code=%s "
@@ -78,7 +79,9 @@ class EvaluationAdapterService:
 
         return EvaluationJobResult.model_validate(response.json())
 
-    def get_leaderboard(self, assessment_id: str) -> list[CandidateEvaluationScorecard]:
+    async def get_leaderboard_async(
+        self, assessment_id: str
+    ) -> list[CandidateEvaluationScorecard]:
         """Return authoritative ranked scorecards for one assessment."""
 
         url = (
@@ -86,11 +89,11 @@ class EvaluationAdapterService:
             f"/evaluations/assessment/{assessment_id}/leaderboard"
         )
         try:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=self._settings.code_evaluation_request_timeout_seconds,
                 headers=self._service_headers(),
             ) as client:
-                response = client.get(url)
+                response = await client.get(url)
                 if response.status_code == 404:
                     logger.info(
                         "evaluation_service_leaderboard_not_found "
@@ -123,13 +126,15 @@ class EvaluationAdapterService:
     def get_dashboard(self, assessment_id: str) -> AssessmentEvaluationDashboard:
         """Return the complete evaluation workspace for one assessment."""
 
-        response = self._get(f"/evaluations/assessment/{assessment_id}")
+        response = run_async(self._get, f"/evaluations/assessment/{assessment_id}")
         return AssessmentEvaluationDashboard.model_validate(response.json())
 
     def get_assessment_report(self, assessment_id: str) -> AssessmentReportResponse:
         """Return report metadata for one assessment."""
 
-        response = self._get(f"/evaluations/reports/assessment/{assessment_id}")
+        response = run_async(
+            self._get, f"/evaluations/reports/assessment/{assessment_id}"
+        )
         return AssessmentReportResponse.model_validate(response.json())
 
     def get_candidate_report(
@@ -139,16 +144,17 @@ class EvaluationAdapterService:
     ) -> CandidateReportResponse:
         """Return an authorized candidate scorecard payload."""
 
-        response = self._get(
+        response = run_async(
+            self._get,
             f"/evaluations/reports/assessment/{assessment_id}/candidate/"
-            f"{candidate_assessment_id}"
+            f"{candidate_assessment_id}",
         )
         return CandidateReportResponse.model_validate(response.json())
 
     def retry_job(self, job_id: str) -> RetryEvaluationResponse:
         """Retry one failed evaluation job."""
 
-        response = self._post(f"/evaluations/jobs/{job_id}/retry")
+        response = run_async(self._post, f"/evaluations/jobs/{job_id}/retry")
         return RetryEvaluationResponse.model_validate(response.json())
 
     def download_assessment_report(
@@ -157,8 +163,8 @@ class EvaluationAdapterService:
     ) -> EvaluationReportDownload:
         """Download the assessment PDF through the trusted service channel."""
 
-        response = self._get(
-            f"/evaluations/reports/assessment/{assessment_id}/download"
+        response = run_async(
+            self._get, f"/evaluations/reports/assessment/{assessment_id}/download"
         )
         return self._download_from(response, f"assessment-{assessment_id}.pdf")
 
@@ -169,9 +175,10 @@ class EvaluationAdapterService:
     ) -> EvaluationReportDownload:
         """Download one candidate scorecard through the trusted service channel."""
 
-        response = self._get(
+        response = run_async(
+            self._get,
             f"/evaluations/reports/assessment/{assessment_id}/candidate/"
-            f"{candidate_assessment_id}/download"
+            f"{candidate_assessment_id}/download",
         )
         return self._download_from(
             response,
@@ -186,20 +193,21 @@ class EvaluationAdapterService:
     ) -> EvaluationReportDownload:
         """Download one scheduled test report through the trusted channel."""
 
-        response = self._request(
+        response = run_async(
+            self._request_async,
             "POST",
             f"/evaluations/reports/assessment/{assessment_id}/tests/{test_id}/download",
             json_payload=payload,
         )
         return self._download_from(response, f"test-{test_id}.pdf")
 
-    def _get(self, path: str) -> httpx.Response:
-        return self._request("GET", path)
+    async def _get(self, path: str) -> httpx.Response:
+        return await self._request_async("GET", path)
 
-    def _post(self, path: str) -> httpx.Response:
-        return self._request("POST", path)
+    async def _post(self, path: str) -> httpx.Response:
+        return await self._request_async("POST", path)
 
-    def _request(
+    async def _request_async(
         self,
         method: str,
         path: str,
@@ -208,14 +216,14 @@ class EvaluationAdapterService:
     ) -> httpx.Response:
         url = f"{self._settings.code_evaluation_api_base_url.rstrip('/')}{path}"
         try:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=self._settings.code_evaluation_request_timeout_seconds,
                 headers=self._service_headers(),
             ) as client:
                 request_kwargs: dict[str, Any] = {}
                 if json_payload is not None:
                     request_kwargs["json"] = json_payload
-                response = client.request(method, url, **request_kwargs)
+                response = await client.request(method, url, **request_kwargs)
                 if response.status_code == 404:
                     logger.info(
                         "evaluation_service_not_found method=%s path=%s status_code=%s",
@@ -236,6 +244,16 @@ class EvaluationAdapterService:
                 return response
         except httpx.HTTPError as exc:
             raise EvaluationAdapterError("Evaluation service request failed") from exc
+
+    def create_job(self, payload: dict[str, Any]) -> EvaluationJobResult:
+        """Create an evaluation job. Bridges the async transport for sync callers."""
+
+        return run_async(self.create_job_async, payload)
+
+    def get_leaderboard(self, assessment_id: str) -> list[CandidateEvaluationScorecard]:
+        """Return ranked scorecards. Bridges the async transport for sync callers."""
+
+        return run_async(self.get_leaderboard_async, assessment_id)
 
     def _service_headers(self) -> dict[str, str]:
         return {

@@ -16,9 +16,10 @@ from api.rest.dependencies import (
     require_role,
     settings_dependency,
 )
+from api.rest.routes import sse
 from config.settings import Settings
-from core.services.notification_service import NotificationService
-from handlers.clients.redis_broker import NotificationBroker
+from core.services.notifications.notification_service import NotificationService
+from data.clients.redis_client import NotificationBroker
 from schemas.auth import AuthenticatedUser
 from schemas.notifications import (
     MarkReadResponse,
@@ -146,15 +147,7 @@ async def stream_notifications(
         finally:
             await run_in_threadpool(session.close)
 
-    return StreamingResponse(
-        notification_events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return sse.event_stream(notification_events())
 
 
 @router.post(

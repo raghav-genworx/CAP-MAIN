@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.question_tag_taxonomy import QUESTION_TAG_CATEGORIES
+from constants.question_tag_taxonomy import QUESTION_TAG_CATEGORIES
 
 from ..states.question_state import QuestionGenerationState
 from .prompt_contract import (

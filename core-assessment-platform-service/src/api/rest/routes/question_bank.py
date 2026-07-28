@@ -12,7 +12,8 @@ from api.rest.dependencies import (
     get_question_bank_service,
     require_role,
 )
-from core.services.question_bank_service import (
+from api.rest.routes import sse
+from core.services.question_bank.question_bank_service import (
     QuestionBankService,
     QuestionFilters,
     QuestionGroupFilters,
@@ -171,14 +172,7 @@ async def stream_ai_draft(
             }
             yield f"event: error\ndata: {json.dumps(event)}\n\n"
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return sse.event_stream(event_stream())
 
 
 @router.post(

@@ -1,0 +1,165 @@
+; Import boundaries for the consolidated backend.
+;
+; Four services now share one tree. What used to be enforced by the network -- a
+; context simply could not reach another service's internals -- is now enforced
+; here. These contracts are what keep each bounded context extractable back into
+; its own service: a context may be lifted out only if nothing reaches past its
+; public surface.
+;
+; Run with `make lint-imports`.
+;
+; KNOWN VIOLATION, deliberately not encoded as a contract:
+;   core.services.question_bank <-> control.agents form an import cycle.
+;   `question_bank_service` imports `QuestionGenerationWorkflow`, and the workflow's
+;   nodes import `question_bank.output_validation`. This predates the consolidation
+;   and is a real design issue -- the AI pipeline and the service that drives it are
+;   mutually dependent. Breaking it means giving the workflow its own validation
+;   port. Tracked separately; a `layers` contract cannot be added until it is gone.
+
+[importlinter]
+root_packages =
+    api
+    control
+    core
+    data
+    handlers
+    schemas
+include_external_packages = False
+
+[importlinter:contract:data-layer-independence]
+name = Data layer depends on nothing above it
+type = forbidden
+source_modules =
+    data
+forbidden_modules =
+    api
+    control
+    core
+    handlers
+
+[importlinter:contract:handlers-are-adapters]
+name = Outbound adapters never reach into business logic
+; handlers may raise domain errors (core.exceptions) but must not call services.
+type = forbidden
+source_modules =
+    handlers
+forbidden_modules =
+    api
+    control
+    core.services
+
+[importlinter:contract:evaluation-is-extractable]
+name = Evaluation context imports no other context
+type = forbidden
+source_modules =
+    core.services.evaluation
+    data.repositories.evaluation
+forbidden_modules =
+    core.services.assessments
+    core.services.auth
+    core.services.execution
+    core.services.gateway
+    core.services.notifications
+    core.services.question_bank
+
+[importlinter:contract:execution-is-extractable]
+name = Execution context imports no other context
+type = forbidden
+source_modules =
+    core.services.execution
+forbidden_modules =
+    core.services.assessments
+    core.services.auth
+    core.services.evaluation
+    core.services.gateway
+    core.services.notifications
+    core.services.question_bank
+
+[importlinter:contract:gateway-is-extractable]
+name = Gateway context imports no other context
+type = forbidden
+source_modules =
+    core.services.gateway
+forbidden_modules =
+    core.services.assessments
+    core.services.auth
+    core.services.evaluation
+    core.services.execution
+    core.services.notifications
+    core.services.question_bank
+
+[importlinter:contract:depend-on-ports-not-implementations]
+name = Nothing reaches past a context's port into its implementation
+; Sharpened when the ports landed. Consumers may import
+; `core.services.<context>.ports` -- that abstraction is the context's public
+; surface and the seam a future extraction cuts along. Importing the
+; implementation behind it re-couples the two and is what this forbids.
+;
+; The implementations are named individually rather than forbidding the package,
+; precisely so `.ports` stays reachable.
+;
+; Direct imports only. A port necessarily imports the implementation it
+; constructs, so every consumer reaches the implementation *through* the port on
+; the indirect graph -- checking transitively would forbid the pattern this
+; contract exists to encourage. What it catches is a consumer importing
+; `code_execution_service` or `evaluation_service` itself and bypassing the seam.
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    core.services.assessments
+    core.services.auth
+    core.services.notifications
+    core.services.question_bank
+    control
+forbidden_modules =
+    core.services.evaluation.evaluation_service
+    core.services.evaluation.code_quality_evaluator
+    core.services.evaluation.report_pdf_service
+    core.services.evaluation.report_formatting
+    core.services.execution.code_execution_service
+    core.services.gateway.gateway_service
+
+[importlinter:contract:leaf-contexts-stay-leaves]
+name = Auth, question bank and notifications depend on no sibling context
+; Only `assessments` may fan out, and only to auth, question_bank and
+; notifications. Anything else would couple two contexts that must stay separable.
+type = forbidden
+source_modules =
+    core.services.auth
+    core.services.notifications
+forbidden_modules =
+    core.services.assessments
+    core.services.gateway
+
+[importlinter:contract:assessments-fan-out-is-bounded]
+name = Assessments reaches no context beyond its documented edges
+; auth, question_bank and notifications directly; execution and evaluation only
+; through their ports, enforced by the contract above.
+type = forbidden
+source_modules =
+    core.services.assessments
+forbidden_modules =
+    core.services.gateway
+
+[importlinter:contract:hidden-tests-stay-server-side]
+name = Candidate portal never touches question bank persistence directly
+; The candidate-facing payload must never carry hidden tests or reference
+; solutions. Before the merge that was guaranteed by the service boundary; now the
+; ORM model is one import away.
+;
+; Direct imports only. Every route module imports `api.rest.dependencies`, which
+; wires every service, so an indirect path from any route to any model always
+; exists -- checking transitively would flag the whole application and assert
+; nothing. What this does catch is the realistic regression: someone reaching for
+; the ORM model inside the candidate route to "just add one field".
+;
+; This is weaker than the old network boundary. The load-bearing guarantee remains
+; the response model: `CandidateAssessmentPortalResponse` is what decides which
+; question fields a candidate ever sees, and it is covered by the contract suite.
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    api.rest.routes.candidate_portal
+forbidden_modules =
+    data.models.postgres.core.question_bank_question
+    data.repositories.question_bank

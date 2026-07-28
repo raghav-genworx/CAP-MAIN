@@ -73,16 +73,16 @@ from langgraph.graph import END, START, StateGraph
 from langsmith.run_trees import RunTree
 
 from config.settings import Settings
-from core.question_tag_taxonomy import (
+from constants.question_tag_taxonomy import (
     normalize_question_category,
     normalize_question_tags,
 )
-from core.services.output_validation import (
+from core.services.execution.ports import ExecutionPort
+from core.services.question_bank.output_validation import (
     default_checker_explanation,
     normalize_answer_validation_mode,
 )
 from handlers.http_clients.ai_gateway import AIGatewayService
-from handlers.http_clients.execution import ExecutionAdapterService
 from observability.tracing.langsmith import langsmith_run
 from schemas.question_bank import (
     AnswerValidationMode,
@@ -175,7 +175,7 @@ class QuestionGenerationWorkflow(QuestionAgentNodesMixin):
         self,
         settings: Settings,
         ai_gateway: AIGatewayService,
-        execution_adapter: ExecutionAdapterService,
+        execution_adapter: ExecutionPort,
     ) -> None:
         self._settings = settings
         # Every node calls the model through this LLM gateway.

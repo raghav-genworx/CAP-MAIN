@@ -11,7 +11,7 @@ from api.rest.dependencies import (
     settings_dependency,
 )
 from config.settings import Settings
-from core.services.role_service import RoleService
+from core.services.auth.role_service import RoleService
 from schemas.auth import AuthenticatedUser, FirebaseWebConfig
 
 router = APIRouter(prefix="/auth", tags=["auth"])

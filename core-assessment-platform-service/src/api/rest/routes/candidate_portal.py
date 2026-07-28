@@ -10,7 +10,7 @@ from api.rest.dependencies import (
     get_assessment_service,
     get_current_candidate_session,
 )
-from core.services.assessment_service import AssessmentService
+from core.services.assessments.assessment_service import AssessmentService
 from schemas.assessments import HiddenCheckResponse, SampleRunResponse
 from schemas.candidate_portal import (
     CandidateAssessmentPortalResponse,

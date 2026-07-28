@@ -13,6 +13,7 @@ import httpx
 
 from config.settings import Settings
 from core.exceptions.assessment import EmailDeliveryError
+from utils.helpers.concurrency import run_async
 
 LOGGER = logging.getLogger(__name__)
 INVITE_TIMEZONE = ZoneInfo("Asia/Kolkata")
@@ -25,12 +26,12 @@ class InviteMailService:
         self,
         settings: Settings,
         *,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
 
-    def send_assessment_invite(
+    async def send_assessment_invite_async(
         self,
         *,
         to_email: str,
@@ -75,13 +76,13 @@ class InviteMailService:
         }
 
         try:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 base_url=self._settings.brevo_base_url.rstrip("/"),
                 timeout=self._settings.brevo_request_timeout_seconds,
                 headers=headers,
                 transport=self._transport,
             ) as client:
-                response = client.post("/smtp/email", json=payload)
+                response = await client.post("/smtp/email", json=payload)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -95,6 +96,34 @@ class InviteMailService:
             ) from exc
         except httpx.HTTPError as exc:
             raise EmailDeliveryError("Invite email delivery failed.") from exc
+
+    def send_assessment_invite(
+        self,
+        *,
+        to_email: str,
+        to_name: str,
+        assessment_title: str,
+        slot_title: str,
+        invite_url: str,
+        start_at: datetime,
+        end_at: datetime,
+        duration_minutes: int,
+        instructions: str,
+    ) -> None:
+        """Send an invite email. Bridges the async transport for sync callers."""
+
+        run_async(
+            self.send_assessment_invite_async,
+            to_email=to_email,
+            to_name=to_name,
+            assessment_title=assessment_title,
+            slot_title=slot_title,
+            invite_url=invite_url,
+            start_at=start_at,
+            end_at=end_at,
+            duration_minutes=duration_minutes,
+            instructions=instructions,
+        )
 
     @staticmethod
     def _html_body(

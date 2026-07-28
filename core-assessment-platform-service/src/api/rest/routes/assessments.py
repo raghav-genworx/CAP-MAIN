@@ -14,7 +14,8 @@ from api.rest.dependencies import (
     get_assessment_service,
     require_role,
 )
-from core.services.assessment_service import AssessmentService
+from api.rest.routes import sse
+from core.services.assessments.assessment_service import AssessmentService
 from schemas.assessments import (
     AssessmentCreateRequest,
     AssessmentListResponse,
@@ -598,12 +599,4 @@ async def slot_monitoring_stream(
         finally:
             await run_in_threadpool(session.close)
 
-    return StreamingResponse(
-        monitoring_events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return sse.event_stream(monitoring_events())

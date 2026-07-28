@@ -1,4 +1,21 @@
-"""OpenAI-compatible HTTP gateway for structured AI completions."""
+"""AI provider gateway with model and key-slot failover.
+
+Transport is ``AsyncOpenAI``; the failover loop around it stays synchronous and is
+bridged per call.
+
+**Why this does not use tenacity**, unlike the other adapters and COE's general
+guidance. Tenacity retries one callable with a backoff. This does something else:
+it walks a sequence of provider targets (each a model paired with an API-key slot),
+classifies every failure -- rate limit, auth, bad request, exhaustion -- to decide
+whether to advance a target or abandon the run, honours the provider's
+``Retry-After`` header over its own computed delay, and writes a row to
+``ai_run_logs`` per attempt. Retry policy and routing policy are the same decision
+here, and tenacity has no notion of the second. Wrapping it around each target
+would add a layer without removing this loop.
+
+Exponential backoff, which is what COE §8 is actually asking for, is present in
+``_retry_delay_seconds``.
+"""
 
 from __future__ import annotations
 
@@ -9,14 +26,15 @@ from dataclasses import dataclass
 from time import perf_counter, sleep
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config.settings import Settings
-from data.models.postgres.ai_run_log import AIRunLogModel
-from data.repositories.ai_run_log_repository import AIRunLogRepository
+from data.models.postgres.core.ai_run_log import AIRunLogModel
+from data.repositories.ai.ai_run_log_repository import AIRunLogRepository
+from utils.helpers.concurrency import run_async
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +45,7 @@ class _AIProviderTarget:
 
     provider: str
     model: str
-    client: OpenAI
+    client: AsyncOpenAI
     api_key_slot: int | None = None
 
     @property
@@ -186,7 +204,8 @@ class AIGatewayService:
     ) -> BaseModel:
         use_json_schema = self._supports_json_schema(target)
         try:
-            response = self._create_structured_completion(
+            response = run_async(
+                self._create_structured_completion_async,
                 target=target,
                 schema_name=schema_name,
                 system_prompt=system_prompt,
@@ -200,7 +219,8 @@ class AIGatewayService:
         except Exception as exc:  # pragma: no cover - network/model dependent
             if not use_json_schema or self._is_target_exhaustion_error(exc):
                 raise
-            response = self._create_structured_completion(
+            response = run_async(
+                self._create_structured_completion_async,
                 target=target,
                 schema_name=schema_name,
                 system_prompt=system_prompt,
@@ -292,7 +312,7 @@ class AIGatewayService:
             provider_delay = 0
         return min(120.0, max(0.0, fallback_seconds, provider_delay))
 
-    def _create_structured_completion(
+    async def _create_structured_completion_async(
         self,
         *,
         target: _AIProviderTarget,
@@ -333,7 +353,7 @@ class AIGatewayService:
             }
         else:
             kwargs["response_format"] = {"type": "json_object"}
-        return target.client.chat.completions.create(**kwargs)
+        return await target.client.chat.completions.create(**kwargs)
 
     @staticmethod
     def _supports_json_schema(target: _AIProviderTarget) -> bool:
@@ -366,7 +386,7 @@ class AIGatewayService:
             key=lambda model: not model.startswith("openai/gpt-oss-"),
         )
         for slot_number, api_key in self._settings.groq_api_key_slots:
-            client = OpenAI(
+            client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=self._settings.groq_base_url,
                 timeout=self._settings.groq_request_timeout_seconds,

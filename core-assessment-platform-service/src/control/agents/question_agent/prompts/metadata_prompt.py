@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.question_tag_taxonomy import QUESTION_TAG_CATEGORIES
+from constants.question_tag_taxonomy import QUESTION_TAG_CATEGORIES
 
 from ..states.question_state import QuestionGenerationState
 from .prompt_contract import build_task_system_prompt, build_task_user_prompt

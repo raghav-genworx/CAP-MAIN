@@ -1,0 +1,1 @@
+"""Recruiter notification persistence."""

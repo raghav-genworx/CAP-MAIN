@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from core.question_tag_taxonomy import (
+from constants.question_tag_taxonomy import (
     normalize_question_category,
     normalize_question_tags,
 )
-from core.services.output_validation import (
+from core.services.question_bank.output_validation import (
     default_checker_explanation,
     normalize_answer_validation_mode,
 )

@@ -9,6 +9,9 @@ from fastapi import FastAPI, Request
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
+from observability.metrics.collectors import observe_request
+from utils.context import set_request_id
+
 logger = logging.getLogger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -26,8 +29,8 @@ def _request_id_from(request: Request) -> str:
     return supplied if _SAFE_REQUEST_ID.fullmatch(supplied) else uuid4().hex
 
 
-def setup_request_logging(app: FastAPI) -> None:
-    """Install structured request logging middleware."""
+def setup_request_logging(app: FastAPI, app_name: str = "core") -> None:
+    """Install structured request logging and request metrics middleware."""
 
     @app.middleware("http")
     async def log_request(
@@ -36,10 +39,26 @@ def setup_request_logging(app: FastAPI) -> None:
     ) -> Response:
         request_id = _request_id_from(request)
         request.state.request_id = request_id
+        # Also publish it ambiently so code far from the route -- services,
+        # repositories, outbound adapters -- can log the same correlation ID
+        # without it being threaded through every call signature.
+        set_request_id(request_id)
         started_at = time.perf_counter()
         response = await call_next(request)
         response.headers[REQUEST_ID_HEADER] = request_id
-        duration_ms = (time.perf_counter() - started_at) * 1000
+        duration_seconds = time.perf_counter() - started_at
+        # Prefer the templated route ("/assessments/{assessment_id}") over the
+        # concrete URL so metric labels stay bounded by the route table instead of
+        # minting a series per assessment.
+        route = request.scope.get("route")
+        metric_path = getattr(route, "path", None) or request.url.path
+        observe_request(
+            app=app_name,
+            path=metric_path,
+            method=request.method,
+            status=response.status_code,
+            duration_seconds=duration_seconds,
+        )
         logger.info(
             "http_request request_id=%s method=%s path=%s status_code=%s "
             "duration_ms=%.2f",
@@ -47,6 +66,6 @@ def setup_request_logging(app: FastAPI) -> None:
             request.method,
             request.url.path,
             response.status_code,
-            duration_ms,
+            duration_seconds * 1000,
         )
         return response

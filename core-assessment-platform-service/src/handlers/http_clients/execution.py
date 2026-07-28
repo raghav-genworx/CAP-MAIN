@@ -11,6 +11,7 @@ from config.settings import Settings
 from core.exceptions.assessment import ExecutionAdapterError
 from schemas.assessments import ExecutionCaseResult
 from schemas.question_bank import TestCase
+from utils.helpers.concurrency import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class ExecutionAdapterService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def execute_batch(
+    async def execute_batch_async(
         self,
         *,
         source_code: str,
@@ -64,13 +65,13 @@ class ExecutionAdapterService:
             f"{self._settings.code_execution_api_base_url.rstrip('/')}/executions/batch"
         )
         try:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=self._settings.code_execution_request_timeout_seconds,
                 headers={
                     "X-Internal-Service-Token": self._settings.internal_service_token,
                 },
             ) as client:
-                response = client.post(url, json=payload)
+                response = await client.post(url, json=payload)
                 if response.is_error:
                     logger.error(
                         "execution_service_batch_error status_code=%s payload_shape=%s",
@@ -104,6 +105,34 @@ class ExecutionAdapterService:
             results,
             int(data.get("passed_count") or 0),
             int(data.get("total_count") or 0),
+        )
+
+    def execute_batch(
+        self,
+        *,
+        source_code: str,
+        language: str,
+        test_cases: list[TestCase],
+        run_type: str,
+        time_limit_seconds: float | None = None,
+        memory_limit_kb: int | None = None,
+    ) -> tuple[list[ExecutionCaseResult], int, int]:
+        """Execute one source against a list of test cases, synchronously.
+
+        The transport is async; this bridges for the synchronous service layer so
+        the dozens of existing call sites stay unchanged. Concentrating the bridge
+        here rather than scattering ``run_async`` across callers means there is one
+        line to delete per adapter once the services become coroutines.
+        """
+
+        return run_async(
+            self.execute_batch_async,
+            source_code=source_code,
+            language=language,
+            test_cases=test_cases,
+            run_type=run_type,
+            time_limit_seconds=time_limit_seconds,
+            memory_limit_kb=memory_limit_kb,
         )
 
     @staticmethod
