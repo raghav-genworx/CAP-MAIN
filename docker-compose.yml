@@ -115,6 +115,14 @@ services:
     build:
       context: ./core-assessment-platform-service
     restart: "no"
+    # Neither migration job declared a database dependency. They normally win
+    # the race against postgres starting; after an unclean shutdown postgres
+    # runs crash recovery and refuses connections, and both jobs died with
+    # "the database system is not yet accepting connections", taking every
+    # service that waits on them down with it.
+    depends_on:
+      postgres:
+        condition: service_healthy
     command:
       - sh
       - -c
@@ -228,6 +236,14 @@ services:
     build:
       context: ./core-assessment-platform-service
     restart: "no"
+    # Neither migration job declared a database dependency. They normally win
+    # the race against postgres starting; after an unclean shutdown postgres
+    # runs crash recovery and refuses connections, and both jobs died with
+    # "the database system is not yet accepting connections", taking every
+    # service that waits on them down with it.
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: [ "alembic", "-c", "alembic.evaluation.ini", "upgrade", "head" ]
     env_file:
       - ./code-evaluation-service/.env
