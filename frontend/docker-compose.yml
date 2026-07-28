@@ -1,0 +1,56 @@
+# The recruiter and candidate React application.
+#
+# Self-contained -- open this folder and run it:
+#
+#   cd frontend
+#   docker compose up --build
+#
+# Then http://localhost:5173.
+#
+# Start the backend first, from ../core-assessment-platform-service. This reaches
+# it over the host rather than a shared Docker network, deliberately: a shared
+# network would have to be created before either project could start, which is
+# exactly the setup step this layout avoids. The cost is that the backend must
+# publish its port -- it does, on 8002.
+name: cap-frontend
+
+services:
+  frontend:
+    build:
+      context: .
+      target: development
+    restart: unless-stopped
+    # host.docker.internal is provided by Docker Desktop; the host-gateway entry
+    # makes the same name work on Linux, where it is not built in.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ../.env
+        required: false
+      - path: .env
+        required: false
+    environment:
+      # The SPA calls /api/core/... ; Vite rewrites /api to /api/v1, so the backend
+      # receives /api/v1/core/... -- the prefix it serves directly now that the
+      # gateway is folded in.
+      VITE_API_GATEWAY_BASE_URL: /api
+      # Rollback: point at the gateway's published port (8001) after starting the
+      # backend's `legacy` profile.
+      VITE_DEV_PROXY_TARGET: ${FRONTEND_PROXY_TARGET:-http://host.docker.internal:${CORE_SERVICE_PORT:-8002}}
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - frontend-node-modules:/app/node_modules
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:5173/ >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  frontend-node-modules:
+    name: cap-frontend-node-modules

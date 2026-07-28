@@ -1,0 +1,360 @@
+# The complete backend: database, cache, sandbox, API and worker.
+#
+# Self-contained -- open this folder and run it, no setup step and no external
+# network or volume to create first:
+#
+#   cd core-assessment-platform-service
+#   docker compose up --build
+#
+# The API is on http://localhost:8002/api/v1/health. Start the frontend from
+# ../frontend with its own compose file.
+#
+# The pre-consolidation gateway, execution and evaluation services are defined at
+# the bottom behind the `legacy` profile, so they do not start by default but can
+# still reach this project's database and sandbox when they are needed for
+# rollback:
+#
+#   docker compose --profile legacy up -d
+name: cap-backend
+
+x-api-healthcheck: &api-healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
+  interval: 30s
+  timeout: 30s
+  retries: 5
+  start_period: 30s
+
+# The repository-root .env carries shared infrastructure values and provider keys;
+# this service's own .env carries its standalone settings and wins on conflict.
+# Both are optional so a fresh clone still starts on the defaults below.
+x-env-files: &env-files
+  - path: ../.env
+    required: false
+  - path: .env
+    required: false
+
+x-service-common-env: &service-common-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_PREFIX: /api/v1
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/1
+  # Judge0 reachability is shared, not execution-only: with
+  # EXECUTION_TRANSPORT=inprocess any process may drive the sandbox directly.
+  JUDGE0_BASE_URL: http://judge0-server:2358
+  JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
+  JUDGE0_AUTH_HEADER: ${JUDGE0_AUTH_HEADER:-X-Auth-Token}
+  JUDGE0_REQUEST_TIMEOUT_SECONDS: ${JUDGE0_REQUEST_TIMEOUT_SECONDS:-10}
+  JUDGE0_POLL_INTERVAL_SECONDS: ${JUDGE0_POLL_INTERVAL_SECONDS:-0.5}
+  JUDGE0_MAX_POLL_ATTEMPTS: ${JUDGE0_MAX_POLL_ATTEMPTS:-30}
+  DEFAULT_CPU_TIME_LIMIT_SECONDS: ${DEFAULT_CPU_TIME_LIMIT_SECONDS:-2}
+  DEFAULT_MEMORY_LIMIT_KB: ${DEFAULT_MEMORY_LIMIT_KB:-128000}
+  JAVA_MINIMUM_MEMORY_LIMIT_KB: ${JAVA_MINIMUM_MEMORY_LIMIT_KB:-512000}
+
+x-database-url: &database-url
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
+
+x-evaluation-env: &evaluation-env
+  EVALUATION_REPORT_DIR: /app/data/reports
+  EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
+  EVALUATION_WORKER_BATCH_SIZE: ${EVALUATION_WORKER_BATCH_SIZE:-20}
+  EVALUATION_WORKER_POLL_INTERVAL_SECONDS: ${EVALUATION_WORKER_POLL_INTERVAL_SECONDS:-5}
+  EVALUATION_RETENTION_DAYS: ${EVALUATION_RETENTION_DAYS:-365}
+  EVALUATION_JOB_LEASE_SECONDS: ${EVALUATION_JOB_LEASE_SECONDS:-300}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+  GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+  GROQ_REQUEST_TIMEOUT_SECONDS: ${GROQ_REQUEST_TIMEOUT_SECONDS:-60}
+  GROQ_RETRY_COUNT: ${GROQ_RETRY_COUNT:-3}
+  GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
+
+services:
+  # --- infrastructure --------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cap_core}
+      POSTGRES_USER: ${POSTGRES_USER:-cap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
+      JUDGE0_POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - cap-postgres-data:/var/lib/postgresql/data
+      - ../docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - sh
+      - -c
+      - redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cap_redis_password}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - cap-redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$${REDIS_PASSWORD}" ping | grep PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  judge0-server:
+    image: cap/judge0-slim:local
+    build: &judge0-slim-build
+      context: ../docker/judge0
+      dockerfile: Dockerfile
+      args:
+        JUDGE0_REF: ${JUDGE0_REF:-master}
+    volumes:
+      - ../docker/judge0/judge0.conf:/api/judge0.conf:ro
+    environment: &judge0-env
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${JUDGE0_POSTGRES_DB:-judge0}
+      POSTGRES_USER: ${POSTGRES_USER:-cap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cap_password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cap_redis_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${JUDGE0_PORT:-12358}:2358"
+    # Judge0 builds the cgroup sandboxes it runs submissions in. This is why
+    # candidate code never executes inside the application process.
+    privileged: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:2358/languages >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  judge0-worker:
+    image: cap/judge0-slim:local
+    build: *judge0-slim-build
+    command: [ "./scripts/workers" ]
+    volumes:
+      - ../docker/judge0/judge0.conf:/api/judge0.conf:ro
+    environment: *judge0-env
+    depends_on:
+      judge0-server:
+        condition: service_healthy
+    privileged: true
+    restart: unless-stopped
+
+  # --- migrations -----------------------------------------------------------
+  # Two Alembic trees against one database, each with its own version table.
+  # Core runs first: it owns the schema the evaluation tables sit beside.
+  core-assessment-migrate:
+    build:
+      context: .
+    restart: "no"
+    command: [ "alembic", "-c", "alembic.ini", "upgrade", "head" ]
+    env_file: *env-files
+    environment:
+      <<: *database-url
+      APP_ENV: ${APP_ENV:-development}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  code-evaluation-migrate:
+    build:
+      context: .
+    restart: "no"
+    command: [ "alembic", "-c", "alembic.evaluation.ini", "upgrade", "head" ]
+    env_file: *env-files
+    environment:
+      <<: *database-url
+      APP_ENV: ${APP_ENV:-development}
+      EVALUATION_DB_SCHEMA: ${EVALUATION_DB_SCHEMA:-public}
+    depends_on:
+      core-assessment-migrate:
+        condition: service_completed_successfully
+
+  # --- application ----------------------------------------------------------
+  core-assessment-platform-service:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: *env-files
+    environment:
+      <<: [*service-common-env, *database-url, *evaluation-env]
+      APP_NAME: Core Assessment Platform Service
+      # Execution and evaluation are reached in-process. Set either to "http" and
+      # start the `legacy` profile to route over the network again.
+      EXECUTION_TRANSPORT: ${EXECUTION_TRANSPORT:-inprocess}
+      EVALUATION_TRANSPORT: ${EVALUATION_TRANSPORT:-inprocess}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      AUTO_CREATE_RECRUITER_ROLE: ${AUTO_CREATE_RECRUITER_ROLE:-true}
+      SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
+      # Only consulted when the matching transport is "http".
+      CODE_EXECUTION_API_BASE_URL: ${CODE_EXECUTION_API_BASE_URL:-http://code-execution-service:8000/api/v1}
+      CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS: ${CODE_EXECUTION_REQUEST_TIMEOUT_SECONDS:-300}
+      CODE_EVALUATION_API_BASE_URL: ${CODE_EVALUATION_API_BASE_URL:-http://code-evaluation-service:8000/api/v1}
+      CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS: ${CODE_EVALUATION_REQUEST_TIMEOUT_SECONDS:-30}
+      GROQ_API_KEY_1: ${GROQ_API_KEY_1:-}
+      GROQ_API_KEY_2: ${GROQ_API_KEY_2:-}
+      GROQ_API_KEY_3: ${GROQ_API_KEY_3:-}
+      GROQ_API_KEY_4: ${GROQ_API_KEY_4:-}
+      GROQ_GPT_OSS_MODEL: ${GROQ_GPT_OSS_MODEL:-openai/gpt-oss-120b}
+      GROQ_RETRY_BACKOFF_SECONDS: ${GROQ_RETRY_BACKOFF_SECONDS:-0.5}
+      BREVO_REQUEST_TIMEOUT_SECONDS: ${BREVO_REQUEST_TIMEOUT_SECONDS:-30}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      INVITE_TOKEN_PEPPER: ${INVITE_TOKEN_PEPPER:-change-me-local-invite-token-pepper}
+      CANDIDATE_SESSION_SECRET: ${CANDIDATE_SESSION_SECRET:-change-me-local-candidate-session-secret}
+    depends_on:
+      code-evaluation-migrate:
+        condition: service_completed_successfully
+      judge0-server:
+        condition: service_healthy
+    ports:
+      - "${CORE_SERVICE_PORT:-8002}:8000"
+    volumes:
+      - ./src:/app/src:ro
+      # Shared with the worker: whichever process generates a report, the process
+      # serving the download has to see the file.
+      - cap-evaluation-data:/app/data
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
+    healthcheck: *api-healthcheck
+
+  code-evaluation-worker:
+    build:
+      context: .
+    restart: unless-stopped
+    command: [ "python", "-m", "worker" ]
+    env_file: *env-files
+    environment:
+      <<: [*service-common-env, *database-url, *evaluation-env]
+      APP_NAME: Code Evaluation Worker
+      SEED_DEMO_EVALUATIONS: "false"
+      # /app/data is the one writable path in the image (chowned to appuser).
+      # Beat shelves its schedule here; left in the working directory it dies on a
+      # permission error while the worker still reports ready.
+      CELERY_BEAT_SCHEDULE_PATH: /app/data/celerybeat-schedule
+    depends_on:
+      core-assessment-platform-service:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      - cap-evaluation-data:/app/data
+
+  # --- legacy topology, rollback only ---------------------------------------
+  # Nothing calls these: the browser reaches the API directly and the API reaches
+  # execution and evaluation in-process. They are here so the consolidation can be
+  # undone without a rebuild, and in this project rather than a separate one so
+  # they can still resolve postgres, redis and judge0-server.
+  #
+  #   docker compose --profile legacy up -d
+  #   EXECUTION_TRANSPORT=http EVALUATION_TRANSPORT=http docker compose up -d
+  #
+  # All three run the consolidated image and differ only in CAP_APP. Delete this
+  # block once a full assessment cycle has run against the merged backend.
+  api-gateway-service:
+    profiles: [legacy]
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: *env-files
+    environment:
+      <<: *service-common-env
+      CAP_APP: gateway
+      APP_NAME: API Gateway Service
+      CORE_SERVICE_BASE_URL: http://core-assessment-platform-service:8000
+      CODE_EXECUTION_SERVICE_BASE_URL: ${CODE_EXECUTION_SERVICE_BASE_URL:-http://code-execution-service:8000}
+      CODE_EVALUATION_SERVICE_BASE_URL: ${CODE_EVALUATION_SERVICE_BASE_URL:-http://code-evaluation-service:8000}
+      UPSTREAM_REQUEST_TIMEOUT_SECONDS: ${UPSTREAM_REQUEST_TIMEOUT_SECONDS:-10}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+      CANDIDATE_SESSION_SECRET: ${CANDIDATE_SESSION_SECRET:-change-me-local-candidate-session-secret}
+    ports:
+      - "${API_GATEWAY_PORT:-8001}:8000"
+    volumes:
+      - ./src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck: *api-healthcheck
+
+  code-execution-service:
+    profiles: [legacy]
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: *env-files
+    environment:
+      <<: [*service-common-env, *database-url]
+      CAP_APP: execution
+      APP_NAME: Code Execution Service
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+    ports:
+      - "${CODE_EXECUTION_PORT:-8003}:8000"
+    volumes:
+      - ./src:/app/src:ro
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck: *api-healthcheck
+
+  code-evaluation-service:
+    profiles: [legacy]
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: *env-files
+    environment:
+      <<: [*service-common-env, *database-url, *evaluation-env]
+      CAP_APP: evaluation
+      APP_NAME: Code Evaluation Service
+      SEED_DEMO_EVALUATIONS: ${SEED_DEMO_EVALUATIONS:-false}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
+    ports:
+      - "${CODE_EVALUATION_PORT:-8004}:8000"
+    volumes:
+      - ./src:/app/src:ro
+      - cap-evaluation-data:/app/data
+    command:
+      - sh
+      - -c
+      - uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck: *api-healthcheck
+
+volumes:
+  # Explicit names rather than project-prefixed. Compose namespaces volumes by
+  # project, so renaming or moving a project silently points it at a new empty
+  # volume. Pinning the name keeps the data attached to the data, not the topology.
+  cap-postgres-data:
+    name: cap-postgres-data
+  cap-redis-data:
+    name: cap-redis-data
+  cap-evaluation-data:
+    name: cap-evaluation-data

@@ -69,17 +69,16 @@ delete per adapter when the services become coroutines.
 **Owner action:** schedule the async database phase. Until then this is the
 largest open gap.
 
-### 2. Compose files live at the repository root, split by concern
+### 2. Compose lives at the service root, and covers its own infrastructure
 
 **COE:** the template places a single `docker-compose.yml` at the service root.
 
-**Why:** the stack spans more than this service. Judge0, PostgreSQL, Redis and the
-SPA are orchestrated alongside it, so the files sit at the repository root and are
-split into independent Compose projects -- `compose.infra.yml`,
-`compose.backend.yml`, `compose.frontend.yml`, plus `compose.legacy.yml` for
-rollback -- driven by the root `Makefile`. Independent projects mean `depends_on`
-cannot span them, which is why the migration job blocks on the database itself
-via `python -m wait_for_db`.
+**Met, with a note.** `core-assessment-platform-service/docker-compose.yml` is at
+the service root as the template asks. It additionally defines PostgreSQL, Redis
+and Judge0, because the service cannot run without them and keeping them in the
+same Compose project is what lets `depends_on` gate start-up -- an earlier split
+into separate projects broke that and needed a hand-written database wait to
+compensate. The SPA has its own file at `frontend/docker-compose.yml`.
 
 ### 3. `src/worker.py` is outside the template
 

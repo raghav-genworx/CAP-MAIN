@@ -169,13 +169,14 @@ jobs:
           cp code-execution-service/.env.example code-execution-service/.env
           cp core-assessment-platform-service/.env.example core-assessment-platform-service/.env
           cp frontend/.env.example frontend/.env
-      # Infrastructure, backend and frontend are independent Compose projects, so
-      # each file is validated on its own -- there is no single entry point to
-      # check. compose.legacy.yml is included: it is the rollback target and has
-      # to stay parseable even though nothing starts it.
-      - name: Validate every Compose project
+      # One Compose file per folder, each self-contained, so each is validated
+      # from its own directory. The backend's `legacy` profile is included: it is
+      # the rollback target and has to stay parseable even though nothing starts it.
+      - name: Validate the backend Compose file
+        working-directory: core-assessment-platform-service
         run: |
-          for f in compose.infra.yml compose.backend.yml compose.frontend.yml compose.legacy.yml; do
-            echo "validating $f"
-            docker compose -f "$f" config --quiet
-          done
+          docker compose config --quiet
+          docker compose --profile legacy config --quiet
+      - name: Validate the frontend Compose file
+        working-directory: frontend
+        run: docker compose config --quiet
