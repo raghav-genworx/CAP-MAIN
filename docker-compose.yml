@@ -16,8 +16,20 @@ x-service-common-env: &service-common-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   API_PREFIX: /api/v1
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
   CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
   CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/1
+  # Judge0 reachability is shared, not execution-service-only: with
+  # EXECUTION_TRANSPORT=inprocess any process may drive the sandbox directly.
+  JUDGE0_BASE_URL: http://judge0-server:2358
+  JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
+  JUDGE0_AUTH_HEADER: ${JUDGE0_AUTH_HEADER:-X-Auth-Token}
+  JUDGE0_REQUEST_TIMEOUT_SECONDS: ${JUDGE0_REQUEST_TIMEOUT_SECONDS:-10}
+  JUDGE0_POLL_INTERVAL_SECONDS: ${JUDGE0_POLL_INTERVAL_SECONDS:-0.5}
+  JUDGE0_MAX_POLL_ATTEMPTS: ${JUDGE0_MAX_POLL_ATTEMPTS:-30}
+  DEFAULT_CPU_TIME_LIMIT_SECONDS: ${DEFAULT_CPU_TIME_LIMIT_SECONDS:-2}
+  DEFAULT_MEMORY_LIMIT_KB: ${DEFAULT_MEMORY_LIMIT_KB:-128000}
+  JAVA_MINIMUM_MEMORY_LIMIT_KB: ${JAVA_MINIMUM_MEMORY_LIMIT_KB:-512000}
 
 x-judge0-slim-build: &judge0-slim-build
   context: ./docker/judge0
@@ -67,13 +79,16 @@ services:
       retries: 5
 
   api-gateway-service:
+    # All four applications are built from the consolidated backend image and
+    # selected with CAP_APP. See core-assessment-platform-service/src/main.py.
     build:
-      context: ./api-gateway-service
+      context: ./core-assessment-platform-service
     restart: unless-stopped
     env_file:
       - ./api-gateway-service/.env
     environment:
       <<: *service-common-env
+      CAP_APP: gateway
       APP_NAME: API Gateway Service
       CORE_SERVICE_BASE_URL: http://core-assessment-platform-service:8000
       CODE_EXECUTION_SERVICE_BASE_URL: ${CODE_EXECUTION_SERVICE_BASE_URL:-http://code-execution-service:8000}
@@ -89,7 +104,7 @@ services:
     ports:
       - "${API_GATEWAY_PORT:-8001}:8000"
     volumes:
-      - ./api-gateway-service/src:/app/src:ro
+      - ./core-assessment-platform-service/src:/app/src:ro
     command:
       - sh
       - -c
@@ -119,6 +134,13 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Core Assessment Platform Service
+      # Phase 4: core reaches execution and evaluation in-process. Set either
+      # back to "http" to route over the network again -- no redeploy needed.
+      EXECUTION_TRANSPORT: ${EXECUTION_TRANSPORT:-inprocess}
+      EVALUATION_TRANSPORT: ${EVALUATION_TRANSPORT:-inprocess}
+      # With evaluation in-process, this process generates the PDFs and so
+      # needs the report directory the evaluation container already has.
+      EVALUATION_REPORT_DIR: /app/data/reports
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       REDIS_URL: redis://:${REDIS_PASSWORD:-cap_redis_password}@redis:6379/0
@@ -147,12 +169,17 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      judge0-server:
+        condition: service_healthy
       code-evaluation-service:
         condition: service_started
     ports:
       - "${CORE_SERVICE_PORT:-8002}:8000"
     volumes:
       - ./core-assessment-platform-service/src:/app/src:ro
+      # Shared with the evaluation service and worker: whichever process
+      # generates a report, the process serving the download must see it.
+      - cap-evaluation-data:/app/data
     command:
       - sh
       - -c
@@ -161,12 +188,13 @@ services:
 
   code-execution-service:
     build:
-      context: ./code-execution-service
+      context: ./core-assessment-platform-service
     restart: unless-stopped
     env_file:
       - ./code-execution-service/.env
     environment:
       <<: *service-common-env
+      CAP_APP: execution
       APP_NAME: Code Execution Service
       JUDGE0_BASE_URL: http://judge0-server:2358
       JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
@@ -189,7 +217,7 @@ services:
     ports:
       - "${CODE_EXECUTION_PORT:-8003}:8000"
     volumes:
-      - ./code-execution-service/src:/app/src:ro
+      - ./core-assessment-platform-service/src:/app/src:ro
     command:
       - sh
       - -c
@@ -198,9 +226,9 @@ services:
 
   code-evaluation-migrate:
     build:
-      context: ./code-evaluation-service
+      context: ./core-assessment-platform-service
     restart: "no"
-    command: [ "alembic", "-c", "alembic.ini", "upgrade", "head" ]
+    command: [ "alembic", "-c", "alembic.evaluation.ini", "upgrade", "head" ]
     env_file:
       - ./code-evaluation-service/.env
     environment:
@@ -211,12 +239,13 @@ services:
 
   code-evaluation-service:
     build:
-      context: ./code-evaluation-service
+      context: ./core-assessment-platform-service
     restart: unless-stopped
     env_file:
       - ./code-evaluation-service/.env
     environment:
       <<: *service-common-env
+      CAP_APP: evaluation
       APP_NAME: Code Evaluation Service
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       EVALUATION_REPORT_DIR: /app/data/reports
@@ -235,7 +264,7 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-local-internal-service-token}
     volumes:
       - cap-evaluation-data:/app/data
-      - ./code-evaluation-service/src:/app/src:ro
+      - ./core-assessment-platform-service/src:/app/src:ro
     depends_on:
       code-evaluation-migrate:
         condition: service_completed_successfully
@@ -251,7 +280,7 @@ services:
 
   code-evaluation-worker:
     build:
-      context: ./code-evaluation-service
+      context: ./core-assessment-platform-service
     restart: unless-stopped
     command: [ "python", "-m", "worker" ]
     env_file:
@@ -259,6 +288,8 @@ services:
     environment:
       <<: *service-common-env
       APP_NAME: Code Evaluation Worker
+      # /app/data is the one writable path in the image (chowned to appuser).
+      CELERY_BEAT_SCHEDULE_PATH: /app/data/celerybeat-schedule
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cap_user}:${POSTGRES_PASSWORD:-cap_password}@postgres:5432/${POSTGRES_DB:-cap_core}}
       EVALUATION_REPORT_DIR: /app/data/reports
       SEED_DEMO_EVALUATIONS: "false"
@@ -275,7 +306,7 @@ services:
       GROQ_MAX_SOURCE_CHARS: ${GROQ_MAX_SOURCE_CHARS:-80000}
     volumes:
       - cap-evaluation-data:/app/data
-      - ./code-evaluation-service/src:/app/src:ro
+      - ./core-assessment-platform-service/src:/app/src:ro
     depends_on:
       code-evaluation-service:
         condition: service_healthy
@@ -287,10 +318,14 @@ services:
     restart: unless-stopped
     environment:
       VITE_API_GATEWAY_BASE_URL: /api
-      VITE_DEV_PROXY_TARGET: http://api-gateway-service:8000
+      # Phase 5: the backend serves the browser-facing /api/v1/core prefix
+      # itself, so the gateway hop is gone. Point this back at
+      # http://api-gateway-service:8000 to roll back -- the gateway is still
+      # deployed and still passes the full contract suite.
+      VITE_DEV_PROXY_TARGET: ${FRONTEND_PROXY_TARGET:-http://core-assessment-platform-service:8000}
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
-      api-gateway-service:
+      core-assessment-platform-service:
         condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-5173}:5173"

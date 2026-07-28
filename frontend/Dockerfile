@@ -27,7 +27,9 @@ RUN --mount=type=secret,id=frontend_env,target=/app/.env npm run build
 
 FROM nginx:1.27-alpine
 
-ENV API_GATEWAY_PROXY_URL=http://api-gateway-service:8000/api/v1
+# The backend serves /api/v1/core itself since the gateway was folded in.
+# Override back to the gateway URL to roll the cutover back.
+ENV API_GATEWAY_PROXY_URL=http://core-assessment-platform-service:8000/api/v1
 
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=builder /app/dist /usr/share/nginx/html
