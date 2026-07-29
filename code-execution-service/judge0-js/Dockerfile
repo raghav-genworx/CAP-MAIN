@@ -3,7 +3,7 @@
 FROM ruby:2.7.8-slim-bullseye
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG JUDGE0_REF=master
+ARG JUDGE0_REF=v1.13.1
 ARG NODE_VERSION=22.17.1
 ARG TARGETARCH
 
@@ -13,15 +13,15 @@ ENV RAILS_ENV=production \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8 \
     BOX_ROOT=/var/local/lib/isolate \
-    JUDGE0_VERSION=custom-slim \
+    JUDGE0_VERSION=${JUDGE0_REF} \
     NODE_VERSION=${NODE_VERSION}
 
 RUN set -eux; \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      build-essential \
       bash \
+      build-essential \
       ca-certificates \
       cron \
       curl \
@@ -33,6 +33,7 @@ RUN set -eux; \
       openjdk-11-jdk-headless \
       procps \
       python3 \
+      shared-mime-info \
       sudo \
       xz-utils; \
     rm -rf /var/lib/apt/lists/*; \
@@ -76,6 +77,15 @@ RUN set -eux; \
 
 COPY languages/active.rb /api/db/languages/active.rb
 COPY languages/archived.rb /api/db/languages/archived.rb
+
+# The judge0 source tarball ships its own sample judge0.conf at /api/judge0.conf.
+# scripts/load-config prefers that path over /judge0.conf and sources it with
+# `set -o allexport`, which overwrites anything Compose injected -- so the sample
+# defaults (POSTGRES_HOST=db, POSTGRES_DB=judge0) would win and the server would
+# never reach the isolated database. The official image avoids this because
+# judge0.conf is listed in judge0's .dockerignore; building from the tarball
+# keeps it. Overwrite it with ours so load-config reads the isolated settings.
+COPY judge0.conf /api/judge0.conf
 
 RUN set -eux; \
     bundle _2.1.4_ config set without "development test"; \

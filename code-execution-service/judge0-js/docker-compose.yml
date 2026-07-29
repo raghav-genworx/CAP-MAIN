@@ -1,0 +1,98 @@
+name: judge0-js
+
+services:
+  judge0-server:
+    container_name: judge0-js-server
+    image: judge0-js-node:local
+    build:
+      context: .
+      args:
+        JUDGE0_REF: v1.13.1
+        NODE_VERSION: 22.17.1
+    env_file:
+      - judge0.conf
+    command: ["/api/scripts/server"]
+    privileged: true
+    ports:
+      - "12359:2358"
+    volumes:
+      - judge0_js_server_box:/var/local/lib/isolate
+      # scripts/load-config sources /api/judge0.conf with `set -o allexport`,
+      # overriding env_file/environment. The image bakes this same file in, but
+      # mounting it means a config change needs only `up -d`, not a rebuild.
+      - ./judge0.conf:/api/judge0.conf:ro
+      # Mounted for the same reason: the language table is seeded from these at
+      # `db:seed`, so editing them needs only `down -v && up -d`, not a rebuild.
+      - ./languages/active.rb:/api/db/languages/active.rb:ro
+      - ./languages/archived.rb:/api/db/languages/archived.rb:ro
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  judge0-worker:
+    container_name: judge0-js-worker
+    image: judge0-js-node:local
+    build:
+      context: .
+      args:
+        JUDGE0_REF: v1.13.1
+        NODE_VERSION: 22.17.1
+    env_file:
+      - judge0.conf
+    command: ["/api/scripts/workers"]
+    privileged: true
+    volumes:
+      - judge0_js_worker_box:/var/local/lib/isolate
+      - ./judge0.conf:/api/judge0.conf:ro
+      # Mounted for the same reason: the language table is seeded from these at
+      # `db:seed`, so editing them needs only `down -v && up -d`, not a rebuild.
+      - ./languages/active.rb:/api/db/languages/active.rb:ro
+      - ./languages/archived.rb:/api/db/languages/archived.rb:ro
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  judge0-db:
+    container_name: judge0-js-db
+    image: postgres:13.16
+    environment:
+      POSTGRES_DB: judge0_js
+      POSTGRES_USER: judge0_js
+      POSTGRES_PASSWORD: judge0-js-postgres-password
+    volumes:
+      - judge0_js_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0_js -d judge0_js"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  judge0-redis:
+    container_name: judge0-js-redis
+    image: redis:7.2.5
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "judge0-js-redis-password"]
+    volumes:
+      - judge0_js_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "judge0-js-redis-password", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  judge0_js_postgres_data:
+    name: judge0_js_postgres_data
+  judge0_js_redis_data:
+    name: judge0_js_redis_data
+  judge0_js_server_box:
+    name: judge0_js_server_box
+  judge0_js_worker_box:
+    name: judge0_js_worker_box
